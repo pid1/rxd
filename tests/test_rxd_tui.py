@@ -85,7 +85,10 @@ def state_for(name):
             "level_dbfs": -62.4, "tuner_hz": 132028000.0, "offset_hz": 50000.0,
             "sample_rate": 240000, "dsp_cpu": 0.25, "blocks": 100, "dropped": 0,
             "error": None, "running": True, "gains": list(GAINS),
-            "station": {"call": "KA1PID", "grid": "EM13lc"},
+            "station": {"call": "KA1PID", "grid": "EM13lc", "file": "/etc/rxd/station.json",
+                        "upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
+                                        "switch": True}, "problems": []},
+            "api_version": 1, "version": "0.3.0",
             # ghostnet's clock is off, to show the warning; the rest are on GPS
             "clock": {"synced": False, "source": None, "offset_s": 3.2} if name == "ghostnet"
             else {"synced": True, "source": "GPS", "offset_s": 0.0},
@@ -141,11 +144,19 @@ class FakeRxd:
 
     A profile switch really drops: the server stops listening for drop
     seconds, then comes back on the same port on the new profile. The audio
-    stream is a 440 Hz tone."""
+    stream is a 440 Hz tone. api=1 serves /api/v1/ (and the old /api/
+    aliases); api=0 plays an rxd from before API versions, which has neither
+    /api/v1/ nor api_version; api=2 says it speaks version 2."""
 
     def __init__(self, profile="40m", spectrum=True, profiles=True, gains=GAINS, drop=2.0,
-                 port=0):
+                 port=0, api=1):
         self.state = state_for(profile)
+        self.api = api
+        if api == 0:
+            self.state.pop("api_version")
+            self.state.pop("version")
+        else:
+            self.state["api_version"] = api
         self.state["gains"] = list(gains)
         self.spectrum = spectrum
         self.has_profiles = profiles
@@ -174,8 +185,15 @@ class FakeRxd:
                 self.end_headers()
                 self.wfile.write(body)
 
-            def do_GET(self):
+            def route(self):
+                """/api/v1/X -> /api/X, as rxd does; an old rxd (api=0) has no v1."""
                 path, _, query = self.path.partition("?")
+                if path.startswith("/api/v1/"):
+                    path = None if fake.api == 0 else "/api/" + path[len("/api/v1/"):]
+                return path, query
+
+            def do_GET(self):
+                path, query = self.route()
                 q = urllib.parse.parse_qs(query)
                 if path == "/api/status":
                     with fake.lock:
@@ -231,7 +249,10 @@ class FakeRxd:
             def do_POST(self):
                 n = int(self.headers.get("Content-Length", 0))
                 doc = json.loads(self.rfile.read(n))
-                if self.path == "/api/profile":
+                path, _ = self.route()
+                if path is None:
+                    return self.send(404, {"error": "not found"})
+                if path == "/api/profile":
                     if not fake.has_profiles:
                         return self.send(404, {"error": "not found"})
                     name = doc.get("name")
@@ -883,9 +904,27 @@ class Views(unittest.TestCase):
 
     def test_flip_needed(self):
         fm = PROFILES[2]
-        self.assertTrue(t.flip_needed(fm, {"upconverter_hz": 125e6}))
-        self.assertFalse(t.flip_needed(fm, {"upconverter_hz": 0.0}))
+        hiu = {"station": {"upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
+                                           "switch": True}}}
+        self.assertTrue(t.flip_needed(fm, dict(hiu, upconverter_hz=125e6)))
+        self.assertFalse(t.flip_needed(fm, dict(hiu, upconverter_hz=0.0)))
         self.assertFalse(t.flip_needed(fm, {}))
+        # no switch to flip: an upconverter that switches itself, or none
+        auto = {"station": {"upconverter": dict(hiu["station"]["upconverter"], switch=False)}}
+        self.assertFalse(t.flip_needed(fm, dict(auto, upconverter_hz=125e6)))
+        self.assertFalse(t.flip_needed(fm, {"station": {"upconverter": None},
+                                            "upconverter_hz": 125e6}))
+        self.assertEqual(t.up_name(hiu), "Ham It Up")
+        self.assertEqual(t.up_name({}), "Upconverter")
+
+    def test_api_mismatch(self):
+        self.assertIsNone(t.api_mismatch(200, {"api_version": 1}))
+        self.assertIn("rxd 0.3.0 or later", t.api_mismatch(404, {"error": "not found"}))
+        self.assertIn("rxd 0.3.0 or later", t.api_mismatch(200, {"freq": 7e6}))
+        self.assertEqual(t.api_mismatch(200, {"api_version": 2}),
+                         "this rxd speaks API version 2; this rxd-tui speaks 1")
+        # an rxd that speaks only another version says so in its 404
+        self.assertIn("version 3", t.api_mismatch(404, {"api_version": 3}))
 
 
 class Js8Lines(unittest.TestCase):
@@ -1477,6 +1516,23 @@ class Drawing(unittest.TestCase):
         self.assertIn("✕ NO RXD", text)
         self.assertIn("Can't reach rxd", text)
 
+    def test_another_api_says_so_plainly(self):
+        app = app_on("40m", reachable=False)
+        app.p.why = t.api_mismatch(200, {"api_version": 2})
+        text = frame(app, 24, 100).text()
+        self.assertIn("This rxd speaks API version 2; this rxd-tui speaks 1.", text)
+        self.assertNotIn("Can't reach rxd", text)
+
+    def test_no_upconverter_no_upconverter_ui(self):
+        app = app_on("40m")
+        app.p.status["station"] = dict(app.p.status["station"], upconverter=None)
+        app.p.status["upconverter_hz"] = 0.0
+        for view in ("manual", "listen", "digital"):
+            app.view = view
+            text = frame(app, 30, 100).text()
+            self.assertNotIn("Ham It Up", text, view)
+            self.assertNotIn("Flip", text, view)
+
     def test_tiny_and_odd_sizes(self):
         self.assertIn("too small", frame(app_on("40m"), 8, 20).text())
         for name in ("ghostnet", "wspr", "noaa", "fm-105.3", "40m"):
@@ -1725,6 +1781,16 @@ class AgainstFakeRxd(unittest.TestCase):
         self.assertFalse(p._status())
         self.assertFalse(p.reachable)
         self.assertEqual(p.why, "connection refused")
+
+    def test_poller_old_or_other_api(self):
+        for api, why in ((0, "this rxd has no API v1; rxd-tui needs rxd 0.3.0 or later"),
+                         (2, "this rxd speaks API version 2; this rxd-tui speaks 1")):
+            fake = FakeRxd(api=api)
+            self.addCleanup(fake.close)
+            p = t.Poller(t.Link(fake.url))
+            self.assertFalse(p._status())
+            self.assertFalse(p.reachable)
+            self.assertEqual(p.why, why)
 
     def test_no_profiles_endpoint(self):
         fake = FakeRxd(profiles=False)

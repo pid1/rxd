@@ -769,7 +769,7 @@ class Tui(unittest.TestCase):
         p.bands({"plan": "manual"})
         p._bands(p.bands_req)
         p._bands({"mode": "ft8"})
-        self.assertEqual(link.posts[0], ("/api/bands", {"plan": "manual"}))
+        self.assertEqual(link.posts[0], ("/api/v1/bands", {"plan": "manual"}))
         self.assertEqual(p.status["band_plan"], {"plan": "manual"})
         acks = p.take_bands_acks()
         self.assertEqual(acks[0], ({"plan": "manual"}, None))

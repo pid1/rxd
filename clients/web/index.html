@@ -250,7 +250,7 @@ body[data-view=listen] #gWhy{display:none}
   </div>
 </section>
 <div class="top" data-v="listen manual" data-live>
-  <div id="hiu" class="hiu"><b id="hiuW">Ham It Up: —</b><span id="hiuS"></span></div>
+  <div id="hiu" class="hiu" hidden><b id="hiuW">Upconverter: —</b><span id="hiuS"></span></div>
   <div class="stats" data-v="manual">
     <div class="stat"><span class="k">Receiver</span><span id="sRx" class="v">—</span></div>
     <div class="stat"><span class="k">DSP CPU</span><span id="sCpu" class="v">—</span></div>
@@ -283,8 +283,8 @@ body[data-view=listen] #gWhy{display:none}
     <p class="bpk">Bands Auto may use</p>
     <div id="bpBands" class="bgrid" role="group" aria-label="Bands Auto may use"></div>
     <button type="button" class="btn wide" id="bpDef">Use the default bands</button>
-    <p class="bpk">Other side of the Ham It Up</p>
-    <div class="row2" role="group" aria-label="Other side of the Ham It Up"><button type="button" class="btn" id="bpSideOff">Stay on this side</button><button type="button" class="btn" id="bpSideOn">Allow, I'll flip it</button></div>
+    <p class="bpk" id="bpSideK" hidden>Other side of the <span class="upName">upconverter</span></p>
+    <div class="row2" id="bpSideRow" role="group" aria-label="Other side of the upconverter" hidden><button type="button" class="btn" id="bpSideOff">Stay on this side</button><button type="button" class="btn" id="bpSideOn">Allow, I'll flip it</button></div>
     <p class="bpk">Time on each band when scanning</p>
     <div class="bpstep"><button type="button" class="btn" id="bpDwDn" aria-label="Less time on each band">−</button><span id="bpDw" class="val">—</span><button type="button" class="btn" id="bpDwUp" aria-label="More time on each band">+</button></div>
     <p class="bpk">Check for a better band every</p>
@@ -297,7 +297,7 @@ body[data-view=listen] #gWhy{display:none}
   <div id="jPickL"></div>
 </section>
 <section class="card jstat" id="jStat" data-v="digital" data-live>
-  <div><span class="k">Ham It Up</span><span id="jHiu" class="v">—</span></div>
+  <div id="jHiuRow" hidden><span class="k upName">Upconverter</span><span id="jHiu" class="v">—</span></div>
   <div><span class="k">Receiver</span><span id="jRx" class="v">—</span></div>
   <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
   <div><span class="k">Heard</span><span id="jHeard" class="v">—</span></div>
@@ -483,6 +483,20 @@ function parseFreq(t) {
 }
 
 // ---------------------------------------------------------------- network
+// The rxd HTTP API this page speaks: /api/v1/ (rxd's docs/API.md).
+const API = "/api/v1", API_VERSION = 1;
+// Why the rxd answering can't be talked to, when it speaks another API ("" if it speaks ours).
+function apiMismatch(r) {
+  const has = r.doc && r.doc.api_version;
+  if (r.status === 404 && has === undefined) return "This rxd has no API v1: this page needs rxd 0.3.0 or later.";
+  if (has !== undefined && has !== API_VERSION) return "This rxd speaks API version " + has + "; this page speaks " + API_VERSION + ". Open the page that rxd serves.";
+  if (r.ok && r.doc && has === undefined) return "This rxd doesn't say its API version: this page needs rxd 0.3.0 or later.";
+  return "";
+}
+// The station's upconverter, as rxd reports it (null: it has none).
+function upc() { return (st && st.station && st.station.upconverter) || null; }
+function upName() { const u = upc(); return u ? u.name : "Upconverter"; }
+function upSwitch() { const u = upc(); return !!(u && u.switch); }
 async function api(path, body) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 4000);
@@ -500,7 +514,10 @@ let statusTimer = 0, backoff = 0;
 async function pollStatus() {
   clearTimeout(statusTimer);
   try {
-    const r = await api("/api/status");
+    const r = await api(API + "/status");
+    const why = apiMismatch(r);
+    setText($("down"), why ? "✕ " + why : "✕ Disconnected from rxd. Retrying.");
+    if (why) { fails = 2; throw new Error(why); }
     if (!r.ok || !r.doc || typeof r.doc.freq !== "number") throw new Error("bad status");
     fails = 0; backoff = 0;
     setConn("ok");
@@ -525,7 +542,7 @@ async function flush() {
   if (inflight || !Object.keys(pend).length) return;
   const body = pend; pend = {}; inflight = true;
   try {
-    const r = await api("/api/tune", body);
+    const r = await api(API + "/tune", body);
     if (r.ok && r.doc && typeof r.doc.freq === "number") {
       clearMsg();
       if ("freq" in body) entryText = "";
@@ -593,10 +610,15 @@ function applyStatus(s) {
   const tag = $("modeTag"); tag.hidden = false; setText(tag, localMode);
   for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.m === localMode));
 
-  // Ham It Up
+  // the upconverter, when the station has one (station.json)
   const up = s.upconverter_hz > 0, hiu = $("hiu");
   hiu.className = "hiu" + (up ? " up" : "");
-  setText($("hiuW"), up ? "⇅ Ham It Up: UPCONVERT" : "→ Ham It Up: BYPASS");
+  hiu.hidden = !upc();
+  $("jHiuRow").hidden = !upc();
+  $("bpSideK").hidden = $("bpSideRow").hidden = !upSwitch();
+  for (const el of document.querySelectorAll(".upName")) setText(el, upName());
+  $("bpSideRow").setAttribute("aria-label", "Other side of the " + upName());
+  setText($("hiuW"), up ? "⇅ " + upName() + ": UPCONVERT" : "→ " + upName() + ": BYPASS");
   var below = trim((s.upconvert_below_hz || 30e6) / 1e6, 3) + " MHz";
   setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below " + below : "")
     : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", " + below + " and up" : ""));
@@ -948,7 +970,7 @@ async function pollSpec() {
   const t0 = now(); let wait = 200;
   if (conn === "ok") {
     try {
-      const r = await api("/api/spectrum");
+      const r = await api(API + "/spectrum");
       const s = r.doc;
       if (r.ok && s && Array.isArray(s.bins) && s.bins.length && s.stop_hz > s.start_hz) {
         specAvail(true);
@@ -1034,7 +1056,7 @@ async function loadProfiles() {
   if (profLoading) return;
   profLoading = true; profAskedFor = st && st.profile;
   try {
-    const r = await api("/api/profiles");
+    const r = await api(API + "/profiles");
     if (r.status === 404) { profAvail = false; profiles = null; }
     else if (r.ok && r.doc && Array.isArray(r.doc.profiles)) { profAvail = true; profiles = r.doc; }
   } catch (e) {}
@@ -1114,7 +1136,7 @@ function profBtn(p, top, sub) {
   else {
     el.type = "button";
     if (switching && switching.name === p.name) add("pa", "■ Switching…");
-    else if (!!p.upconvert !== curUp()) add("pw", "▲ Flip the Ham It Up to " + hiuWord(p.upconvert));
+    else if (upSwitch() && !!p.upconvert !== curUp()) add("pw", "▲ Flip the " + upName() + " to " + hiuWord(p.upconvert));
     el.disabled = conn !== "ok" || !!switching;
     el.onclick = () => doSwitch(p);
   }
@@ -1152,13 +1174,13 @@ function renderProfiles() {
 async function doSwitch(p) {
   showPmsg(""); $("swErr").hidden = true; $("flip").hidden = true;
   let r;
-  try { r = await api("/api/profile", {name: p.name}); }
+  try { r = await api(API + "/profile", {name: p.name}); }
   catch (e) { showPmsg("Could not reach rxd. Still on " + activeName() + "."); return; }
   if (!r.ok) { showPmsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status))); return; }
-  switching = {name: p.name, desc: pdesc(p), prevUp: curUp(), wantUp: !!p.upconvert};
+  switching = {name: p.name, desc: pdesc(p), prevUp: curUp(), wantUp: !!p.upconvert, manual: upSwitch(), upName: upName()};
   setText($("swT"), "■ Switching to " + p.name + "…");
   setText($("swS"), "rxd restarts on " + pdesc(p) + "; this takes a few seconds." +
-    (switching.wantUp !== switching.prevUp ? " Flip the Ham It Up to " + hiuWord(switching.wantUp) + "." : ""));
+    (switching.manual && switching.wantUp !== switching.prevUp ? " Flip the " + switching.upName + " to " + hiuWord(switching.wantUp) + "." : ""));
   clearTimeout(switchTimer);
   switchTimer = setTimeout(switchTimeout, 25000);
   renderConn(); drawSpecMsg(downMsg());
@@ -1167,8 +1189,8 @@ async function doSwitch(p) {
 function finishSwitch() {
   const sw = switching;
   clearTimeout(switchTimer); switching = null;
-  if (curUp() !== sw.prevUp) {
-    setText($("flipT"), "▲ Flip the Ham It Up to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
+  if (sw.manual && curUp() !== sw.prevUp) {
+    setText($("flipT"), "▲ Flip the " + sw.upName + " to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
     $("flip").hidden = false;
   }
   // a mute carries over to the next station
@@ -1333,7 +1355,7 @@ async function connectAudio() {
   renderAudio();
   let why = "";
   try {
-    const r = await fetch("/api/audio?rate=" + want, {cache: "no-store", signal: ctl.signal});
+    const r = await fetch(API + "/audio?rate=" + want, {cache: "no-store", signal: ctl.signal});
     if (gen !== A.gen) return;
     if (!r.ok) {
       let d = null; try { d = await r.json(); } catch (e) {}
@@ -1431,7 +1453,7 @@ async function pollJs8() {
   if (document.hidden) { jTimer = setTimeout(pollJs8, 5000); return; }
   const key = jKey;
   try {
-    const r = await api("/api/js8?after=" + jSeq);
+    const r = await api(API + "/js8?after=" + jSeq);
     if (key !== jKey) return;
     if (r.ok && r.doc && Array.isArray(r.doc.lines)) {
       addJs8(r.doc.lines.filter(l => l.seq > jSeq).sort((a, b) => a.seq - b.seq));
@@ -1631,7 +1653,7 @@ async function pollWspr() {
   if (document.hidden) { wTimer = setTimeout(pollWspr, 5000); return; }
   const key = wKey;
   try {
-    const r = await api("/api/wspr?after=" + wSeq);
+    const r = await api(API + "/wspr?after=" + wSeq);
     if (key !== wKey) return;
     if (r.ok && r.doc && Array.isArray(r.doc.lines)) {
       addWspr(r.doc.lines.filter(l => l.seq > wSeq).sort((a, b) => a.seq - b.seq));
@@ -1728,7 +1750,7 @@ async function setReport(on) {
   wBusy = true; $("wMsg").hidden = true; renderWsprStat(st);
   let msg = "";
   try {
-    const r = await api("/api/tune", {wspr_report: on});
+    const r = await api(API + "/tune", {wspr_report: on});
     if (r.ok && r.doc && typeof r.doc.freq === "number") { wBusy = false; applyStatus(r.doc); return; }
     msg = "rxd refused: " + ((r.doc && r.doc.error) || "HTTP " + r.status);
   } catch (e) { msg = "Could not reach rxd. Reporting is unchanged."; }
@@ -1769,7 +1791,7 @@ function bandBtn(p, best) {
   else {
     el.type = "button";
     if (switching && switching.name === p.name) add("ba", "■ Switching");
-    else if (!!p.upconvert !== curUp()) add("bw", "▲ " + hiuWord(p.upconvert));
+    else if (upSwitch() && !!p.upconvert !== curUp()) add("bw", "▲ " + hiuWord(p.upconvert));
     else if (best) add("ba", "★ Best now");
     el.setAttribute("aria-label", decName(pdec(p)) + " " + bandWord(p.band) + ", " + fmtMHz(p.freq) + (best ? ", best now" : ""));
     el.disabled = conn !== "ok" || !!switching;
@@ -1816,7 +1838,7 @@ async function postBands(body) {
   if (bandsBusy) return;
   bandsBusy = true; bpMsg(""); renderBandPlan(st);
   let r = null;
-  try { r = await api("/api/bands", body); } catch (e) {}
+  try { r = await api(API + "/bands", body); } catch (e) {}
   bandsBusy = false;
   if (!r) bpMsg("Could not reach rxd. Nothing was changed.");
   else if (!r.ok) bpMsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status)));
@@ -1826,7 +1848,7 @@ async function postBands(body) {
 async function loadBands() {
   bandsAt = now();
   try {
-    const r = await api("/api/bands");
+    const r = await api(API + "/bands");
     if (r.ok && r.doc) { bandsDoc = r.doc; pickKey = ""; renderProfiles(); }
   } catch (e) {}
 }
@@ -1888,10 +1910,11 @@ function renderBandPlan(s) {
       btn.type = "button"; btn.className = "btn bbtn"; btn.setAttribute("aria-pressed", String(on));
       const t = document.createElement("span"); t.className = "bb"; t.textContent = bandWord(band); btn.appendChild(t);
       const sub = document.createElement("span"); sub.className = "bf"; sub.textContent = on ? "✓ On" : "Off"; btn.appendChild(sub);
-      if ((up ? "UPCONVERT" : "BYPASS") !== b.side) {
+      const away = upSwitch() && (up ? "UPCONVERT" : "BYPASS") !== b.side;
+      if (away) {
         const w = document.createElement("span"); w.className = "bw"; w.textContent = "▲ " + (up ? "UPCONVERT" : "BYPASS"); btn.appendChild(w);
       }
-      btn.setAttribute("aria-label", bandWord(band) + (on ? ", on" : ", off") + ((up ? "UPCONVERT" : "BYPASS") !== b.side ? ", needs the Ham It Up on " + (up ? "UPCONVERT" : "BYPASS") : ""));
+      btn.setAttribute("aria-label", bandWord(band) + (on ? ", on" : ", off") + (away ? ", needs the " + upName() + " on " + (up ? "UPCONVERT" : "BYPASS") : ""));
       btn.disabled = conn !== "ok" || bandsBusy;
       btn.onclick = () => postBands({bands: on ? en.filter(x => x !== band) : en.concat([band])});
       box.appendChild(btn);
@@ -2049,7 +2072,7 @@ function drawTiles() {
           img = new Image();
           img.alt = ""; img.decoding = "async";
           img.onerror = () => { img.style.visibility = "hidden"; };
-          img.src = "/tiles/" + tz + "/" + x + "/" + j + ".png";
+          img.src = API + "/tiles/" + tz + "/" + x + "/" + j + ".png";
           M.imgs.set(key, img); mTiles.appendChild(img);
         }
         const l = Math.floor(ox + i * ts), tp = Math.floor(oy + j * ts);
@@ -2275,8 +2298,8 @@ async function mapPoll() {
   if (mapShown() && !M.busy) {
     M.busy = true;
     try {
-      if (!M.tiles) { const r = await api("/tiles/info.json"); if (r.ok && r.doc) M.tiles = r.doc; else if (r.status === 404) M.tiles = {available: false}; }
-      const r = await api("/api/stations");
+      if (!M.tiles) { const r = await api(API + "/tiles/info.json"); if (r.ok && r.doc) M.tiles = r.doc; else if (r.status === 404) M.tiles = {available: false}; }
+      const r = await api(API + "/stations");
       if (r.ok && r.doc && Array.isArray(r.doc.stations)) {
         M.doc = r.doc;
         if (M.sel) {  // keep the selection on the same stations

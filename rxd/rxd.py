@@ -60,6 +60,13 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
 import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
+# rxd's version: the one place it is set. GET /api/v1/status reports it, and
+# the release workflow refuses a tag that doesn't match it.
+VERSION = "0.3.0"
+# The HTTP API's version: the N in /api/vN/. It goes up only when a client
+# written for the old one would misread the new one (docs/API.md).
+API_VERSION = 1
+
 STATE = os.path.expanduser("~/.config/rxd/radio")
 # Where this file really is: bin/rxd is a link to it, and js8.py and the
 # browser UI are installed beside it.
@@ -1369,7 +1376,8 @@ class Receiver:
                 "js8_decoder": self.js8dec.status() if self.js8dec is not None else None,
                 "clock": clock_status(),
                 "band_plan": self.bands.status() if self.bands is not None else None,
-                "listeners": len(self.listeners)}
+                "listeners": len(self.listeners),
+                "api_version": API_VERSION, "version": VERSION}
 
 
 # ---------------------------------------------------------------------- HTTP
@@ -1588,7 +1596,7 @@ WSPRD = os.environ.get("RXD_WSPRD") or shutil.which("wsprd") or "/usr/bin/wsprd"
 WSPR_DIR = os.path.expanduser(os.environ.get("RXD_WSPR_DIR", "~/.local/share/rxd/wspr"))
 # WSJT-X's own upload endpoint (Network/wsprnet.cpp): one form POST per spot.
 WSPRNET_URL = os.environ.get("RXD_WSPRNET", "http://wsprnet.org/post/")
-RXD_VERSION = "rxd-0.2"
+RXD_VERSION = "rxd-" + VERSION
 GRID = re.compile(r"^[A-Ra-r]{2}[0-9]{2}(?:[A-Xa-x]{2})?$")
 
 
@@ -3278,8 +3286,23 @@ def web_page():
     return None
 
 
+API_PREFIX = "/api/v%d/" % API_VERSION
+
+
+def route(path):
+    """The handler's name for a request path: /api/v1/X is /api/X, and so is
+    the old unversioned /api/X, kept as an alias; /api/v1/tiles/... is
+    /tiles/.... None for another API version."""
+    if path.startswith(API_PREFIX):
+        rest = path[len(API_PREFIX) - 1:]
+        return rest if rest.startswith("/tiles/") else "/api" + rest
+    if re.match(r"^/api/v[0-9]+/", path):
+        return None
+    return path
+
+
 class Api(BaseHTTPRequestHandler):
-    server_version = "rxd/0.1"
+    server_version = "rxd/" + VERSION
 
     def log_message(self, fmt, *args):
         pass
@@ -3292,8 +3315,14 @@ class Api(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def no_version(self):
+        return self.send(404, {"error": "this rxd speaks API version %d (%s)"
+                                        % (API_VERSION, API_PREFIX), "api_version": API_VERSION})
+
     def do_GET(self):
-        path = self.path.split("?", 1)[0]
+        path = route(self.path.split("?", 1)[0])
+        if path is None:
+            return self.no_version()
         if path == "/api/status":
             return self.send(200, self.server.rx.status())
         if path == "/api/spectrum":
@@ -3379,11 +3408,14 @@ class Api(BaseHTTPRequestHandler):
             rx.unlisten(chunks)
 
     def do_POST(self):
-        if self.path == "/api/profile":
+        path = route(self.path.split("?", 1)[0])
+        if path is None:
+            return self.no_version()
+        if path == "/api/profile":
             return self.switch()
-        if self.path == "/api/bands":
+        if path == "/api/bands":
             return self.bands_post()
-        if self.path != "/api/tune":
+        if path != "/api/tune":
             return self.send(404, {"error": "not found"})
         try:
             n = int(self.headers.get("Content-Length", 0))
@@ -3461,6 +3493,7 @@ def hostport(text, default_port):
 def parse_args(argv=None):
     ap = argparse.ArgumentParser(prog="rxd", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version="rxd " + VERSION)
     ap.add_argument("profile")
     ap.add_argument("--iq", help="cu8 file, - for stdin, or synth (default: the dongle)")
     ap.add_argument("--iq-center", type=float,
@@ -3468,7 +3501,7 @@ def parse_args(argv=None):
     ap.add_argument("--audio", default="pulse",
                     help="pulse, pulse:SINK, stdout or null (default: the profile's sink)")
     # From the environment by default, so the systemd unit's EnvironmentFile
-    # (/etc/rx/rxd.env) can open HTTP to the LAN without editing the unit.
+    # (/etc/rxd/rxd.env) can open HTTP to the LAN without editing the unit.
     ap.add_argument("--http", default=os.environ.get("RXD_HTTP", "127.0.0.1:8073"),
                     help="HOST:PORT, or off (default $RXD_HTTP or 127.0.0.1:8073)")
     return ap.parse_args(argv)

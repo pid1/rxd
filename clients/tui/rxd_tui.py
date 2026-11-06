@@ -435,9 +435,26 @@ def hiu_word(up):
     return "UPCONVERT" if up else "BYPASS"
 
 
+def upconverter(st):
+    """The station's upconverter as rxd reports it ({"name", "hz", "below_hz",
+    "switch"}), or None when it has none (docs/station.md)."""
+    return ((st or {}).get("station") or {}).get("upconverter")
+
+
+def up_name(st):
+    u = upconverter(st)
+    return u["name"] if u else "Upconverter"
+
+
+def manual_switch(st):
+    """Whether the upconverter has a switch only a person can flip."""
+    u = upconverter(st)
+    return bool(u and u.get("switch"))
+
+
 def flip_needed(p, st):
-    """Whether switching to profile p means flipping the Ham It Up's switch."""
-    if "upconverter_hz" not in st or st.get("upconverter_hz") is None:
+    """Whether switching to profile p means flipping the upconverter's switch."""
+    if not manual_switch(st) or st.get("upconverter_hz") is None:
         return False
     return bool(p.get("upconvert")) != (st["upconverter_hz"] > 0)
 
@@ -1070,6 +1087,23 @@ class Link:
         return self.request(path, body, timeout=timeout)
 
 
+# The rxd HTTP API this client speaks: /api/v1/ (rxd's docs/API.md).
+API_VERSION = 1
+
+
+def api_mismatch(code, doc):
+    """Why this rxd can't be talked to, when it speaks another API: None if it
+    speaks ours."""
+    has = doc.get("api_version") if isinstance(doc, dict) else None
+    if code == 404 and has is None:
+        return "this rxd has no API v1; rxd-tui needs rxd 0.3.0 or later"
+    if has is not None and has != API_VERSION:
+        return "this rxd speaks API version %s; this rxd-tui speaks %d" % (has, API_VERSION)
+    if code == 200 and has is None:
+        return "this rxd doesn't say its API version; rxd-tui needs rxd 0.3.0 or later"
+    return None
+
+
 def reason(exc):
     """A short why for an unreachable rxd."""
     r = getattr(exc, "reason", exc)
@@ -1220,12 +1254,16 @@ class Poller:
 
     def _status(self):
         try:
-            code, doc = self.link.get("/api/status")
+            code, doc = self.link.get("/api/v1/status")
         except OSError as e:
             self._offline(e)
             return False
+        why = api_mismatch(code, doc)
+        if why:
+            self._offline(OSError(why))
+            return False
         if code != 200:
-            self._offline(OSError("HTTP %d from /api/status" % code))
+            self._offline(OSError("HTTP %d from /api/v1/status" % code))
             return False
         self._set_status(doc)
         self.changed.set()
@@ -1233,7 +1271,7 @@ class Poller:
 
     def _spectrum(self):
         try:
-            code, doc = self.link.get("/api/spectrum")
+            code, doc = self.link.get("/api/v1/spectrum")
         except OSError as e:
             self._offline(e)
             return
@@ -1252,7 +1290,7 @@ class Poller:
 
     def _tune(self, req):
         try:
-            code, doc = self.link.post("/api/tune", req)
+            code, doc = self.link.post("/api/v1/tune", req)
         except OSError as e:
             with self.lock:
                 self.acks.append((req, "not sent: can't reach rxd (%s)" % reason(e)))
@@ -1315,7 +1353,7 @@ class Poller:
         with self.lock:
             self.profiles_asked_for = st.get("profile")
         try:
-            code, doc = self.link.get("/api/profiles", timeout=SLOW_TIMEOUT)
+            code, doc = self.link.get("/api/v1/profiles", timeout=SLOW_TIMEOUT)
         except OSError as e:
             with self.lock:
                 self.profiles_error = "can't reach rxd (%s)" % reason(e)
@@ -1336,7 +1374,7 @@ class Poller:
 
     def _switch(self, name):
         try:
-            code, doc = self.link.post("/api/profile", {"name": name}, timeout=SLOW_TIMEOUT)
+            code, doc = self.link.post("/api/v1/profile", {"name": name}, timeout=SLOW_TIMEOUT)
             err = None if code in (200, 202) else \
                 "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
         except OSError as e:
@@ -1347,7 +1385,7 @@ class Poller:
 
     def _bands(self, body):
         try:
-            code, doc = self.link.post("/api/bands", body, timeout=SLOW_TIMEOUT)
+            code, doc = self.link.post("/api/v1/bands", body, timeout=SLOW_TIMEOUT)
             err = None if code == 200 else \
                 "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
         except OSError as e:
@@ -1372,7 +1410,7 @@ class Poller:
         """New lines from /api/js8 or /api/wspr, which number them the same way."""
         lines = self.wspr_lines if dec == "wspr" else self.js8_lines
         try:
-            code, doc = self.link.get("/api/%s?after=%d" % (dec, self.feed_seq), timeout=3.0)
+            code, doc = self.link.get("/api/v1/%s?after=%d" % (dec, self.feed_seq), timeout=3.0)
         except OSError:
             return  # the status thread reports rxd's absence
         with self.lock:
@@ -1516,7 +1554,7 @@ class AudioPlayer:
             raise Refused("audio needs an http:// rxd URL.")
         s = socket.create_connection((self.host, self.port), timeout=3.0)
         try:
-            s.sendall(("GET %s/api/audio?rate=%d HTTP/1.0\r\nHost: %s\r\n\r\n"
+            s.sendall(("GET %s/api/v1/audio?rate=%d HTTP/1.0\r\nHost: %s\r\n\r\n"
                        % (self.base, rate, self.host)).encode())
             buf = b""
             while b"\r\n\r\n" not in buf:
@@ -1853,9 +1891,9 @@ class App:
     def finish_switch(self, st):
         sw, self.switching = self.switching, None
         up = (st.get("upconverter_hz") or 0) > 0
-        if up != sw["prev_up"]:
-            self.say("%s Flip the Ham It Up to %s for %s; the wrong way is silent."
-                     % (self.g.drop, hiu_word(up), sw["desc"]), "warn")
+        if up != sw["prev_up"] and sw["manual"]:
+            self.say("%s Flip the %s to %s for %s; the wrong way is silent."
+                     % (self.g.drop, sw["up_name"], hiu_word(up), sw["desc"]), "warn")
         else:
             self.say("%s Now on %s" % (self.g.rx, sw["desc"]), "ok")
         if sw.get("muted") is not None and st.get("volume"):
@@ -1877,7 +1915,7 @@ class App:
             self.audio.stop()
         if self.mute_prev is not None and getattr(self.p, "link", None):
             try:
-                self.p.link.post("/api/tune", {"volume": self.mute_prev})
+                self.p.link.post("/api/v1/tune", {"volume": self.mute_prev})
             except OSError:
                 pass
             self.mute_prev = None
@@ -1970,6 +2008,7 @@ class App:
         self.switching = {"name": p["name"], "desc": p.get("description") or p["name"],
                           "prev_up": (st.get("upconverter_hz") or 0) > 0,
                           "want_up": bool(p.get("upconvert")), "since": self.clock(),
+                          "manual": manual_switch(st), "up_name": up_name(st),
                           "muted": self.mute_prev}
         self.say("")
         self.p.switch(p["name"])
@@ -2312,10 +2351,14 @@ class App:
             sw = self.switching
             text = "%s Switching to %s%s rxd restarts, which takes a few seconds." % (
                 g.stop, sw["name"], g.ellipsis)
-            if sw["want_up"] != sw["prev_up"]:
-                text = "%s Switching to %s%s  %s Flip the Ham It Up to %s" % (
-                    g.stop, sw["name"], g.ellipsis, g.drop, hiu_word(sw["want_up"]))
+            if sw["want_up"] != sw["prev_up"] and sw["manual"]:
+                text = "%s Switching to %s%s  %s Flip the %s to %s" % (
+                    g.stop, sw["name"], g.ellipsis, g.drop, sw["up_name"], hiu_word(sw["want_up"]))
             scr.put(y, 1, clip(text, w - 2, g), "warn")
+        elif s["reachable"] is False and s["why"].startswith("this rxd "):
+            # it answers, but in an API this client doesn't speak
+            scr.put(y, 1, clip("%s %s: %s." % (g.bad, self.url, s["why"][0].upper() + s["why"][1:]),
+                               w - 2, g), "err")
         elif s["reachable"] is False:
             scr.put(y, 1, clip("%s Can't reach rxd at %s (%s). Retrying." % (
                 g.bad, self.url, s["why"]), w - 2, g), "err")
@@ -2343,7 +2386,7 @@ class App:
         elif self.switching and self.switching["name"] == p.get("name"):
             state, srole = g.stop + " Switching" + g.ellipsis, "warn"
         elif flip_needed(p, st):
-            state, srole = "%s Flip Ham It Up to %s" % (g.drop, hiu_word(p.get("upconvert"))), \
+            state, srole = "%s Flip %s to %s" % (g.drop, up_name(st), hiu_word(p.get("upconvert"))), \
                 "upconv"
         else:
             state, srole = "", "label"
@@ -2416,14 +2459,15 @@ class App:
         def put(y, x, text, role=""):
             if y < bottom:
                 scr.put(y, x, text, role)
-        # status: Ham It Up, receiver, level, stations heard
+        # status: the upconverter, receiver, level, stations heard
         sym, word, role = badge(s["reachable"], st, self.p.dropping(), g, self.switching)
         x = 1
         up = st.get("upconverter_hz")
-        parts = [("Ham It Up ", "label"),
+        parts = [(up_name(st) + " ", "label"),
                  (hiu_word(up > 0) if up is not None else "---",
                   "upconv" if up else "value"),
-                 ("   ", ""), ("%s %s" % (sym, word), role), ("   Signal ", "label")]
+                 ("   ", "")] if upconverter(st) else []
+        parts += [("%s %s" % (sym, word), role), ("   Signal ", "label")]
         lvl = st.get("level_dbfs")
         parts.append(("%.1f dBFS" % lvl if lvl is not None else "--- dBFS", "value"))
         heard = stations_heard(lines, "call" if wspr else "from")
@@ -2577,11 +2621,13 @@ class App:
             scr.put(y, 1, "Signal", "label")
             scr.put(y, 8, "%6.1f dBFS" % lvl if lvl is not None else "  --- dBFS", "value")
             up = st.get("upconverter_hz")
-            hiu = "Ham It Up " + (hiu_word(up > 0) if up is not None else "---")
+            label = up_name(st) + " " if upconverter(st) else ""
+            hiu = label + (hiu_word(up > 0) if up is not None else "---") if label else ""
             barw = clamp(w - 20 - len(hiu) - 4, 4, 40)
             scr.put(y, 20, level_bar(lvl, barw, g), "spec")
-            scr.put(y, 20 + barw + 3, "Ham It Up ", "label")
-            scr.put(y, 20 + barw + 13, hiu[10:], "upconv" if up else "value")
+            if label:
+                scr.put(y, 20 + barw + 3, label, "label")
+                scr.put(y, 20 + barw + 3 + len(label), hiu[len(label):], "upconv" if up else "value")
             y += 1
             # gain, bandwidth, speaker
             gain = st.get("gain_db")
@@ -2677,19 +2723,21 @@ class App:
             scr.put(y, len(ftext) + 7, "  ".join([" %s " % side[0]] + side[1:]), "value")
             y += 2 if h >= 16 else 1
 
-        # Ham It Up, gain, volume
+        # the upconverter, gain, volume
         up = st.get("upconverter_hz")
         x = 1
-        scr.put(y, x, "Ham It Up switch:", "label")
-        x += 18
-        if up is None:
-            sw, srole = "---", "value"
-        elif up > 0:
-            sw, srole = "UPCONVERT (%s)" % format_hz(up), "upconv"
-        else:
-            sw, srole = "BYPASS", "value"
-        scr.put(y, x, sw, srole)
-        x += len(sw) + 4
+        if upconverter(st):
+            label = "%s%s:" % (up_name(st), " switch" if manual_switch(st) else "")
+            scr.put(y, x, label, "label")
+            x += len(label) + 1
+            if up is None:
+                sw, srole = "---", "value"
+            elif up > 0:
+                sw, srole = "UPCONVERT (%s)" % format_hz(up), "upconv"
+            else:
+                sw, srole = "BYPASS", "value"
+            scr.put(y, x, sw, srole)
+            x += len(sw) + 4
         gain = st.get("gain_db")
         if self.mute_prev is not None:
             spk = "Muted"
@@ -2831,9 +2879,9 @@ class App:
             "?         this help",
             "q         quit (Ctrl-C works too)",
             "",
-            "Ham It Up: the UPCONVERT/BYPASS switch on the box is",
-            "physical. rxd only says which way it should be; the",
-            "wrong way gives silence.",
+            "An upconverter's UPCONVERT/BYPASS switch (a Ham It Up's)",
+            "may be physical. rxd only says which way it should be;",
+            "the wrong way gives silence.",
             "",
             "Any key closes this.",
         ]
