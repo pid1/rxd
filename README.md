@@ -61,6 +61,30 @@ reports 7078000.
   Blocks that don't fit in the queue are dropped and counted in `/api/status`.
 - **SIGHUP** re-reads the profile.
 
+## Automatic gain and audio clean-up
+
+- **Auto RF gain** (`AutoGain`, on unless a profile sets `rtl.gain_auto: false`)
+  steps through the dongle's gain table from the raw IQ: clipped bytes, RMS
+  and the band's noise floor from the spectrum, against the 8-bit ADC's own
+  floor. It aims for a floor 6-13 dB over the ADC's (the antenna sets the
+  noise, not the ADC) without clipping or an RMS over -10 dBFS. After a start
+  or a retune of a MHz or more it settles in a few jumps, then moves at most
+  every 5 s; under JS8 or WSPR only in the gap between slots, unless the
+  signal overloads or is far too low. `POST /api/tune {"gain_db": X}` sets it
+  by hand and turns auto off; `{"gain_auto": true}` turns it back on. Status
+  has `gain_auto`, `gain_db` (the gain in use) and `gain_loop` (state,
+  reason, floor, margin, RMS, clip fraction, steps).
+- **Audio clean-up** (`AudioFx`) is for listening only: the uConsole speaker
+  on listening profiles and the phone/TUI stream always. JS8Call's cable and
+  the WSPR decoder get the audio untouched. Stages, each an `audio_*` tune
+  field and reported under status `audio`: `audio_squelch` (an NFM noise
+  squelch, off while a level squelch is set), `audio_filter` (hum and DC; on
+  NFM a 300-3500 Hz voice band, which also takes out sub-audible tones and
+  the discriminator's hiss), `audio_nr` (spectral subtraction; `null` means by
+  mode, on except WFM), `audio_norm` (loudness to -20 dBFS RMS, -20 to +12 dB)
+  and `audio_limit` (soft limiter). `audio_auto: false` bypasses them all. A
+  profile may carry them as `"audio": {"nr": false, ...}`.
+
 ## Measured on the uConsole (CM4, 2026-11-05)
 
 | | CPU |
@@ -102,7 +126,5 @@ Hamlib 4.5.4 on the device talks to rxd without errors.
   - Without internet: auto-scan the candidate frequencies, score each from a slot or two of decodes and the noise floor, and learn what works best at each hour.
   - Catch: the antenna is cut for 40 m today.
 - **A map in the web UI** of JS8 and WSPR stations, plotted at the grid-square centre, using the map tiles already downloaded for the mesh clients so it works offline.
-- **Auto-adjusting audio quality:**
-  - automatic RF gain on the dongle's gain steps, with a manual override;
-  - per-mode filtering, AGC and noise handling;
-  - level normalisation for listeners.
+- **Auto-adjusting audio quality:** done 2026-11-06, see "Automatic gain and
+  audio clean-up". Not done: per-mode AGC tuning.

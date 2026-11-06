@@ -1089,6 +1089,10 @@ class Receiver:
         gains = self.src.gains()
         self.autogain = AutoGain(gains, self.s.decoder) if gains else None
         self.retune(self.s.snapshot(), force=True)
+        # Again after tuning: the R820T can lose a gain set before its first
+        # tune (measured 2026-11-06: the band's floor 22 dB high at 3.7 dB
+        # until the gain was set once more).
+        self.src.set_gain(self.s.gain_db)
         self.version = self.s.snapshot()["version"]
         threading.Thread(target=self.reader, name="reader", daemon=True).start()
         threading.Thread(target=self.dsp, name="dsp", daemon=True).start()
@@ -1154,8 +1158,8 @@ class Receiver:
                     with self.s.lock:
                         self.s.gain_db = self.gain_db_for(self.s.gain_index)
                     snap = self.s.snapshot()
-                self.src.set_gain(snap["gain_db"])
                 self.retune(snap, force=rebuild)
+                self.src.set_gain(snap["gain_db"])  # after a retune, as in start()
                 self.version = snap["version"]
                 if rebuild:
                     continue  # the block in hand was at the old rate
