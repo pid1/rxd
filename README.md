@@ -24,6 +24,13 @@ rxd js8 --iq synth --audio null --rigctl 127.0.0.1:4542 --http 127.0.0.1:8083
                               # no dongle: noise plus a tone, for testing
 ```
 
+A profile's `offset` is `"auto"` by default: the Ham It Up's 125 MHz offset
+applies below `upconvert_below_hz` (30 MHz) and not above it, so a live retune
+from 40 m to 2 m just works. `"Ham-It-Up"` pins it on and `"None"` pins it off;
+`upconverter_hz` changes the 125 MHz. The Ham It Up's UPCONVERT/BYPASS switch
+is physical, so status reports `upconverter_hz` (0 or 125e6) for `radio` to
+warn from.
+
 A profile's `rtl.gain_db` wins over `rtl.gain`, SDR++'s index into the tuner's
 gain table.
 

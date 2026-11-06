@@ -174,6 +174,10 @@ class Engine(unittest.TestCase):
         self.settings.update(freq=7200000)
         self.assertTrue(self.wait(lambda: self.src.center != center))
         self.assertEqual(self.rx.offset, 50000)
+        # Crossing 30 MHz drops the upconverter offset under "auto".
+        self.settings.offset_mode = "auto"
+        self.settings.update(freq=50.2e6)
+        self.assertTrue(self.wait(lambda: self.src.center == 50.2e6 - 100 - 50000))
         # Changing mode rebuilds the chain at its own rate.
         self.settings.update(mode="WFM", freq=105.3e6)
         self.assertTrue(self.wait(lambda: self.rx.chain.mode == "WFM"))
@@ -292,6 +296,24 @@ class Profiles(unittest.TestCase):
             self.assertEqual(rx.status()["profile"], "js8")
         finally:
             rx.stop.set()
+
+    def test_offset_auto_follows_frequency(self):
+        s = rxd.Settings(dict(JS8, offset="auto"), "js8")
+        self.assertEqual(s.snapshot()["upconverter"], 125e6)   # 40 m: through it
+        s.update(freq=146.52e6, mode="FM")
+        self.assertEqual(s.snapshot()["upconverter"], 0.0)     # 2 m: bypass
+        s.update(freq=820e3, mode="AM")
+        self.assertEqual(s.snapshot()["upconverter"], 125e6)   # below the R820T
+        # Pinned modes ignore the frequency; a missing offset means auto.
+        self.assertEqual(rxd.Settings(dict(JS8, offset="None")).snapshot()["upconverter"], 0.0)
+        p = dict(JS8, offset="Ham-It-Up", frequency=146.52e6, js8call_dial=146.52e6)
+        self.assertEqual(rxd.Settings(p).snapshot()["upconverter"], 125e6)
+        p = {k: v for k, v in JS8.items() if k != "offset"}
+        self.assertEqual(rxd.Settings(p).snapshot()["offset_mode"], "auto")
+        p = dict(JS8, offset="auto", upconvert_below_hz=5e6)
+        self.assertEqual(rxd.Settings(p).snapshot()["upconverter"], 0.0)
+        with self.assertRaises(ValueError):
+            rxd.Settings(dict(JS8, offset="Sideways"))
 
     def test_unsupported_mode(self):
         with self.assertRaises(ValueError):

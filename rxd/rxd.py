@@ -50,8 +50,14 @@ from scipy import signal as sps  # noqa: E402
 
 STATE = os.path.expanduser("~/.config/rx/radio")
 AUDIO_RATE = 48000
-# Upconverter offsets by name. Profiles began as SDR++ settings, hence its names.
-OFFSETS = {"None": 0.0, "Manual": 0.0, "Ham-It-Up": 125e6}
+# A profile's "offset": "auto" (the default) upconverts below
+# upconvert_below_hz, since the R820T tunes no lower than about 24 MHz and
+# the Ham It Up is how HF gets in; "Ham-It-Up" always upconverts and "None"
+# (or SDR++'s "Manual") never does. The Ham It Up's own UPCONVERT/BYPASS
+# switch is physical: rxd can only report which way it should be.
+OFFSET_MODES = ("auto", "Ham-It-Up", "None", "Manual")
+UPCONVERTER_HZ = 125e6
+UPCONVERT_BELOW_HZ = 30e6
 # Profile sink descriptions -> PipeWire node names (None: default sink).
 SINKS = {"SDR to JS8 (virtual cable)": "SDR_to_JS8", "Built-in Audio": None}
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
@@ -101,7 +107,11 @@ class Settings:
             dial = float(p.get("js8call_dial", carrier))
             self.cal = dial - carrier
             self.dial = dial
-            self.upconverter = OFFSETS.get(p.get("offset", "None"), 0.0)
+            self.offset_mode = p.get("offset", "auto")
+            if self.offset_mode not in OFFSET_MODES:
+                raise ValueError("offset must be one of " + ", ".join(OFFSET_MODES))
+            self.upconverter_hz = float(p.get("upconverter_hz", UPCONVERTER_HZ))
+            self.upconvert_below = float(p.get("upconvert_below_hz", UPCONVERT_BELOW_HZ))
             rtl = p.get("rtl", {})
             self.serial = str(rtl.get("serial", ""))
             self.gain_index = rtl.get("gain")
@@ -116,10 +126,19 @@ class Settings:
     def snapshot(self):
         with self.lock:
             return dict(mode=self.mode, bandwidth=self.bandwidth, dial=self.dial,
-                        cal=self.cal, upconverter=self.upconverter,
+                        cal=self.cal, upconverter=self.upconverter(),
+                        offset_mode=self.offset_mode,
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
                         volume=self.volume, gain_db=self.gain_db,
                         version=self.version)
+
+    def upconverter(self):
+        """The offset in effect for the current dial (call with the lock held)."""
+        if self.offset_mode == "Ham-It-Up":
+            return self.upconverter_hz
+        if self.offset_mode == "auto" and self.dial < self.upconvert_below:
+            return self.upconverter_hz
+        return 0.0
 
     def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
                volume=None):
@@ -627,6 +646,7 @@ class Receiver:
                 "vfo_hz": snap["dial"] - snap["cal"], "cal_hz": snap["cal"],
                 "mode": snap["mode"], "bandwidth": snap["bandwidth"],
                 "gain_db": snap["gain_db"], "volume": snap["volume"],
+                "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
                 "tuner_hz": self.src.center, "offset_hz": self.offset,
                 "sample_rate": self.chain.rate if self.chain else None,
