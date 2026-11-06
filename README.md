@@ -8,8 +8,10 @@ two control ports on 127.0.0.1:
 - **4532, Hamlib NET rigctl.** JS8Call (Rig: *Hamlib NET rigctl*) or
   `rigctl -m 2 -r 127.0.0.1:4532` can get and set frequency and mode.
 - **8073, HTTP JSON.** `GET /api/status`, and `POST /api/tune` with any of
-  `freq`, `mode`, `bandwidth` and `gain_db`. This is what a TUI or browser
-  client would use.
+  `freq`, `mode`, `bandwidth`, `gain_db` and `volume`. Status also reports
+  `profile`, `vfo_hz` (the carrier, which is what a profile's `frequency`
+  means) and `cal_hz`. This is what `radio save` reads, and what a TUI or
+  browser client would use.
 
 Modes: USB, LSB, AM, FM and WFM (mono, no RDS). Needs only `python3-numpy` and
 `python3-scipy`, already on the uConsole; librtlsdr and libpulse-simple are
@@ -21,6 +23,9 @@ rxd js8 --audio stdout | ...  # raw s16le mono 48 kHz
 rxd js8 --iq synth --audio null --rigctl 127.0.0.1:4542 --http 127.0.0.1:8083
                               # no dongle: noise plus a tone, for testing
 ```
+
+A profile's `rtl.gain_db` wins over `rtl.gain`, SDR++'s index into the tuner's
+gain table.
 
 Frequencies on both ports are the dial. A JS8 profile whose VFO sits 100 Hz
 under its `js8call_dial` keeps that offset as a calibration, so rigctl

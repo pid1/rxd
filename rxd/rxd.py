@@ -16,7 +16,7 @@ PipeWire/PulseAudio sink. Two control ports, both on 127.0.0.1 by default:
   4532  Hamlib NET rigctl (rig model 2), so JS8Call or `rigctl -m 2` can
         read and set the frequency and mode
   8073  HTTP JSON: GET /api/status, POST /api/tune {"freq": 7078000,
-        "mode": "USB", "bandwidth": 2800, "gain_db": 3.7}
+        "mode": "USB", "bandwidth": 2800, "gain_db": 3.7, "volume": 0.2}
 
 Frequencies on both ports are the dial, as JS8Call means it. A JS8 profile
 whose VFO sits off its js8call_dial (7077900 vs 7078000, tuned by hand)
@@ -79,8 +79,9 @@ def load_profile(spec):
 class Settings:
     """What to receive. Shared between the control ports and the DSP thread."""
 
-    def __init__(self, p):
+    def __init__(self, p, name=None):
         self.lock = threading.Lock()
+        self.name = name
         self.apply_profile(p)
 
     def apply_profile(self, p):
@@ -104,7 +105,9 @@ class Settings:
             rtl = p.get("rtl", {})
             self.serial = str(rtl.get("serial", ""))
             self.gain_index = rtl.get("gain")
-            self.gain_db = None  # set from the index once the dongle is open
+            # A saved gain_db wins; otherwise the index (SDR++'s convention)
+            # is looked up in the dongle's gain table once it is open.
+            self.gain_db = float(rtl["gain_db"]) if rtl.get("gain_db") is not None else None
             self.ppm = int(rtl.get("ppm", 0))
             self.bias_t = bool(rtl.get("biasT", False))
             self.sink = SINKS.get(p.get("sink"), p.get("sink"))
@@ -118,7 +121,8 @@ class Settings:
                         volume=self.volume, gain_db=self.gain_db,
                         version=self.version)
 
-    def update(self, freq=None, mode=None, bandwidth=None, gain_db=None):
+    def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
+               volume=None):
         with self.lock:
             if mode is not None:
                 mode = mode.upper()
@@ -136,6 +140,11 @@ class Settings:
                 self.bandwidth = float(bandwidth)
             if gain_db is not None:
                 self.gain_db = float(gain_db)
+            if volume is not None:
+                volume = float(volume)
+                if not 0 <= volume <= 4:
+                    raise ValueError("volume must be between 0 and 4")
+                self.volume = volume
             self.version += 1
 
 
@@ -614,8 +623,10 @@ class Receiver:
 
     def status(self):
         snap = self.s.snapshot()
-        return {"freq": snap["dial"], "mode": snap["mode"],
-                "bandwidth": snap["bandwidth"], "gain_db": snap["gain_db"],
+        return {"profile": self.s.name, "freq": snap["dial"],
+                "vfo_hz": snap["dial"] - snap["cal"], "cal_hz": snap["cal"],
+                "mode": snap["mode"], "bandwidth": snap["bandwidth"],
+                "gain_db": snap["gain_db"], "volume": snap["volume"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
                 "tuner_hz": self.src.center, "offset_hz": self.offset,
                 "sample_rate": self.chain.rate if self.chain else None,
@@ -754,7 +765,7 @@ class Api(BaseHTTPRequestHandler):
             doc = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(doc, dict):
                 raise ValueError("body must be a JSON object")
-            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db"}
+            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume"}
             if unknown:
                 raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
             self.server.rx.s.update(**doc)
@@ -785,7 +796,7 @@ def main(argv=None):
 
     p, path = load_profile(a.profile)
     try:
-        settings = Settings(p)
+        settings = Settings(p, os.path.basename(path)[:-5])
     except ValueError as e:
         sys.exit("rxd: " + str(e))
     snap = settings.snapshot()

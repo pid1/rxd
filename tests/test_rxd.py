@@ -253,11 +253,15 @@ class Control(unittest.TestCase):
         self.assertIn("level_dbfs", st)
         code, st = self.api("POST", "/api/tune", {"freq": 7079000, "mode": "usb"})
         self.assertEqual((code, st["freq"], st["mode"]), (200, 7079000, "USB"))
-        self.assertEqual(self.api("POST", "/api/tune", {"volume": 1})[0], 400)
+        self.assertEqual(self.api("POST", "/api/tune", {"squelch": 1})[0], 400)
         self.assertEqual(self.api("POST", "/api/tune", {"mode": "CW"})[0], 400)
         self.assertEqual(self.api("POST", "/api/tune", {"mode": 5})[0], 400)
         self.assertEqual(self.api("POST", "/api/tune", {"freq": 1})[0], 400)
         self.assertEqual(self.api("GET", "/nope")[0], 404)
+        code, st = self.api("POST", "/api/tune", {"volume": 0.4})
+        self.assertEqual((code, st["volume"]), (200, 0.4))
+        self.assertEqual(self.api("POST", "/api/tune", {"volume": 9})[0], 400)
+        self.assertEqual((st["vfo_hz"], st["cal_hz"]), (7078900, 100))
         self.api("POST", "/api/tune", {"freq": 7078000})
 
 
@@ -277,6 +281,17 @@ class Profiles(unittest.TestCase):
                     rxd.load_profile("missing")
             finally:
                 rxd.STATE = old
+
+    def test_saved_gain_db_wins_over_index(self):
+        s = rxd.Settings(dict(JS8, rtl=dict(JS8["rtl"], gain_db=16.6)), "js8")
+        self.assertEqual((s.gain_db, s.name), (16.6, "js8"))
+        rx = rxd.Receiver(s, FastSynth(7077900 + 125e6), Capture())
+        rx.start()
+        try:
+            self.assertEqual(s.gain_db, 16.6)
+            self.assertEqual(rx.status()["profile"], "js8")
+        finally:
+            rx.stop.set()
 
     def test_unsupported_mode(self):
         with self.assertRaises(ValueError):
