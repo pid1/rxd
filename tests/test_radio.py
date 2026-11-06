@@ -406,6 +406,19 @@ class RadioTest(unittest.TestCase):
         out, _ = self.radio("show", "vhf")
         self.assertEqual(json.loads(out), self.r.PROFILES["vhf"])
 
+    def test_json_lists_profiles_for_the_web_ui(self):
+        self.radio("js8")
+        doc = json.loads(self.radio("--json")[0])
+        self.assertEqual(doc["active"], "js8")
+        rows = {r["name"]: r for r in doc["profiles"]}
+        self.assertEqual(list(rows)[:2], ["ghostnet", "js8"])
+        self.assertEqual(rows["js8"], {"name": "js8", "description": "JS8, 40 m",
+                                       "freq": 7078000.0, "mode": "USB", "upconvert": True,
+                                       "js8": True, "saved": True})
+        self.assertEqual((rows["fm-105.3"]["upconvert"], rows["fm-105.3"]["js8"],
+                          rows["fm-105.3"]["mode"]), (False, False, "WFM"))
+        self.assertTrue(rows["am-820"]["upconvert"])
+
 
 if __name__ == "__main__":
     unittest.main()

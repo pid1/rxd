@@ -230,6 +230,48 @@ class Engine(unittest.TestCase):
         self.assertAlmostEqual(peak, 1500, delta=10)
 
 
+JS8_LINES = [
+    "2026-11-06 03:25:59\t7.078000\t1500\t-16\tW0WQQ: 9A3QXZ HEARTBEAT SNR -04 \u2662 \n",
+    "2026-11-06 03:26:14\t7.078000\t1180\t+03\tKQ4FQZ: @HB HEARTBEAT EM75 \u2662 \n",
+    "2026-11-06 03:27:01\t7.078000\t900\t-09\tKD4EQ: KA1PID SNR -12 \u2662 \n",
+]
+
+
+class Js8(unittest.TestCase):
+    def test_parse(self):
+        line = rxd.Js8Feed.parse(JS8_LINES[0])
+        self.assertEqual(line, {"time": "2026-11-06 03:25:59", "freq": 7078000.0, "offset": 1500,
+                                "snr": -16, "from": "W0WQQ", "to": "9A3QXZ",
+                                "text": "W0WQQ: 9A3QXZ HEARTBEAT SNR -04"})
+        self.assertIsNone(rxd.Js8Feed.parse(JS8_LINES[1])["to"])  # @HB is a group
+        self.assertIsNone(rxd.Js8Feed.parse("garbage\n"))
+
+    def test_follows_appends_partial_lines_and_rotation(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "DIRECTED.TXT")
+            with open(path, "w") as fh:
+                fh.write(JS8_LINES[0])
+            feed = rxd.Js8Feed(path)
+            first = feed.since(0)
+            self.assertEqual((first["seq"], [x["from"] for x in first["lines"]]), (1, ["W0WQQ"]))
+            with open(path, "a") as fh:
+                fh.write(JS8_LINES[1] + JS8_LINES[2][:20])  # the last one half-written
+            got = feed.since(first["seq"])
+            self.assertEqual([x["from"] for x in got["lines"]], ["KQ4FQZ"])
+            with open(path, "a") as fh:
+                fh.write(JS8_LINES[2][20:])
+            self.assertEqual([x["from"] for x in feed.since(got["seq"])["lines"]], ["KD4EQ"])
+            self.assertEqual(feed.since(feed.seq)["lines"], [])
+            # logrotate renames it and JS8Call starts a new file.
+            os.rename(path, path + "-20261106")
+            with open(path, "w") as fh:
+                fh.write(JS8_LINES[0])
+            again = feed.since(feed.seq)
+            self.assertEqual([x["from"] for x in again["lines"]], ["W0WQQ"])
+            self.assertEqual(again["seq"], 4)
+        self.assertEqual(rxd.Js8Feed("/nonexistent/DIRECTED.TXT").since(0), {"seq": 0, "lines": []})
+
+
 class Control(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -240,6 +282,11 @@ class Control(unittest.TestCase):
         cls.rig.rx = cls.rx
         cls.http = rxd.ThreadingHTTPServer(("127.0.0.1", 0), rxd.Api)
         cls.http.rx = cls.rx
+        cls.js8dir = tempfile.mkdtemp()
+        cls.js8log = os.path.join(cls.js8dir, "DIRECTED.TXT")
+        with open(cls.js8log, "w") as fh:
+            fh.write(JS8_LINES[0] + JS8_LINES[1])
+        cls.http.js8 = rxd.Js8Feed(cls.js8log)
         for s in (cls.rig, cls.http):
             threading.Thread(target=s.serve_forever, daemon=True).start()
 
@@ -339,6 +386,74 @@ class Control(unittest.TestCase):
             self.assertEqual(self.page("/")[0], 404)
         finally:
             rxd.WEB_PATHS = old
+
+
+class Clients(Control):
+    """The endpoints the browser UI added: profiles, switching, audio, JS8."""
+
+    def test_js8_feed_over_http(self):
+        code, doc = self.api("GET", "/api/js8?after=0")
+        self.assertEqual((code, [x["from"] for x in doc["lines"]]), (200, ["W0WQQ", "KQ4FQZ"]))
+        with open(self.js8log, "a") as fh:
+            fh.write(JS8_LINES[2])
+        code, doc2 = self.api("GET", "/api/js8?after=%d" % doc["seq"])
+        self.assertEqual([x["to"] for x in doc2["lines"]], ["KA1PID"])
+        self.assertEqual(self.api("GET", "/api/js8?after=x")[0], 400)
+        st = self.api("GET", "/api/status")[1]
+        self.assertTrue(st["js8"])
+
+    def fake_radio(self, d):
+        path = os.path.join(d, "radio")
+        doc = {"active": "js8", "profiles": [
+            {"name": "js8", "description": "JS8, 40 m", "freq": 7078000.0, "mode": "USB",
+             "upconvert": True, "js8": True, "saved": True},
+            {"name": "fm-105.3", "description": "105.3 FM", "freq": 105.3e6, "mode": "WFM",
+             "upconvert": False, "js8": False, "saved": True}]}
+        with open(path, "w") as fh:
+            fh.write("#!/bin/sh\n[ \"$1\" = --json ] && echo '%s'\n" % json.dumps(doc))
+        os.chmod(path, 0o755)
+        return path
+
+    def test_profiles_and_switch(self):
+        old_radio, old_spawn = rxd.RADIO, rxd.spawn_switch
+        spawned = []
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                rxd.RADIO = self.fake_radio(d)
+                rxd._profiles["doc"] = None
+                rxd.spawn_switch = spawned.append
+                code, doc = self.api("GET", "/api/profiles")
+                self.assertEqual((code, doc["active"], len(doc["profiles"])), (200, "js8", 2))
+                code, doc = self.api("POST", "/api/profile", {"name": "fm-105.3"})
+                self.assertEqual((code, doc, spawned), (202, {"switching": "fm-105.3"}, ["fm-105.3"]))
+                self.assertEqual(self.api("POST", "/api/profile", {"name": "nope"})[0], 400)
+                self.assertEqual(self.api("POST", "/api/profile", {"nom": "js8"})[0], 400)
+                self.assertEqual(spawned, ["fm-105.3"])
+            rxd.RADIO = "/nonexistent/radio"
+            rxd._profiles["doc"] = None
+            self.assertEqual(self.api("GET", "/api/profiles")[0], 503)
+        finally:
+            rxd.RADIO, rxd.spawn_switch = old_radio, old_spawn
+            rxd._profiles["doc"] = None
+
+    def test_audio_stream(self):
+        url = "http://%s:%d/api/audio?rate=12000" % self.http.server_address
+        with urllib.request.urlopen(url, timeout=5) as r:
+            self.assertEqual(r.headers["X-Audio-Rate"], "12000")
+            data = b""
+            while len(data) < 12000 * 2 * 2:  # two seconds
+                data += r.read(4096)
+        self.assertEqual(self.rx.status()["listeners"], 1)
+        a = np.frombuffer(data[: len(data) // 2 * 2], "<i2").astype(float)[6000:]
+        spec = np.abs(np.fft.rfft(a))
+        peak = np.fft.rfftfreq(len(a), 1 / 12000)[spec.argmax()]
+        self.assertAlmostEqual(peak, 1500, delta=10)  # the synth's tone, at 12 kHz
+        deadline = time.time() + 3
+        while self.rx.status()["listeners"] and time.time() < deadline:
+            time.sleep(0.05)  # it notices the closed socket on its next write
+        self.assertEqual(self.rx.status()["listeners"], 0)
+        for bad in ("rate=44100", "rate=x"):
+            self.assertEqual(self.page("/api/audio?" + bad)[0], 400)
 
 
 class Profiles(unittest.TestCase):

@@ -25,6 +25,8 @@ keeps that difference as a calibration, so the dial still reads 7078000.
 SIGHUP re-reads the profile; SIGINT or SIGTERM stops.
 """
 import argparse
+import collections
+import configparser
 import ctypes
 import ctypes.util
 import json
@@ -32,10 +34,13 @@ import os
 import queue
 import signal
 import socket
+import shutil
 import socketserver
+import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 # One BLAS thread. The filters are small matrix products, and OpenBLAS's
@@ -121,6 +126,7 @@ class Settings:
             self.ppm = int(rtl.get("ppm", 0))
             self.bias_t = bool(rtl.get("biasT", False))
             self.sink = SINKS.get(p.get("sink"), p.get("sink"))
+            self.js8 = p.get("js8call_dial") is not None
             self.version = getattr(self, "version", 0) + 1
 
     def snapshot(self):
@@ -583,6 +589,9 @@ class Receiver:
         self.offset = 0.0
         self.spectrum = None
         self.spectrum_at = 0.0
+        self.listeners = []          # (rate, queue) per streaming client
+        self.listen_lock = threading.Lock()
+        self.resamplers = {}         # rate -> FirDecimator from 48 kHz
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -673,6 +682,8 @@ class Receiver:
             audio = self.chain(x, self.offset)
             pcm = np.clip(audio * snap["volume"] * 32767, -32768, 32767).astype("<i2")
             self.sink.write(pcm)
+            if self.listeners:
+                self.stream(audio)
             dt = time.thread_time() - t0
             self.cpu += (dt / (len(x) / self.chain.rate) - self.cpu) * 0.05
             self.blocks += 1
@@ -710,6 +721,46 @@ class Receiver:
                 "stop_hz": center + rate / 2, "dial_hz": dial, "passband": band,
                 "seq": (self.spectrum or {}).get("seq", 0) + 1}
 
+    # ------------------------------------------------ audio to the clients
+
+    STREAM_RATES = (12000, 24000, 48000)
+    MAX_LISTENERS = 4
+
+    def listen(self, rate):
+        """A queue of s16le chunks at rate, or None if too many are listening."""
+        q = queue.Queue(maxsize=30)  # about 3 s; a slow client loses chunks, never the DSP
+        with self.listen_lock:
+            if len(self.listeners) >= self.MAX_LISTENERS:
+                return None
+            self.listeners.append((rate, q))
+        return q
+
+    def unlisten(self, q):
+        with self.listen_lock:
+            self.listeners = [(r, x) for r, x in self.listeners if x is not q]
+
+    def stream(self, audio):
+        # Before the uConsole's own volume, so muting its speaker doesn't
+        # silence the phone; the client has its own volume.
+        with self.listen_lock:
+            listeners = list(self.listeners)
+        chunks = {}
+        for rate, q in listeners:
+            if rate not in chunks:
+                d = AUDIO_RATE // rate
+                if d > 1:
+                    if rate not in self.resamplers:
+                        self.resamplers[rate] = FirDecimator(
+                            sps.firwin(16 * d + 1, rate * 0.45, fs=AUDIO_RATE), d)
+                    a = self.resamplers[rate](audio)
+                else:
+                    a = audio
+                chunks[rate] = np.clip(a * 0.8 * 32767, -32768, 32767).astype("<i2").tobytes()
+            try:
+                q.put_nowait(chunks[rate])
+            except queue.Full:
+                pass
+
     def status(self):
         snap = self.s.snapshot()
         return {"profile": self.s.name, "freq": snap["dial"],
@@ -723,7 +774,9 @@ class Receiver:
                 "sample_rate": self.chain.rate if self.chain else None,
                 "dsp_cpu": round(self.cpu, 3), "blocks": self.blocks,
                 "dropped": self.dropped, "error": self.error,
-                "running": not self.stop.is_set(), "gains": self.src.gains()}
+                "running": not self.stop.is_set(), "gains": self.src.gains(),
+                "js8": self.s.js8, "js8_call": js8_mycall() if self.s.js8 else None,
+                "listeners": len(self.listeners)}
 
 
 # ----------------------------------------------------------- Hamlib rigctl
@@ -829,6 +882,131 @@ class RigctlServer(socketserver.ThreadingTCPServer):
 
 # ---------------------------------------------------------------------- HTTP
 
+# ------------------------------------------------------- profiles via radio
+
+RADIO = os.environ.get("RXD_RADIO") or shutil.which("radio") or "/usr/local/bin/radio"
+_profiles = {"at": 0.0, "doc": None}
+
+
+def list_profiles():
+    """radio's profiles and the active one ({"active", "profiles"}), cached briefly."""
+    if _profiles["doc"] is not None and time.monotonic() - _profiles["at"] < 5:
+        return _profiles["doc"]
+    out = subprocess.run([RADIO, "--json"], capture_output=True, text=True, timeout=15)
+    if out.returncode != 0:
+        raise OSError((out.stderr or out.stdout).strip() or "radio --json failed")
+    _profiles.update(at=time.monotonic(), doc=json.loads(out.stdout))
+    return _profiles["doc"]
+
+
+def spawn_switch(name):
+    """Run `radio NAME` outside this unit: it stops this very rxd to start the next.
+
+    systemd-run --scope puts radio (and any JS8Call it starts) in a scope of
+    its own, so neither dies with rxd@OLD when radio stops it.
+    """
+    env = dict(os.environ)
+    env.setdefault("DISPLAY", ":0")  # radio drives JS8Call's window through i3
+    argv = [RADIO, "--no-focus", name]
+    if shutil.which("systemd-run"):
+        argv = ["systemd-run", "--user", "--scope", "--collect", "--quiet",
+                "--unit=radio-switch-%d" % int(time.time() * 1000)] + argv
+    subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+    _profiles["doc"] = None
+
+
+# ----------------------------------------------------------- JS8Call's log
+
+JS8_LOG = os.path.expanduser(os.environ.get("RXD_JS8_LOG",
+                                            "~/.local/share/JS8Call/DIRECTED.TXT"))
+JS8_INI = os.path.expanduser("~/.config/JS8Call.ini")
+
+
+def js8_mycall():
+    cp = configparser.ConfigParser(interpolation=None, strict=False, delimiters=("=",),
+                                   comment_prefixes=())
+    cp.optionxform = str
+    try:
+        cp.read(JS8_INI, encoding="utf-8")
+    except (OSError, configparser.Error):
+        return None
+    for sec in ("Configuration", "Common"):
+        if cp.has_option(sec, "MyCall"):
+            return cp.get(sec, "MyCall").strip() or None
+    return None
+
+
+class Js8Feed:
+    """New lines of DIRECTED.TXT, parsed and numbered, read as they're asked for."""
+
+    KEEP = 500
+
+    def __init__(self, path=None):
+        self.path = path or JS8_LOG
+        self.lock = threading.Lock()
+        self.lines = collections.deque(maxlen=self.KEEP)
+        self.seq = 0
+        self.pos = None
+        self.inode = None
+        self.partial = b""
+
+    @staticmethod
+    def parse(raw):
+        f = raw.rstrip("\n").split("\t")
+        if len(f) < 5:
+            return None
+        text = f[4].replace("\u2662", "").strip()  # JS8Call's end-of-message diamond
+        frm, _, body = text.partition(":")
+        words = body.split()
+        to = words[0] if words and not words[0].startswith("@") and words[0].isalnum() else None
+        try:
+            freq = float(f[1]) * 1e6 if float(f[1]) < 1000 else float(f[1])
+            off, snr = int(f[2]), int(f[3])
+        except ValueError:
+            return None
+        return {"time": f[0], "freq": freq, "offset": off, "snr": snr,
+                "from": frm.strip() or None, "to": to, "text": text}
+
+    def refresh(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            return
+        if self.inode != st.st_ino or (self.pos or 0) > st.st_size:
+            # First read, or logrotate moved it: start over, from the last 64 KB.
+            self.inode, self.partial = st.st_ino, b""
+            self.pos = max(st.st_size - 65536, 0)
+            skip_first = self.pos > 0
+        else:
+            skip_first = False
+        if st.st_size == self.pos:
+            return
+        with open(self.path, "rb") as fh:
+            fh.seek(self.pos)
+            data = self.partial + fh.read()
+            self.pos = fh.tell()
+        rows = data.split(b"\n")
+        self.partial = rows.pop()
+        if skip_first and rows:
+            rows.pop(0)
+        for r in rows:
+            line = self.parse(r.decode("utf-8", "replace"))
+            if line:
+                self.seq += 1
+                line["seq"] = self.seq
+                self.lines.append(line)
+
+    def since(self, after):
+        with self.lock:
+            self.refresh()
+            if after <= 0:
+                out = list(self.lines)[-200:]
+            else:
+                out = [x for x in self.lines if x["seq"] > after]
+            return {"seq": self.seq, "lines": out}
+
+
 # The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
 # a checkout. Read on every request so a reinstall needs no restart.
 WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
@@ -864,6 +1042,20 @@ class Api(BaseHTTPRequestHandler):
         if path == "/api/spectrum":
             spec = self.server.rx.spectrum
             return self.send(200, spec) if spec else self.send(503, {"error": "no spectrum yet"})
+        if path == "/api/profiles":
+            try:
+                return self.send(200, list_profiles())
+            except (OSError, ValueError, subprocess.SubprocessError) as e:
+                return self.send(503, {"error": "can't list profiles: %s" % e})
+        if path == "/api/js8":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                after = int(q.get("after", ["0"])[0])
+            except ValueError:
+                return self.send(400, {"error": "after must be a number"})
+            return self.send(200, self.server.js8.since(after))
+        if path == "/api/audio":
+            return self.audio()
         if path in ("/", "/index.html"):
             page = web_page()
             if page is None:
@@ -877,7 +1069,42 @@ class Api(BaseHTTPRequestHandler):
             return
         self.send(404, {"error": "not found"})
 
+    def audio(self):
+        rx = self.server.rx
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        try:
+            rate = int(q.get("rate", ["24000"])[0])
+        except ValueError:
+            rate = 0
+        if rate not in rx.STREAM_RATES:
+            return self.send(400, {"error": "rate must be one of %s" % (rx.STREAM_RATES,)})
+        chunks = rx.listen(rate)
+        if chunks is None:
+            return self.send(429, {"error": "%d clients are already listening" % rx.MAX_LISTENERS})
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("X-Audio-Rate", str(rate))
+            self.send_header("X-Audio-Format", "s16le; channels=1")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Expose-Headers", "X-Audio-Rate")
+            self.end_headers()
+            # HTTP/1.0: the stream simply runs until either side closes it.
+            while not rx.stop.is_set():
+                try:
+                    data = chunks.get(timeout=5)
+                except queue.Empty:
+                    continue
+                self.wfile.write(data)
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            rx.unlisten(chunks)
+
     def do_POST(self):
+        if self.path == "/api/profile":
+            return self.switch()
         if self.path != "/api/tune":
             return self.send(404, {"error": "not found"})
         try:
@@ -892,6 +1119,27 @@ class Api(BaseHTTPRequestHandler):
         except (ValueError, TypeError, AttributeError) as e:
             return self.send(400, {"error": str(e)})
         self.send(200, self.server.rx.status())
+
+    def switch(self):
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            doc = json.loads(self.rfile.read(n) or b"{}")
+            name = doc.get("name") if isinstance(doc, dict) else None
+            if not isinstance(name, str):
+                raise ValueError('body must be {"name": PROFILE}')
+            names = [p["name"] for p in list_profiles()["profiles"]]
+            if name not in names:
+                raise ValueError("no profile '%s' (have: %s)" % (name, ", ".join(names)))
+        except (ValueError, TypeError) as e:
+            return self.send(400, {"error": str(e)})
+        except (OSError, subprocess.SubprocessError) as e:
+            return self.send(503, {"error": "can't list profiles: %s" % e})
+        try:
+            spawn_switch(name)
+        except OSError as e:
+            return self.send(503, {"error": "can't run radio: %s" % e})
+        log("switching to %s for an HTTP client" % name)
+        self.send(202, {"switching": name})
 
 
 # ---------------------------------------------------------------------- main
@@ -955,6 +1203,7 @@ def main(argv=None):
         hs = ThreadingHTTPServer(hostport(a.http, 8073), Api)
         hs.daemon_threads = True
         hs.rx = rx
+        hs.js8 = Js8Feed()
         servers.append(hs)
     for srv in servers:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
