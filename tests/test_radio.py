@@ -243,7 +243,7 @@ class RadioTest(unittest.TestCase):
     def test_js8_profile_is_the_dial_and_the_speaker(self):
         p = self.r.PROFILES["js8"]
         self.assertEqual((p["frequency"], p["decoder"], p["sink"]),
-                         (7078000.0, "js8", self.r.SPEAKER))
+                         (7078000.0, "js8", self.r.STATION.sink))
         self.assertGreater(p["volume"], 0)
         self.radio("js8")
         self.rxd.status = {"freq": 7080000.0, "mode": "USB", "bandwidth": 2800.0,

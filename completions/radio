@@ -1,20 +1,24 @@
-# Managed by rx/setup.sh — tab completion for radio.
+# bash completion for radio, installed by rxd's install.py.
+# Profile names come from 'radio --names', which also lists the radio-CMD
+# extensions on PATH; an extension completes its own arguments when it
+# answers 'radio-CMD --complete WORDS...' with one candidate per line.
 _radio() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
-    local names
+    local i=1 names
+    [[ ${COMP_WORDS[1]} == --no-focus ]] && i=2
     names=$(radio --names 2>/dev/null)
-    case $prev in
+    if (( COMP_CWORD == i )); then
+        COMPREPLY=($(compgen -W "$names off resume save reset show help --no-focus" -- "$cur"))
+        return
+    fi
+    local cmd=${COMP_WORDS[i]}
+    case $cmd in
         save|reset|show)
-            COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
-        radio|--no-focus)
-            COMPREPLY=($(compgen -W "$names meshtastic meshcore mesh off resume save reset show help --no-focus" -- "$cur")) ;;
-        mesh)
-            COMPREPLY=($(compgen -W "nodes send dm join info on off" -- "$cur")) ;;
-        dm)
-            # Names seen by the last 'radio mesh nodes' on the active network.
-            local net
-            net=$(cat ~/.config/rx/radio/mesh 2>/dev/null || echo meshtastic)
-            COMPREPLY=($(compgen -W "$(cat ~/.cache/rx/mesh-names-"$net" 2>/dev/null)" -- "$cur")) ;;
+            (( COMP_CWORD == i + 1 )) && COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
+        *)
+            if command -v "radio-$cmd" >/dev/null 2>&1; then
+                COMPREPLY=($(compgen -W "$("radio-$cmd" --complete "${COMP_WORDS[@]:i+1:COMP_CWORD-i-1}" 2>/dev/null)" -- "$cur"))
+            fi ;;
     esac
 }
 complete -F _radio radio

@@ -2,7 +2,7 @@
 """rxd: a small RTL-SDR receiver daemon, the receiver behind `radio`.
 
   rxd PROFILE                 receive with a radio profile (a name under
-                              ~/.config/rx/radio/ or a path to its JSON)
+                              ~/.config/rxd/radio/ or a path to its JSON)
   rxd PROFILE --audio stdout  raw s16le mono 48 kHz on stdout instead
   rxd PROFILE --iq FILE|-     read cu8 IQ from a file or stdin, not a dongle
   rxd PROFILE --iq synth      a synthetic signal: noise plus a test tone
@@ -22,7 +22,8 @@ PipeWire/PulseAudio sink. Control is over HTTP, on 127.0.0.1 by default:
 A JS8 profile ("decoder": "js8") also decodes JS8 itself, with js8.py beside
 rxd or in /usr/local/lib/rxd/; GET /api/js8 lists the messages. A WSPR
 profile ("decoder": "wspr") decodes WSPR with wsprd and reports the spots to
-WSPRnet as $RXD_CALL at $RXD_GRID; GET /api/wspr lists them. Both decode
+WSPRnet as the station's call at its grid (/etc/rxd/station.json, see
+docs/station.md); GET /api/wspr lists them. Both decode
 the audio before squelch and volume, so the volume is only the speaker's.
 
 A profile's "frequency" is the dial: for USB, where a signal 1500 Hz up in
@@ -59,19 +60,21 @@ for _var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
 import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
-STATE = os.path.expanduser("~/.config/rx/radio")
+STATE = os.path.expanduser("~/.config/rxd/radio")
 # Where this file really is: bin/rxd is a link to it, and js8.py and the
 # browser UI are installed beside it.
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import station as station_conf  # noqa: E402
 AUDIO_RATE = 48000
 # A profile's "offset": "auto" (the default) upconverts below
-# upconvert_below_hz, since the R820T tunes no lower than about 24 MHz and
-# the Ham It Up is how HF gets in; "Ham-It-Up" always upconverts and "None"
-# (or SDR++'s "Manual") never does. The Ham It Up's own UPCONVERT/BYPASS
-# switch is physical: rxd can only report which way it should be.
+# upconvert_below_hz when the station has an upconverter (station.json), since
+# the R820T tunes no lower than about 24 MHz and an upconverter such as the
+# Ham It Up is how HF gets in; "Ham-It-Up" always upconverts and "None" (or
+# SDR++'s "Manual") never does. A profile's own upconverter_hz and
+# upconvert_below_hz win over the station's. An upconverter's UPCONVERT/BYPASS
+# switch may be physical: rxd can only report which way it should be.
 OFFSET_MODES = ("auto", "Ham-It-Up", "None", "Manual")
-UPCONVERTER_HZ = 125e6
-UPCONVERT_BELOW_HZ = 30e6
 # Profile sink descriptions -> PipeWire node names (None: default sink).
 SINKS = {"Built-in Audio": None}
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
@@ -82,6 +85,25 @@ DEFAULT_BW = {"USB": 2800.0, "LSB": 2800.0, "AM": 10000.0, "FM": 12500.0,
 
 def log(msg):
     print("rxd: " + msg, file=sys.stderr, flush=True)
+
+
+_station = {"key": None, "st": None}
+
+
+def station():
+    """The station file (docs/station.md), read again whenever it changes."""
+    path = station_conf.path()
+    try:
+        mtime = os.stat(path).st_mtime_ns
+    except OSError:
+        mtime = None
+    key = (path, mtime)
+    if _station["key"] != key:
+        st = station_conf.load(path)
+        for p in st.problems:
+            log("station: " + p)
+        _station.update(key=key, st=st)
+    return _station["st"]
 
 
 # ------------------------------------------------------------------ profile
@@ -125,10 +147,11 @@ class Settings:
             self.offset_mode = p.get("offset", "auto")
             if self.offset_mode not in OFFSET_MODES:
                 raise ValueError("offset must be one of " + ", ".join(OFFSET_MODES))
-            self.upconverter_hz = float(p.get("upconverter_hz", UPCONVERTER_HZ))
-            self.upconvert_below = float(p.get("upconvert_below_hz", UPCONVERT_BELOW_HZ))
+            st = station()
+            self.upconverter_hz = float(p.get("upconverter_hz", st.upconverter_hz))
+            self.upconvert_below = float(p.get("upconvert_below_hz", st.upconvert_below_hz))
             rtl = p.get("rtl", {})
-            self.serial = str(rtl.get("serial", ""))
+            self.serial = str(rtl.get("serial") or st.serial)
             self.gain_index = rtl.get("gain")
             # A saved gain_db wins; otherwise the index (SDR++'s convention)
             # is looked up in the dongle's gain table once it is open.
@@ -139,7 +162,8 @@ class Settings:
             self.audio = audio_settings(p.get("audio"))
             self.ppm = int(rtl.get("ppm", 0))
             self.bias_t = bool(rtl.get("biasT", False))
-            self.sink = SINKS.get(p.get("sink"), p.get("sink"))
+            sink = p["sink"] if "sink" in p else st.sink
+            self.sink = SINKS.get(sink, sink)
             # What rxd decodes in this profile's audio: JS8, WSPR or nothing.
             self.decoder = p.get("decoder")
             if self.decoder not in DECODERS:
@@ -1592,29 +1616,27 @@ def grid_km(a, b):
     return int(round(float(2 * 6371 * np.arcsin(np.sqrt(h)))))
 
 
-STATION_MISSING = "set RXD_CALL and RXD_GRID in /etc/rx/rxd.env"
+def upconverter_name():
+    return station().upconverter_name or "upconverter"
+
+
+def station_missing():
+    return "set call and grid in %s" % station_conf.path()
 
 
 def station_id():
-    """(call, grid): this station, from $RXD_CALL and $RXD_GRID (rxd.env)."""
-    call = os.environ.get("RXD_CALL")
-    grid = os.environ.get("RXD_GRID")
-    call = call.strip().upper() if call else None
-    if grid and GRID.match(grid.strip()):
-        g = grid.strip()
-        grid = g[:4].upper() + g[4:].lower()
-    else:
-        grid = None
-    return call or None, grid
+    """(call, grid): this station, from station.json ($RXD_CALL and $RXD_GRID win)."""
+    return station().identity()
 
 
 def station_status():
-    """{"call", "grid"}, and "missing" saying what to set when either is."""
+    """{"call", "grid", "file", "upconverter", "problems"}, and "missing" saying
+    what to set when the call or grid is."""
     call, grid = station_id()
-    doc = {"call": call, "grid": grid}
+    doc = dict({"call": call, "grid": grid}, **station().describe())
     if not call or not grid:
         doc["missing"] = "no %s: %s" % (" or ".join(
-            x for x, v in (("callsign", call), ("grid", grid)) if not v), STATION_MISSING)
+            x for x, v in (("callsign", call), ("grid", grid)) if not v), station_missing())
     return doc
 
 
@@ -1912,7 +1934,7 @@ class WsprDecoder:
         snap = self.s.snapshot()
         if self.reporter is None:
             report = {"enabled": False, "call": self.call, "grid": self.grid,
-                      "reason": "no callsign and grid to report as: " + STATION_MISSING}
+                      "reason": "no callsign and grid to report as: " + station_missing()}
         else:
             report = self.reporter.status()
             report["enabled"] = bool(snap.get("wspr_report"))
@@ -1931,11 +1953,11 @@ class WsprDecoder:
 # minutes of JS8 each, and learns. Band changes go through `radio NAME`, which
 # restarts rxd, so the planner keeps everything on disk and picks up where it
 # was in the next rxd:
-#   ~/.config/rx/bands.json             its settings, as the UI sets them
+#   ~/.config/rxd/bands.json            its settings, as the UI sets them
 #   ~/.local/share/rxd/bands.json       what was heard, per profile and UTC hour
 #   ~/.local/share/rxd/bandplan.json    where it is: scanning or holding, and why
 #   ~/.local/share/rxd/conditions.json  the last band conditions fetched
-BANDS_CONF = os.path.expanduser(os.environ.get("RXD_BANDS_CONF", "~/.config/rx/bands.json"))
+BANDS_CONF = os.path.expanduser(os.environ.get("RXD_BANDS_CONF", "~/.config/rxd/bands.json"))
 BANDS_DIR = os.path.expanduser(os.environ.get("RXD_BANDS_DIR", "~/.local/share/rxd"))
 HAMQSL_URL = os.environ.get("RXD_HAMQSL", "https://www.hamqsl.com/solarxml.php")
 SWPC_FLUX_URL = os.environ.get("RXD_SWPC_FLUX",
@@ -2438,9 +2460,14 @@ class BandPlanner:
             self.rows_at = now
         return self.rows or []
 
+    def free_side(self):
+        """True when Auto may pick a band on the other side of the upconverter:
+        cross_side is on, or no person has to flip a switch to get there."""
+        return self.conf["cross_side"] or not station().manual_switch
+
     def side_up(self):
-        """True if the Ham It Up is (as far as rxd knows) on UPCONVERT: the side
-        the running profile needs, which is how Win last set the switch."""
+        """True if the upconverter is (as far as rxd knows) on UPCONVERT: the
+        side the running profile needs, which is how its switch was last set."""
         with self.rx.s.lock:
             return self.rx.s.upconverter() > 0
 
@@ -2463,9 +2490,9 @@ class BandPlanner:
         for r in self.plan_rows(now):
             if r["band"] not in en:
                 why[r["band"]] = "not enabled"
-            elif bool(r.get("upconvert")) != up and not self.conf["cross_side"]:
-                why[r["band"]] = "needs the Ham It Up on %s" % (
-                    "UPCONVERT" if r.get("upconvert") else "BYPASS")
+            elif bool(r.get("upconvert")) != up and not self.free_side():
+                why[r["band"]] = "needs the %s on %s" % (
+                    upconverter_name(), "UPCONVERT" if r.get("upconvert") else "BYPASS")
             else:
                 out.append(r)
         return out, why
@@ -2670,8 +2697,8 @@ class BandPlanner:
             st["reason"] = None
         cands, _ = self.candidates(now)
         if not cands:
-            st.update(phase="idle", reason="Auto: no %s bands enabled on the Ham It Up's %s side" % (
-                "WSPR" if self.conf["mode"] == "wspr" else "JS8",
+            st.update(phase="idle", reason="Auto: no %s bands enabled on the %s's %s side" % (
+                "WSPR" if self.conf["mode"] == "wspr" else "JS8", upconverter_name(),
                 "UPCONVERT" if self.side_up() else "BYPASS") if not self.rows_error else
                 "Auto: can't list profiles (%s)" % self.rows_error)
             return
@@ -2848,9 +2875,9 @@ class BandPlanner:
                     why = None
                     if r["band"] not in en:
                         why = "not enabled"
-                    elif bool(r.get("upconvert")) != up and not self.conf["cross_side"]:
-                        why = "needs the Ham It Up on %s" % (
-                            "UPCONVERT" if r.get("upconvert") else "BYPASS")
+                    elif bool(r.get("upconvert")) != up and not self.free_side():
+                        why = "needs the %s on %s" % (
+                            upconverter_name(), "UPCONVERT" if r.get("upconvert") else "BYPASS")
                     s = sc[r["name"]]
                     rows.append({"name": r["name"], "mode": mode, "band": r["band"],
                                  "freq": r.get("freq"), "upconvert": bool(r.get("upconvert")),
@@ -3481,7 +3508,7 @@ def main(argv=None):
     except ValueError as e:
         sys.exit("rxd: " + str(e))
     if not all(station_id()):
-        log("no station identity: " + STATION_MISSING)
+        log("no station identity: " + station_missing())
     rx.start()
     servers = []
     if a.http != "off":

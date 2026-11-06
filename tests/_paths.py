@@ -16,3 +16,12 @@ WEB = os.path.join(ROOT, "clients", "web", "index.html")
 for _p in (TUI, RXD):
     if _p not in sys.path:
         sys.path.insert(0, _p)
+
+# The tests' station: the hardware rxd was first written for (an RTL-SDR
+# behind a Ham It Up with its manual switch) and four local profiles, but no
+# call or grid, so nothing can report to WSPRnet. Never the machine's own
+# /etc/rxd/station.json. A test that wants another station sets RXD_STATION.
+STATION = os.path.join(TESTS, "fixtures", "station.json")
+os.environ["RXD_STATION"] = STATION
+for _k in ("RXD_CALL", "RXD_GRID"):
+    os.environ.pop(_k, None)

@@ -539,12 +539,15 @@ class Profiles(unittest.TestCase):
         old = {k: os.environ.get(k) for k in ("RXD_CALL", "RXD_GRID")}
         try:
             os.environ["RXD_CALL"], os.environ["RXD_GRID"] = "ka1pid", "em13LC"
-            self.assertEqual(rxd.station_status(), {"call": "KA1PID", "grid": "EM13lc"})
+            doc = rxd.station_status()
+            self.assertEqual((doc["call"], doc["grid"]), ("KA1PID", "EM13lc"))
+            self.assertNotIn("missing", doc)
+            self.assertEqual(doc["upconverter"]["name"], "Ham It Up")
             del os.environ["RXD_GRID"]
             doc = rxd.station_status()
             self.assertEqual((doc["call"], doc["grid"]), ("KA1PID", None))
             self.assertIn("no grid", doc["missing"])
-            self.assertIn("RXD_CALL and RXD_GRID in /etc/rx/rxd.env", doc["missing"])
+            self.assertIn("set call and grid in " + os.environ["RXD_STATION"], doc["missing"])
             del os.environ["RXD_CALL"]
             self.assertIn("no callsign or grid", rxd.station_status()["missing"])
         finally:

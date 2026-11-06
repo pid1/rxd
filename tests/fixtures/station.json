@@ -1,0 +1,15 @@
+{
+  "sdr": {"serial": "57818712"},
+  "upconverter": {"name": "Ham It Up", "hz": 125000000, "below_hz": 30000000, "switch": true},
+  "sink": "Built-in Audio",
+  "profiles": {
+    "dcara":    {"description": "DCARA", "frequency": 146920000, "demod": "FM",
+                 "demod_settings": {"bandwidth": 12500}, "rtl": {"gain": 20}},
+    "fm-93.3":  {"description": "93.3 FM", "frequency": 93300000, "demod": "WFM",
+                 "demod_settings": {"bandwidth": 150000}, "rtl": {"gain": 10}},
+    "fm-105.3": {"description": "105.3 FM", "frequency": 105300000, "demod": "WFM",
+                 "demod_settings": {"bandwidth": 150000}, "rtl": {"gain": 10}},
+    "am-820":   {"description": "820 AM", "frequency": 820000, "demod": "AM",
+                 "demod_settings": {"bandwidth": 10000}, "rtl": {"gain": 4}}
+  }
+}
