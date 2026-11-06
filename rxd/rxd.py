@@ -18,6 +18,9 @@ PipeWire/PulseAudio sink. Two control ports, both on 127.0.0.1 by default:
   8073  HTTP JSON: GET /api/status, POST /api/tune {"freq": 7078000,
         "mode": "USB", "bandwidth": 2800, "gain_db": 3.7, "volume": 0.2}
 
+A WSPR profile ("decoder": "wspr") also decodes WSPR with wsprd and reports
+the spots to WSPRnet; GET /api/wspr lists them.
+
 Frequencies on both ports are the dial, as JS8Call means it. A JS8 profile
 whose VFO sits off its js8call_dial (7077900 vs 7078000, tuned by hand)
 keeps that difference as a calibration, so the dial still reads 7078000.

@@ -18,7 +18,12 @@ two control ports on 127.0.0.1:
   `web/index.html` beside rxd.py. Listen addresses default to `$RXD_HTTP` and
   `$RXD_RIGCTL` when there's no `--http` or `--rigctl` flag.
 
-Modes: USB, LSB, AM, FM and WFM (mono, no RDS). Needs only `python3-numpy` and
+Modes: USB, LSB, AM, FM and WFM (mono, no RDS). A profile with
+`"decoder": "wspr"` also decodes WSPR: each two-minute slot of its audio goes
+to `wsprd`, the spots to `GET /api/wspr?after=SEQ` and, unless
+`"wspr_report": false`, to WSPRnet (see docs/radio.md). Status reports the
+decoder (`decoder`: js8, wspr or null) and the WSPR cycle and reporting
+state (`wspr`). Needs only `python3-numpy` and
 `python3-scipy`, already on the uConsole; librtlsdr and libpulse-simple are
 loaded with ctypes.
 
@@ -89,4 +94,3 @@ Hamlib 4.5.4 on the device talks to rxd without errors.
 - **I/Q correction:** none yet. A strong signal mirrored around the tuner
   frequency could leak in at roughly -30 to -40 dB.
 - **Signal strength:** `l STRENGTH` is uncalibrated: dBFS + 73.
-- **Clients:** a TUI and a browser UI.

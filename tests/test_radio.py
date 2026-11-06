@@ -142,7 +142,7 @@ class RadioTest(unittest.TestCase):
         r.running = lambda proc: proc == "js8call" and self.js8_up
         r.start = lambda argv, pat: self.calls.append(("start", argv[0]))
         r.ensure_js8_sink = lambda: self.calls.append(("sink",))
-        r.check_clock = lambda: None
+        r.check_clock = lambda *a: None
         r.i3 = lambda cmd: self.calls.append(("i3", cmd))
 
     def tearDown(self):
@@ -414,6 +414,25 @@ class RadioTest(unittest.TestCase):
         self.assertFalse(p["demod_settings"]["squelchEnabled"])
         self.assertEqual(self.r.capture(p, {})["demod_settings"], p["demod_settings"])
 
+    def test_wspr_profile_and_its_reporting_switch(self):
+        p = self.r.profile("wspr")
+        self.assertEqual((p["decoder"], p["wspr_report"], p["volume"]), ("wspr", True, 0.0))
+        self.assertTrue(self.r.upconverting(p))
+        off = {"wspr": {"report": {"enabled": False, "call": "KA1PID", "grid": "EM13lc"}}}
+        self.assertFalse(self.r.capture(p, off)["wspr_report"])
+        # No callsign: rxd can't report, which says nothing about the setting.
+        cant = {"wspr": {"report": {"enabled": False, "reason": "no callsign"}}}
+        self.assertTrue(self.r.capture(p, cant)["wspr_report"])
+        self.assertNotIn("wspr_report", self.r.capture(self.r.profile("js8"), off))
+
+    def test_switch_to_wspr_closes_js8call(self):
+        self.radio("js8")
+        self.calls.clear()
+        self.radio("wspr")
+        self.assertIn(("close", "js8call"), self.calls)
+        self.assertEqual(self.up(), "rxd@wspr.service")
+        self.assertEqual(self.saved("wspr")["decoder"], "wspr")
+
     def test_json_lists_profiles_for_the_web_ui(self):
         self.radio("js8")
         doc = json.loads(self.radio("--json")[0])
@@ -422,7 +441,10 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(list(rows)[:2], ["ghostnet", "js8"])
         self.assertEqual(rows["js8"], {"name": "js8", "description": "JS8, 40 m",
                                        "freq": 7078000.0, "mode": "USB", "upconvert": True,
-                                       "js8": True, "saved": True})
+                                       "js8": True, "decoder": "js8", "saved": True})
+        self.assertEqual((rows["wspr"]["decoder"], rows["wspr"]["js8"], rows["wspr"]["freq"]),
+                         ("wspr", False, 7038600.0))
+        self.assertIsNone(rows["vhf"]["decoder"])
         self.assertEqual((rows["fm-105.3"]["upconvert"], rows["fm-105.3"]["js8"],
                           rows["fm-105.3"]["mode"]), (False, False, "WFM"))
         self.assertTrue(rows["am-820"]["upconvert"])
