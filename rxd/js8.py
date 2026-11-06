@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""js8: rxd's own JS8 receiver, so a JS8 profile needs no JS8Call.
+"""js8: rxd's JS8 receiver.
 
 Receive only. It takes slots of 12 kHz audio, finds JS8 signals in them and
-turns them into the frames and messages JS8Call shows:
+turns them into JS8 frames and messages:
 
   candidates    a spectrogram one symbol long, a quarter symbol apart, scored
                 against the three 7x7 Costas arrays every JS8 signal carries
@@ -17,12 +17,12 @@ turns them into the frames and messages JS8Call shows:
                 or data frame -> text, then frames are joined into messages
 
 Run as a script it serves decodes for rxd over a pipe (--serve), decodes WAV
-files (--wav), or reports what it is (--version). See rxd/README.md for the
+files (--wav), builds the JSC word table (--jsc-import-source), or reports
+what it is (--version). See rxd/README.md for the
 protocol sources and their licences: no JS8Call or WSJT-X code is used here.
 """
 import json
 import os
-import struct
 import sys
 import time
 
@@ -628,7 +628,7 @@ GROUPS = ("<....>", "@ALLCALL", "@JS8NET", "@DX/NA", "@DX/SA", "@DX/EU", "@DX/AS
 GROUP_VALUE = {g: NBASECALL + 1 + i for i, g in enumerate(GROUPS)}
 VALUE_GROUP = {v: g for g, v in GROUP_VALUE.items()}
 
-# Directed commands by their 5-bit code, as JS8Call writes them.
+# Directed commands by their 5-bit code, as JS8 writes them out.
 COMMANDS = {0: " SNR?", 1: " DIT DIT", 2: " NACK", 3: " HEARING?", 4: " GRID?", 5: ">",
             6: " STATUS?", 7: " STATUS", 8: " HEARING", 9: " MSG", 10: " MSG TO:",
             11: " QUERY", 12: " QUERY MSGS", 13: " QUERY CALL", 14: " ACK", 15: " GRID",
@@ -639,7 +639,7 @@ COMMAND_CODE = {v: k for k, v in COMMANDS.items()}
 SNR_COMMANDS = (25, 29)
 # Commands whose text comes after them in data frames, with a checksum of
 # that text at the end: relay, MSG, MSG TO:, QUERY, QUERY MSGS, QUERY CALL,
-# CMD. JS8Call drops one whose checksum is wrong, and so does rxd.
+# CMD. One whose checksum is wrong is dropped, as JS8 applications do.
 CHECKSUMMED = (5, 9, 10, 11, 12, 13, 24)
 CHECK_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?"
 CQS = ("CQ CQ CQ", "CQ DX", "CQ QRP", "CQ CONTEST", "CQ FIELD", "CQ FD", "CQ CQ", "CQ")
@@ -875,7 +875,7 @@ def _huffman(bits):
 
 def unpack(frame, i3):
     """One frame -> a dict: kind (heartbeat, cq, compound, directed, data or
-    raw), text as JS8Call shows it, and the parts. Data that needs the JSC
+    raw), text as JS8 shows it, and the parts. Data that needs the JSC
     table and doesn't have it comes back as kind "jsc" with text None."""
     v = frame_value(frame)
     flag = _field(v, 0, 3)
@@ -994,21 +994,21 @@ def value_frame(v):
 
 # --------------------------------------------------------- the messages
 
-EOT = "♢"   # JS8Call's end-of-message mark
+EOT = "♢"   # JS8's end-of-message mark
 GAP = "……"
 
 
 class Assembler:
-    """Joins frames into the messages JS8Call writes to DIRECTED.TXT.
+    """Joins frames into messages, as written to DIRECTED.TXT.
 
     A message is the frames one station sends at one offset, slot after slot,
     from a frame flagged first to one flagged last. Heartbeats, CQs and
     directed commands start one; data frames continue it. A missing frame
     shows as '……', and a message that stops without its last frame is let go
     after a few slots. feed(slot, decodes) returns the finished messages as
-    dicts: from, to, text (in JS8Call's form), freq, snr, submode, slot."""
+    dicts: from, to, text (in JS8's usual form), freq, snr, submode, slot."""
 
-    TOLERANCE = 10.0   # Hz between frames of one message (JS8Call's default)
+    TOLERANCE = 10.0   # Hz between frames of one message
     LINGER = 3         # slots without a frame before an unfinished message goes
 
     def __init__(self):
@@ -1146,14 +1146,14 @@ class Assembler:
 # ----------------------------------------------------------- the records
 
 def all_line(slot, d, text):
-    """A line in JS8Call's ALL.TXT form."""
+    """A line in JS8's usual ALL.TXT form."""
     return "%s%3d %4.1f %4d %s  %-12s         %d   %s" % (
         time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(slot)), d["snr"], d["dt"],
         int(round(d["freq"])), d["submode"], d["frame"], d["i3"], text if text is not None else "")
 
 
 def directed_line(when, dial, msg):
-    """A line in JS8Call's DIRECTED.TXT form (the offset is the sender's)."""
+    """A line in JS8's usual DIRECTED.TXT form (the offset is the sender's)."""
     return "%s\t%.6f\t%d\t%s\t%s" % (time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(when)),
                                      dial / 1e6, int(round(msg["freq"])), snr_text(msg["snr"]),
                                      msg["text"])
@@ -1264,7 +1264,7 @@ class Resampler:
 
 class SlotDecoder:
     """rxd's audio -> slots by the system clock -> the decoder process ->
-    ALL.TXT and DIRECTED.TXT under datadir, in JS8Call's forms.
+    ALL.TXT and DIRECTED.TXT under datadir, in JS8's usual log forms.
 
     push() is called from rxd's DSP thread with the audio before squelch and
     volume; it only copies into a ring and hands finished slots to a worker
@@ -1462,88 +1462,107 @@ def jsc_path():
 # ------------------------------------------------- the JSC word table
 
 JSC_WORDS = 262144
+# The table's source: JS8Call's jsc_map.cpp (GPL-3, (C) 2018 Jordan Sherer),
+# so it is never in rx; setup.sh fetches it at install and this importer,
+# rx's own code, turns it into the word list rxd reads. Pinned to the commit
+# of JS8Call v2.2.0-ga in the original repository. The same table, entry for
+# entry, is in that repository's later main and in JS8Call-improved v3.0.3
+# (JS8_JSC/JSC_map.cpp), whose file is laid out differently.
+JSC_SOURCE_URL = ("https://raw.githubusercontent.com/js8call/js8call/"
+                  "99018054a3b273f7086f4e086f5b848c645c23c8/jsc_map.cpp")
+JSC_SOURCE_BYTES = 6296397
+JSC_SOURCE_SHA256 = "63dcea037badcdc49c5fc29a23438b66953fbfefcc1e354331f58c7dec232927"
+_JSC_ENTRY = None
 
 
-def jsc_import(src, dest=None):
+def jsc_table_path():
+    return os.path.join(JS8_DIR, "jsc_map.txt")
+
+
+def jsc_installed_sha256(dest=None):
+    """The SHA-256 of the source the installed table was built from, or None."""
+    try:
+        with open((dest or jsc_table_path()) + ".sha256", encoding="ascii") as fh:
+            return fh.read().split()[0]
+    except (OSError, IndexError):
+        return None
+
+
+def jsc_import(src, dest=None, sha256=JSC_SOURCE_SHA256, words=JSC_WORDS):
     """Write the JSC word table, one word per line in code order (escaped as
-    Python writes a string's insides, since one word is a newline), from the
-    user's own copy of JS8Call: its program, /usr/bin/js8call from the
-    js8call package.
-    The table is JS8Call's (GPL-3); rxd neither ships nor needs it, but with
-    it rxd can show compressed free text. Returns (dest, word count)."""
-    dest = dest or os.path.join(os.path.expanduser("~/.local/share/rxd/js8"), "jsc_map.txt")
+    Python writes a string's insides, since one word is a newline), from a
+    copy of jsc_map.cpp checked against sha256, and beside it the source's
+    SHA-256 (DEST.sha256). Nothing is replaced unless all of it succeeds, so
+    a bad or partial download leaves the table already there. Returns (dest,
+    word count)."""
+    import hashlib
+    dest = dest or jsc_table_path()
     with open(src, "rb") as fh:
         data = fh.read()
-    if data[:4] != b"\x7fELF":
-        raise ValueError("%s is not a program; give the path to js8call" % src)
-    words = _jsc_from_elf(data)
-    if len(words) != JSC_WORDS:
-        raise ValueError("%s: found %d JSC words, not %d" % (src, len(words), JSC_WORDS))
+    digest = hashlib.sha256(data).hexdigest()
+    if sha256 is not None and digest != sha256:
+        raise ValueError("%s is not the pinned jsc_map.cpp (sha256 %s, want %s)"
+                         % (src, digest, sha256))
+    table = jsc_parse(data.decode("latin-1"), words)
     os.makedirs(os.path.dirname(dest), exist_ok=True)
-    tmp = dest + ".new"
-    with open(tmp, "w", encoding="ascii", newline="\n") as fh:
-        fh.write("".join(w.encode("unicode_escape").decode("ascii") + "\n" for w in words))
-    os.replace(tmp, dest)
-    return dest, len(words)
+    for path, body in ((dest, "".join(w.encode("unicode_escape").decode("ascii") + "\n"
+                                      for w in table)),
+                       (dest + ".sha256", digest + "  " + os.path.basename(src) + "\n")):
+        tmp = path + ".new"
+        with open(tmp, "w", encoding="ascii", newline="\n") as fh:
+            fh.write(body)
+        os.replace(tmp, path)
+    global _JSC
+    _JSC = None   # this process reads it at its next look; rxd at its next start
+    return dest, len(table)
 
 
-def _jsc_from_elf(data):
-    """JSC::map in a 64-bit little-endian ELF: 262144 entries of {char *str,
-    int size, int index}, index counting up from 0. In a position-independent
-    program the pointers are filled in at load time, so they are read from
-    the relative relocations."""
-    if data[4] != 2 or data[5] != 1:
-        raise ValueError("only 64-bit little-endian programs")
-    shoff, = struct.unpack_from("<Q", data, 0x28)
-    phoff, = struct.unpack_from("<Q", data, 0x20)
-    phnum, = struct.unpack_from("<H", data, 0x38)
-    shnum, = struct.unpack_from("<H", data, 0x3C)
-    loads = []
-    for i in range(phnum):
-        p_type, _, p_offset, p_vaddr, _, p_filesz = struct.unpack_from("<IIQQQQ", data, phoff + 56 * i)
-        if p_type == 1:
-            loads.append((p_vaddr, p_offset, p_filesz))
+def jsc_parse(text, words=JSC_WORDS):
+    """The words of jsc_map.cpp's JSC::map array, by index: entries
+    {"word", size, index}, a C string literal, sometimes with a comment."""
+    import re
+    global _JSC_ENTRY
+    _JSC_ENTRY = _JSC_ENTRY or re.compile(
+        r'\{\s*"((?:[^"\\]|\\.)*)"\s*(?:/\*.*?\*/\s*)?,\s*\d+\s*,\s*(\d+)\s*\}')
+    start = text.index("JSC::map[")
+    body = text[start:text.index("};", start)]
+    n = words
+    words = [None] * n
+    for m in _JSC_ENTRY.finditer(body):
+        i = int(m.group(2))
+        if i < n:
+            words[i] = _c_unescape(m.group(1))
+    if None in words:
+        raise ValueError("jsc_map.cpp: %d of %d words missing" % (words.count(None), n))
+    return words
 
-    def at(vaddr):
-        for va, off, size in loads:
-            if va <= vaddr < va + size:
-                return off + vaddr - va
-        raise ValueError("address %#x is not in the program" % vaddr)
 
-    def vaddr_of(off):
-        for va, o, size in loads:
-            if o <= off < o + size:
-                return va + off - o
-        raise ValueError("offset %#x is not loaded" % off)
-
-    relocs = {}
-    for i in range(shnum):
-        sh = struct.unpack_from("<IIQQQQIIQQ", data, shoff + 64 * i)
-        if sh[1] == 4 and sh[9] == 24:   # SHT_RELA
-            r = np.frombuffer(data, "<u8", count=sh[5] // 8, offset=sh[4]).reshape(-1, 3)
-            rel = r[(r[:, 1] & 0xFFFFFFFF) == 1027]   # R_AARCH64_RELATIVE
-            relocs.update(zip(rel[:, 0].tolist(), rel[:, 2].tolist()))
-    u = np.frombuffer(data[: len(data) // 4 * 4], "<u4")
-    hits = np.nonzero((u[:-20] == 0) & (u[4:-16] == 1) & (u[8:-12] == 2) &
-                      (u[12:-8] == 3) & (u[16:-4] == 4))[0]
-    for h in hits:
-        base = 4 * int(h) - 12
-        idx = u[(base + 12) // 4::4][:JSC_WORDS]
-        if len(idx) < JSC_WORDS or not (idx == np.arange(JSC_WORDS)).all():
+def _c_unescape(s):
+    simple = {"n": "\n", "t": "\t", "r": "\r", "\\": "\\", '"': '"', "'": "'", "a": "\a",
+              "b": "\b", "f": "\f", "v": "\v", "?": "?"}
+    out, i = [], 0
+    while i < len(s):
+        if s[i] != "\\":
+            out.append(s[i])
+            i += 1
             continue
-        words = []
-        for e in range(JSC_WORDS):
-            off = base + 16 * e
-            ptr, = struct.unpack_from("<Q", data, off)
-            ptr = ptr or relocs.get(vaddr_of(off))
-            if not ptr:
-                break
-            s = at(ptr)
-            words.append(data[s:data.index(b"\0", s)].decode("latin-1"))
-        if len(words) == JSC_WORDS:
-            return words
-    raise ValueError("no JSC word table in this program")
-
+        n = s[i + 1]
+        if n == "x":
+            j = i + 2
+            while j < len(s) and s[j] in "0123456789abcdefABCDEF":
+                j += 1
+            out.append(chr(int(s[i + 2:j], 16) & 0xFF))
+            i = j
+        elif n in "01234567":
+            j = i + 1
+            while j < len(s) and j < i + 4 and s[j] in "01234567":
+                j += 1
+            out.append(chr(int(s[i + 1:j], 8) & 0xFF))
+            i = j
+        else:
+            out.append(simple.get(n, n))
+            i += 2
+    return "".join(out)
 
 def main(argv=None):
     import argparse
@@ -1553,8 +1572,12 @@ def main(argv=None):
     ap.add_argument("--t0", type=float, default=0.0,
                     help="where the WAV starts, in seconds from the slot's start")
     ap.add_argument("--submode", default="normal", help="normal, fast, turbo, slow or all")
-    ap.add_argument("--jsc-import", metavar="FILE",
-                    help="build the JSC word table from your JS8Call (/usr/bin/js8call)")
+    ap.add_argument("--jsc-import-source", metavar="FILE",
+                    help="build the JSC word table from JS8Call's jsc_map.cpp "
+                    "(JSC_SOURCE_URL, checked against JSC_SOURCE_SHA256)")
+    ap.add_argument("--jsc-pin", action="store_true",
+                    help="print the pinned source's URL, SHA-256, and whether the "
+                    "installed table was built from it")
     ap.add_argument("--version", action="store_true")
     a = ap.parse_args(argv)
     if a.version:
@@ -1562,8 +1585,17 @@ def main(argv=None):
         return 0
     if a.serve:
         return serve()
-    if a.jsc_import:
-        dest, n = jsc_import(a.jsc_import)
+    if a.jsc_pin:
+        print(JSC_SOURCE_URL)
+        print(JSC_SOURCE_SHA256)
+        print("installed" if jsc_installed_sha256() == JSC_SOURCE_SHA256 else "missing")
+        return 0
+    if a.jsc_import_source:
+        try:
+            dest, n = jsc_import(a.jsc_import_source)
+        except (OSError, ValueError) as e:
+            print("js8: %s; the table already there is kept" % e, file=sys.stderr)
+            return 1
         print("wrote %d JSC words to %s" % (n, dest))
         return 0
     if a.wav:

@@ -23,7 +23,7 @@ R820T = [0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 8.7, 12.5, 14.4, 15.7, 16.6, 19.7, 20.7, 
 USB = {"description": "test", "frequency": 7038600.0, "offset": "auto", "demod": "USB",
        "demod_settings": {"bandwidth": 2800.0}, "volume": 0.5,
        "rtl": {"serial": "", "gain_db": 3.7}}
-JS8 = dict(USB, frequency=7078000.0, js8call_dial=7078000)
+JS8 = dict(USB, frequency=7078000.0, decoder="js8")
 
 
 class GainSynth:
@@ -309,43 +309,16 @@ class Settings(unittest.TestCase):
 
 
 class DecoderVolume(unittest.TestCase):
-    """A JS8 profile's audio is JS8Call's input: it is never silenced."""
+    """JS8 decodes before the volume, like WSPR: the volume is only the speaker's."""
 
-    def test_refuses_silence_on_js8(self):
-        s = rxd.Settings(json.loads(json.dumps(JS8)))
-        for v in (0.0, 0.01):
-            with self.assertRaises(ValueError):
-                s.update(volume=v)
-        self.assertEqual(s.volume, 0.5)
-        s.update(volume=rxd.DECODER_MIN_VOLUME)
-        self.assertEqual(s.volume, rxd.DECODER_MIN_VOLUME)
-        # a listening profile and WSPR (decoded before the volume) may go to 0
-        for p in (USB, dict(USB, decoder="wspr")):
+    def test_any_volume_on_any_profile(self):
+        for p in (USB, JS8, dict(USB, decoder="wspr")):
             s = rxd.Settings(json.loads(json.dumps(p)))
             s.update(volume=0.0)
             self.assertEqual(s.volume, 0.0)
-
-    def test_a_profile_saved_silent_loads_audible(self):
-        s = rxd.Settings(dict(json.loads(json.dumps(JS8)), volume=0.0))
-        self.assertEqual(s.volume, rxd.JS8_VOLUME)
-        s = rxd.Settings(dict(json.loads(json.dumps(USB)), volume=0.0))
-        self.assertEqual(s.volume, 0.0)
-
-    def test_status_and_http(self):
+            self.assertEqual(rxd.Settings(dict(json.loads(json.dumps(p)), volume=0.0)).volume, 0.0)
         rx = rxd.Receiver(rxd.Settings(json.loads(json.dumps(JS8))), GainSynth(-70), Capture())
-        self.assertEqual(rx.status()["volume_min"], rxd.DECODER_MIN_VOLUME)
-        rx2 = rxd.Receiver(rxd.Settings(json.loads(json.dumps(USB))), GainSynth(-70), Capture())
-        self.assertEqual(rx2.status()["volume_min"], 0.0)
-        http = rxd.ThreadingHTTPServer(("127.0.0.1", 0), rxd.Api)
-        http.rx = rx
-        threading.Thread(target=http.serve_forever, daemon=True).start()
-        self.addCleanup(http.shutdown)
-        req = urllib.request.Request("http://%s:%d/api/tune" % http.server_address, method="POST",
-                                     data=b'{"volume": 0}', headers={"Content-Type": "application/json"})
-        with self.assertRaises(urllib.error.HTTPError) as e:
-            urllib.request.urlopen(req, timeout=2)
-        self.assertEqual(e.exception.code, 400)
-        self.assertIn("JS8Call", json.load(e.exception)["error"])
+        self.assertNotIn("volume_min", rx.status())
 
 
 class Http(unittest.TestCase):
@@ -580,11 +553,12 @@ class Audio(unittest.TestCase):
 class Routing(unittest.TestCase):
     """The clean-up reaches the speaker and the phone, never a decoder."""
 
-    def run_rx(self, profile):
+    def run_rx(self, profile, js8dec=None):
         settings = rxd.Settings(json.loads(json.dumps(profile)))
         src = GainSynth(noise_db=-80, tone_db=-40)
         sink = Capture()
         rx = rxd.Receiver(settings, src, sink)
+        rx.js8dec = js8dec
         rx.clock = src.now
         q = rx.listen(48000)
         rx.start()
@@ -607,11 +581,22 @@ class Routing(unittest.TestCase):
         for a in (stream, speaker):
             self.assertAlmostEqual(rms_db(a[-3 * FS:]), rxd.AudioFx.TARGET_DB, delta=2.0)
 
-    def test_decoder_audio_stays_clean(self):
-        rx, stream, speaker = self.run_rx(JS8)
-        # JS8Call's cable gets the AGC'd audio as before; the phone gets the clean-up
-        self.assertAlmostEqual(rms_db(speaker[-3 * FS:]), -9.0, delta=1.5)
-        self.assertAlmostEqual(rms_db(stream[-3 * FS:]), rxd.AudioFx.TARGET_DB, delta=2.0)
+    def test_decoders_get_the_audio_untouched(self):
+        pushed = []
+
+        class FakeJs8:
+            def push(self, audio, dial):
+                pushed.append(np.array(audio))
+
+            def status(self):
+                return {}
+
+        rx, stream, speaker = self.run_rx(JS8, js8dec=FakeJs8())
+        # the decoder gets the AGC'd audio; the speaker and the phone the clean-up
+        decoded = np.concatenate(pushed)
+        self.assertAlmostEqual(rms_db(decoded[-3 * FS:]), -9.0, delta=1.5)
+        for a in (stream, speaker):
+            self.assertAlmostEqual(rms_db(a[-3 * FS:]), rxd.AudioFx.TARGET_DB, delta=2.0)
 
 
 # ------------------------------------------------------------------ rxd-tui
@@ -691,23 +676,16 @@ class Tui(unittest.TestCase):
         app.key(ord("a"))
         self.assertEqual(app.p.sent[-1], {"gain_auto": True})
 
-    def test_no_speaker_volume_or_mute_on_js8(self):
+    def test_speaker_volume_and_mute_on_js8_too(self):
         import rxd_tui as t
-        app = self.app("ghostnet")   # JS8: its audio is JS8Call's input
+        app = self.app("ghostnet")   # JS8 is decoded before the volume
         app.view = "manual"
-        for k in "M-+":
-            app.key(ord(k))
-            self.assertIn("feeds JS8Call", app.message)
-        self.assertEqual(app.p.sent, [])
+        app.key(ord("M"))
+        self.assertEqual(app.p.sent[-1], {"volume": 0.0})
         keys = [k for k, _ in t.help_items(app.g, "manual", "USB", decoder="js8")]
-        self.assertNotIn("- +", keys)
-        # a mute made on a station isn't carried over into JS8
-        st = dict(app.p.status)
-        app.switching = {"name": "ghostnet", "desc": "GhostNet", "prev_up": True, "muted": 0.3}
-        app.finish_switch(st)
-        self.assertEqual(app.p.sent, [])
-        self.assertIsNone(app.mute_prev)
-
+        self.assertIn("- +", keys)
+        keys = [k for k, _ in t.help_items(app.g, "digital", decoder="js8")]
+        self.assertIn("l", keys)
 
 if __name__ == "__main__":
     unittest.main()

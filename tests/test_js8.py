@@ -315,15 +315,10 @@ class Recording(unittest.TestCase):
 
 
 class RxdWiring(unittest.TestCase):
-    def test_engine_and_submodes_from_the_profile(self):
+    def test_submodes_from_the_profile(self):
         import rxd
-        self.assertEqual(rxd.js8_engine({}), "js8call")
-        self.assertEqual(rxd.js8_engine({"js8_engine": "rxd"}), "rxd")
-        with self.assertRaises(ValueError):
-            rxd.js8_engine({"js8_engine": "wsjtx"})
         self.assertIsNotNone(rxd.load_js8())
-        p = {"frequency": 7077900, "js8call_dial": 7078000, "js8_engine": "rxd",
-             "js8_submodes": ["normal", "warp"]}
+        p = {"frequency": 7078000, "decoder": "js8", "js8_submodes": ["normal", "warp"]}
         with self.assertRaises(ValueError):
             rxd.make_js8(rxd.Settings(p, "js8"), p)
 

@@ -140,24 +140,22 @@ class Profiles(unittest.TestCase):
         self.assertEqual(len([r for r in self.rows.values() if r["plan"]]), 26)
 
     def test_old_names_still_work(self):
-        self.assertEqual(self.r.PROFILES["js8"]["js8call_dial"], 7078000)
+        self.assertEqual(self.r.PROFILES["js8"]["frequency"], 7078000.0)
         self.assertEqual(self.r.PROFILES["js8"]["description"], "JS8, 40 m")
-        self.assertEqual(self.r.PROFILES["ghostnet"]["js8call_dial"], 7107000)
+        self.assertEqual(self.r.PROFILES["ghostnet"]["frequency"], 7107000.0)
         self.assertEqual(self.r.PROFILES["wspr"]["frequency"], 7038600.0)
         self.assertEqual(self.r.PROFILES["wspr"]["description"], "WSPR, 40 m")
         self.assertFalse(self.rows["ghostnet"]["plan"])  # a net, not the band plan's 40 m
         self.assertEqual(self.r.ALIASES, {"js8-40m": "js8", "wspr-40m": "wspr"})
         self.assertNotIn("js8-40m", self.rows)
 
-    def test_js8_profiles_are_decoder_agnostic(self):
+    def test_band_profiles_are_the_dial_and_a_decoder(self):
         p = self.r.PROFILES["js8-20m"]
-        self.assertEqual((p["decoder"], p["js8call_dial"], p["frequency"]),
-                         ("js8", 14078000, 14077900.0))
+        self.assertEqual((p["decoder"], p["frequency"]), ("js8", 14078000.0))
         self.assertEqual(self.r.decoder(p), "js8")
         w = self.r.PROFILES["wspr-20m"]
         self.assertEqual((w["decoder"], w["wspr_report"], w["frequency"]),
                          ("wspr", True, 14095600.0))
-        self.assertNotIn("js8call_dial", w)
 
     def test_upconverter_side(self):
         for name, row in self.rows.items():
@@ -168,7 +166,7 @@ class Profiles(unittest.TestCase):
         self.assertTrue(self.rows["wspr-2190m"]["upconvert"])  # 136 kHz + 125 MHz
 
     def test_desktop_from_ssh(self):
-        """From SSH or a service, i3-msg and JS8Call still get the desktop."""
+        """From SSH or a service, i3-msg (radio mesh) still gets the desktop."""
         with tempfile.TemporaryDirectory() as d:
             fake = os.path.join(d, "i3")
             with open(fake, "w") as fh:
@@ -649,7 +647,7 @@ class Planner(unittest.TestCase):
 
 
 class SwitchingThroughRadio(unittest.TestCase):
-    """The planner's switch goes through spawn_switch to `radio --no-focus NAME`."""
+    """The planner's switch goes through spawn_switch to `radio NAME`."""
 
     def test_fake_radio(self):
         with tempfile.TemporaryDirectory() as d:
@@ -680,7 +678,7 @@ class SwitchingThroughRadio(unittest.TestCase):
                         break
                     time.sleep(0.05)
                 with open(log) as fh:
-                    self.assertEqual(fh.read(), "--no-focus wspr-20m\n")
+                    self.assertEqual(fh.read(), "wspr-20m\n")
             finally:
                 rxd.RADIO, rxd.shutil.which = old
                 rxd._profiles["doc"] = None

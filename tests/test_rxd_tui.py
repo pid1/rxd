@@ -36,8 +36,8 @@ GAINS = (0.0, 0.9, 1.4, 2.7, 3.7, 7.7, 12.5, 19.7, 29.7, 49.6)
 # The profiles the fake rxd offers, as `radio --json` lists them.
 PROFILES = [
     {"name": "ghostnet", "description": "Ghostnet", "freq": 7078000, "mode": "USB",
-     "upconvert": True, "js8": True, "saved": True},
-    {"name": "js8", "description": "JS8Call 20 m", "freq": 14078000, "mode": "USB",
+     "upconvert": True, "js8": True, "decoder": "js8", "saved": True},
+    {"name": "js8", "description": "JS8 20 m", "freq": 14078000, "mode": "USB",
      "upconvert": True, "js8": True, "decoder": "js8", "saved": True},
     {"name": "fm-105.3", "description": "WBUR Boston", "freq": 105300000, "mode": "WFM",
      "upconvert": False, "js8": False, "saved": True},
@@ -49,7 +49,6 @@ PROFILES = [
      "upconvert": True, "js8": False, "saved": True},
     {"name": "40m", "description": "40 m SSB", "freq": 7200000, "mode": "LSB",
      "upconvert": True, "js8": False, "saved": True},
-    # ghostnet has no decoder field, as from an older `radio --json`; these have one
     {"name": "wspr", "description": "WSPR, 40 m", "freq": 7038600, "mode": "USB",
      "upconvert": True, "js8": False, "decoder": "wspr", "saved": True},
 ]
@@ -78,15 +77,14 @@ BW = {"USB": 2800.0, "LSB": 2800.0, "AM": 10000.0, "FM": 12500.0, "WFM": 150000.
 def state_for(name):
     """The status a fake rxd on profile name reports."""
     p = next(x for x in PROFILES if x["name"] == name)
-    st = {"profile": name, "freq": float(p["freq"]), "vfo_hz": p["freq"] - 100.0,
-            "cal_hz": 100.0, "mode": p["mode"], "bandwidth": BW[p["mode"]], "gain_db": 3.7,
+    st = {"profile": name, "freq": float(p["freq"]), "mode": p["mode"], "bandwidth": BW[p["mode"]], "gain_db": 3.7,
             "volume": 0.2, "squelch": -70.0 if name == "noaa" else None,
             "squelch_open": name != "2m", "offset_mode": "auto",
             "upconverter_hz": 125e6 if p["upconvert"] else 0.0, "upconvert_below_hz": 30e6,
             "level_dbfs": -62.4, "tuner_hz": 132028000.0, "offset_hz": 50000.0,
             "sample_rate": 240000, "dsp_cpu": 0.25, "blocks": 100, "dropped": 0,
-            "error": None, "running": True, "gains": list(GAINS), "js8": p["js8"],
-            "js8_call": "KA1PID" if p["js8"] else None,
+            "error": None, "running": True, "gains": list(GAINS),
+            "station": {"call": "KA1PID", "grid": "EM13lc"},
             # ghostnet's clock is off, to show the warning; the rest are on GPS
             "clock": {"synced": False, "source": None, "offset_s": 3.2} if name == "ghostnet"
             else {"synced": True, "source": "GPS", "offset_s": 0.0},
@@ -800,13 +798,12 @@ class Views(unittest.TestCase):
                                  "40m": "manual", "wspr": "digital"})
         self.assertEqual(t.status_kind(state_for("ghostnet")), "digital")
         self.assertEqual(t.status_kind(state_for("wspr")), "digital")
-        # decoder wins over the js8 flag; without it, js8 means JS8
-        self.assertEqual(t.decoder_of({"js8": True}), "js8")
-        self.assertIsNone(t.decoder_of({"js8": False}))
-        self.assertEqual(t.decoder_of({"js8": False, "decoder": "wspr"}), "wspr")
-        self.assertIsNone(t.decoder_of({"js8": True, "decoder": None}))
+        # only the decoder field says what decodes
+        self.assertEqual(t.decoder_of({"decoder": "js8"}), "js8")
+        self.assertEqual(t.decoder_of({"decoder": "wspr"}), "wspr")
+        self.assertIsNone(t.decoder_of({"js8": True}))
         self.assertIsNone(t.decoder_of({"decoder": "ft8"}))
-        self.assertEqual(t.profile_kind({"mode": "USB", "decoder": None, "js8": True}), "manual")
+        self.assertEqual(t.profile_kind({"mode": "USB", "decoder": None}), "manual")
         self.assertEqual(t.status_kind(state_for("noaa")), "listen")
         self.assertEqual(t.status_kind(state_for("40m")), "manual")
         self.assertIsNone(t.status_kind({}))
@@ -1100,7 +1097,7 @@ class FakePoller:
             if profiles is not None else None
         self.profiles_state = "ok" if profiles is not None else "missing"
         self.profiles_error = ""
-        self.js8_lines = list(js8 if js8 is not None else (js8_lines() if status.get("js8") else []))
+        self.js8_lines = list(js8 if js8 is not None else (js8_lines() if status.get("decoder") == "js8" else []))
         self.js8_state = "ok"
         self.wspr_lines = wspr_lines() if status.get("decoder") == "wspr" else []
         self.wspr_state = "ok"
@@ -1328,19 +1325,17 @@ class Drawing(unittest.TestCase):
         app.key(ord("g"))
         self.assertIn("isn't a key in Digital", app.message)
         self.assertEqual(app.p.sent, [])
-        # leaving WSPR for JS8 asks nothing (JS8Call isn't running); leaving JS8 asks
+        # switching asks nothing, either way
         app.key(curses.KEY_UP)
         app.key(curses.KEY_UP)
         app.key(10)
-        self.assertIsNone(app.confirm)
         self.assertEqual(app.p.switched, ["ghostnet"])
         app = app_on("ghostnet")
         frame(app)
         app.key(curses.KEY_DOWN)
         app.key(curses.KEY_DOWN)
         app.key(10)
-        self.assertEqual(app.confirm["name"], "wspr")
-        self.assertIn("Leaving ghostnet closes JS8Call", frame(app).text())
+        self.assertEqual(app.p.switched, ["wspr"])
 
     def test_listen_80x24(self):
         app = app_on("noaa", audio=FakeAudio())
@@ -1570,10 +1565,9 @@ class Drawing(unittest.TestCase):
         app = app_on("ghostnet", audio=FakeAudio())
         frame(app)
         app.key(ord("l"))
-        self.assertFalse(app.audio.on)
-        self.assertIn("No audio here on JS8", app.message)
+        self.assertTrue(app.audio.on)                             # JS8 can be heard too
         app.key(ord("M"))
-        self.assertEqual(app.p.sent, [])                          # JS8Call's feed stays up
+        self.assertEqual(app.p.sent, [{"volume": 0.0}])
 
     def test_audio_rate_follows_the_mode(self):
         app = app_on("noaa", audio=FakeAudio())
@@ -1583,23 +1577,12 @@ class Drawing(unittest.TestCase):
         frame(app)
         self.assertEqual(app.audio.rate, 24000)
 
-    def test_switch_confirm_and_finish(self):
+    def test_switch_and_finish(self):
         now = [100.0]
         app = app_on("ghostnet", clock=lambda: now[0])
         frame(app)
         app.key(curses.KEY_DOWN)
         app.key(10)
-        self.assertEqual(app.confirm["name"], "js8")
-        text = frame(app).text()
-        self.assertIn("Switch to js8 (JS8Call 20 m)?", text)
-        self.assertIn("Leaving ghostnet closes JS8Call", text)
-        self.assertIn("y switches; any other key stays.", text)
-        app.key(ord("n"))
-        self.assertIsNone(app.confirm)
-        self.assertEqual(app.p.switched, [])
-        self.assertIn("Stayed on ghostnet", app.message)
-        app.key(10)
-        app.key(ord("y"))
         self.assertEqual(app.p.switched, ["js8"])
         app.p.reachable = False
         text = frame(app).text()
@@ -1609,7 +1592,7 @@ class Drawing(unittest.TestCase):
         app.p.status.update(state_for("js8"))
         frame(app)
         self.assertIsNone(app.switching)
-        self.assertIn("Now on JS8Call 20 m", app.message)
+        self.assertIn("Now on JS8 20 m", app.message)
         self.assertEqual(app.p.reloads, 1)
 
     def test_switch_between_stations_asks_nothing_and_warns_about_the_flip(self):
@@ -1619,7 +1602,6 @@ class Drawing(unittest.TestCase):
         for _ in range(3):
             app.key(curses.KEY_DOWN)
         app.key(10)
-        self.assertIsNone(app.confirm)
         self.assertEqual(app.p.switched, ["am-1030"])
         app.p.reachable = False
         self.assertIn("▲ Flip the Ham It Up to UPCONVERT", frame(app).text())   # before
@@ -1931,29 +1913,20 @@ class RealProgram(unittest.TestCase):
         self.quit_cleanly(tui)
         self.assertEqual(fake.posts[-2:], [{"volume": 0.0}, {"volume": 0.2}])  # given back on quit
 
-    def test_confirm_then_switch_through_a_real_drop(self):
+    def test_switch_through_a_real_drop(self):
         fake = self.fake("ghostnet", drop=2.0)
         tui = self.run_tui(fake.url)
         self.assertTrue(tui.wait_for("WB2OQX", 6), tui.vt.text())
         tui.keys(KEYS["down"], KEYS["enter"])
-        self.assertTrue(tui.wait_for("closes JS8Call"), tui.vt.text())
-        tui.send(b"n")
-        self.assertTrue(tui.wait_for("Stayed on ghostnet"), tui.vt.text())
-        self.assertEqual(fake.switches, [])
-        tui.keys(KEYS["enter"])
-        self.assertTrue(tui.wait_for("closes JS8Call"), tui.vt.text())
-        tui.send(b"y")
         self.assertTrue(tui.wait_for("Switching to js8"), tui.vt.text())
         self.assertTrue(tui.wait_for("■ SWITCHING", 3), tui.vt.text())
-        self.assertTrue(tui.wait_for("Now on JS8Call 20 m", 8), tui.vt.text())
+        self.assertTrue(tui.wait_for("Now on JS8 20 m", 8), tui.vt.text())
         self.assertEqual(fake.switches, ["js8"])
         self.assertTrue(tui.wait_for("● Clock synced (GPS)"), tui.vt.text())
-        # js8 -> a station: asks again, and the Ham It Up flips
+        # js8 -> a station: the Ham It Up flips
         tui.send(b"2")
         self.assertTrue(tui.wait_for("Pick a station to switch"), tui.vt.text())
         tui.keys(KEYS["enter"])
-        self.assertTrue(tui.wait_for("Then flip the Ham It Up to BYPASS"), tui.vt.text())
-        tui.send(b"y")
         self.assertTrue(tui.wait_for("Flip the Ham It Up to BYPASS for WBUR Boston", 8),
                         tui.vt.text())
         self.assertIn("2 ● Listen", tui.vt.text())

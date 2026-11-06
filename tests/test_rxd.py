@@ -1,4 +1,6 @@
 """Tests for rxd: python3 -m unittest discover rxd  (numpy and scipy needed)."""
+import contextlib
+import io
 import json
 import os
 import socket
@@ -14,11 +16,11 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rxd  # noqa: E402
 
-JS8 = {"description": "JS8, 40 m", "frequency": 7077900.0, "vfo_offset": -168100.0,
+JS8 = {"description": "JS8, 40 m", "frequency": 7078000.0, "vfo_offset": -168100.0,
        "offset": "Ham-It-Up", "demod": "USB",
        "demod_settings": {"bandwidth": 3000.0, "agcAttack": 47.9, "agcDecay": 4.9},
-       "sink": "SDR to JS8 (virtual cable)", "volume": 0.2,
-       "rtl": {"serial": "57818712", "gain": 4, "ppm": 0}, "js8call_dial": 7078000}
+       "sink": "Built-in Audio", "volume": 0.2,
+       "rtl": {"serial": "57818712", "gain": 4, "ppm": 0}, "decoder": "js8"}
 
 
 def tone(rate, freq, n, amp=0.5):
@@ -146,7 +148,7 @@ class FastSynth(rxd.SynthSource):
 class Engine(unittest.TestCase):
     def setUp(self):
         self.settings = rxd.Settings(dict(JS8))
-        self.src = FastSynth(7077900 + 125e6 + 1500)
+        self.src = FastSynth(7078000 + 125e6 + 1500)
         self.sink = Capture()
         self.rx = rxd.Receiver(self.settings, self.src, self.sink)
 
@@ -161,11 +163,11 @@ class Engine(unittest.TestCase):
             time.sleep(0.02)
         return False
 
-    def test_profile_dial_calibration(self):
+    def test_profile_frequency_is_the_dial(self):
         snap = self.settings.snapshot()
         self.assertEqual(snap["dial"], 7078000)
-        self.assertEqual(snap["cal"], 100)
-        self.assertEqual(self.rx.rf(snap), 7077900 + 125e6)
+        self.assertNotIn("cal", snap)
+        self.assertEqual(self.rx.rf(snap), 7078000 + 125e6)
         self.assertEqual(self.settings.bandwidth, 2800)
 
     def test_gain_index_maps_to_db(self):
@@ -179,7 +181,7 @@ class Engine(unittest.TestCase):
         self.rx.start()
         self.assertTrue(self.wait(lambda: len(self.sink.chunks) > 5))
         center = self.src.center
-        self.assertEqual(center, 7077900 + 125e6 - 50000)
+        self.assertEqual(center, 7078000 + 125e6 - 50000)
         # A small step moves only the software mixer.
         self.settings.update(freq=7080000)
         self.assertTrue(self.wait(lambda: self.rx.offset == 52000))
@@ -195,7 +197,7 @@ class Engine(unittest.TestCase):
         # Crossing 30 MHz drops the upconverter offset under "auto".
         self.settings.offset_mode = "auto"
         self.settings.update(freq=50.2e6)
-        self.assertTrue(self.wait(lambda: self.src.center == 50.2e6 - 100 - 50000))
+        self.assertTrue(self.wait(lambda: self.src.center == 50.2e6 - 50000))
         # Changing mode rebuilds the chain at its own rate.
         self.settings.update(mode="WFM", freq=105.3e6)
         self.assertTrue(self.wait(lambda: self.rx.chain.mode == "WFM"))
@@ -212,8 +214,7 @@ class Engine(unittest.TestCase):
         self.assertEqual(sp["stop_hz"] - sp["start_hz"], 240000)
         self.assertEqual(sp["dial_hz"], 7078000)
         self.assertEqual(sp["passband"], [7078200, 7081000])
-        # The synth carrier is 1500 Hz over the VFO (7077900), so 7079400 on
-        # the dial's scale once the 100 Hz calibration is put back.
+        # The synth carrier is 1500 Hz over the dial.
         width = (sp["stop_hz"] - sp["start_hz"]) / 512
         peak = sp["start_hz"] + (int(np.argmax(sp["bins"])) + 0.5) * width
         self.assertAlmostEqual(peak, 7079500, delta=width)
@@ -305,10 +306,8 @@ class Control(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.settings = rxd.Settings(dict(JS8))
-        cls.rx = rxd.Receiver(cls.settings, FastSynth(7077900 + 125e6 + 1500), Capture())
+        cls.rx = rxd.Receiver(cls.settings, FastSynth(7078000 + 125e6 + 1500), Capture())
         cls.rx.start()
-        cls.rig = rxd.RigctlServer(("127.0.0.1", 0), rxd.RigctlHandler)
-        cls.rig.rx = cls.rx
         cls.http = rxd.ThreadingHTTPServer(("127.0.0.1", 0), rxd.Api)
         cls.http.rx = cls.rx
         cls.js8dir = tempfile.mkdtemp()
@@ -316,24 +315,12 @@ class Control(unittest.TestCase):
         with open(cls.js8log, "w") as fh:
             fh.write(JS8_LINES[0] + JS8_LINES[1])
         cls.http.js8 = rxd.Js8Feed(cls.js8log)
-        for s in (cls.rig, cls.http):
-            threading.Thread(target=s.serve_forever, daemon=True).start()
+        threading.Thread(target=cls.http.serve_forever, daemon=True).start()
 
     @classmethod
     def tearDownClass(cls):
-        cls.rig.shutdown()
         cls.http.shutdown()
         cls.rx.stop.set()
-
-    def rigctl(self, *cmds):
-        with socket.create_connection(self.rig.server_address, timeout=2) as s:
-            s.sendall(("\n".join(cmds) + "\nq\n").encode())
-            out = b""
-            while True:
-                d = s.recv(65536)
-                if not d:
-                    return out.decode()
-                out += d
 
     def api(self, method, path, doc=None):
         req = urllib.request.Request(
@@ -345,21 +332,6 @@ class Control(unittest.TestCase):
                 return r.status, json.load(r)
         except urllib.error.HTTPError as e:
             return e.code, json.load(e)
-
-    def test_rigctl_handshake(self):
-        out = self.rigctl("\\chk_vfo", "\\dump_state")
-        self.assertTrue(out.startswith("0\n1\n2\n0\n"))
-        self.assertTrue(out.endswith("done\n"))
-
-    def test_rigctl_freq_and_mode(self):
-        self.assertEqual(self.rigctl("F 7078000", "f"), "RPRT 0\n7078000\n")
-        self.assertEqual(self.rigctl("M PKTUSB 2400", "m"), "RPRT 0\nUSB\n2400\n")
-        self.assertEqual(self.rigctl("M USB 2800"), "RPRT 0\n")
-        self.assertEqual(self.rigctl("F nonsense"), "RPRT -1\n")
-        self.assertEqual(self.rigctl("t", "T 1", "T 0"), "0\nRPRT -11\nRPRT 0\n")
-        self.assertEqual(self.rigctl("\\get_powerstat", "v", "s"), "1\nVFOA\n0\nVFOA\n")
-        self.assertRegex(self.rigctl("l STRENGTH"), r"^-?\d+\n$")
-        self.assertEqual(self.rigctl("\\no_such_thing"), "RPRT -11\n")
 
     def test_http(self):
         code, st = self.api("GET", "/api/status")
@@ -380,7 +352,8 @@ class Control(unittest.TestCase):
         code, st = self.api("POST", "/api/tune", {"volume": 0.4})
         self.assertEqual((code, st["volume"]), (200, 0.4))
         self.assertEqual(self.api("POST", "/api/tune", {"volume": 9})[0], 400)
-        self.assertEqual((st["vfo_hz"], st["cal_hz"]), (7078900, 100))
+        self.assertNotIn("vfo_hz", st)
+        self.assertEqual(self.api("POST", "/api/tune", {"volume": 0})[1]["volume"], 0.0)
         self.api("POST", "/api/tune", {"freq": 7078000})
 
     def test_status_lists_gains(self):
@@ -434,7 +407,8 @@ class Clients(Control):
         self.assertEqual([x["to"] for x in doc2["lines"]], ["KA1PID"])
         self.assertEqual(self.api("GET", "/api/js8?after=x")[0], 400)
         st = self.api("GET", "/api/status")[1]
-        self.assertTrue(st["js8"])
+        self.assertEqual(st["decoder"], "js8")
+        self.assertIn("station", st)
         self.assertEqual(set(st["clock"]), {"synced", "source", "offset_s"})
 
     def fake_radio(self, d):
@@ -534,7 +508,7 @@ class Profiles(unittest.TestCase):
         self.assertEqual(s.snapshot()["upconverter"], 125e6)   # below the R820T
         # Pinned modes ignore the frequency; a missing offset means auto.
         self.assertEqual(rxd.Settings(dict(JS8, offset="None")).snapshot()["upconverter"], 0.0)
-        p = dict(JS8, offset="Ham-It-Up", frequency=146.52e6, js8call_dial=146.52e6)
+        p = dict(JS8, offset="Ham-It-Up", frequency=146.52e6)
         self.assertEqual(rxd.Settings(p).snapshot()["upconverter"], 125e6)
         p = {k: v for k, v in JS8.items() if k != "offset"}
         self.assertEqual(rxd.Settings(p).snapshot()["offset_mode"], "auto")
@@ -543,17 +517,35 @@ class Profiles(unittest.TestCase):
         with self.assertRaises(ValueError):
             rxd.Settings(dict(JS8, offset="Sideways"))
 
-    def test_listen_addresses_from_the_environment(self):
-        old = {k: os.environ.get(k) for k in ("RXD_HTTP", "RXD_RIGCTL")}
+    def test_listen_address_from_the_environment(self):
+        old = {k: os.environ.get(k) for k in ("RXD_HTTP",)}
         try:
             os.environ["RXD_HTTP"] = "0.0.0.0:8073"
-            os.environ["RXD_RIGCTL"] = "off"
-            a = rxd.parse_args(["js8"])
-            self.assertEqual((a.http, a.rigctl), ("0.0.0.0:8073", "off"))
+            self.assertEqual(rxd.parse_args(["js8"]).http, "0.0.0.0:8073")
             self.assertEqual(rxd.parse_args(["js8", "--http", "127.0.0.1:9"]).http, "127.0.0.1:9")
-            del os.environ["RXD_HTTP"], os.environ["RXD_RIGCTL"]
-            a = rxd.parse_args(["js8"])
-            self.assertEqual((a.http, a.rigctl), ("127.0.0.1:8073", "127.0.0.1:4532"))
+            del os.environ["RXD_HTTP"]
+            self.assertEqual(rxd.parse_args(["js8"]).http, "127.0.0.1:8073")
+            with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+                rxd.parse_args(["js8", "--rigctl", "127.0.0.1:4532"])  # gone
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+    def test_station_from_the_environment(self):
+        old = {k: os.environ.get(k) for k in ("RXD_CALL", "RXD_GRID")}
+        try:
+            os.environ["RXD_CALL"], os.environ["RXD_GRID"] = "ka1pid", "em13LC"
+            self.assertEqual(rxd.station_status(), {"call": "KA1PID", "grid": "EM13lc"})
+            del os.environ["RXD_GRID"]
+            doc = rxd.station_status()
+            self.assertEqual((doc["call"], doc["grid"]), ("KA1PID", None))
+            self.assertIn("no grid", doc["missing"])
+            self.assertIn("RXD_CALL and RXD_GRID in /etc/rx/rxd.env", doc["missing"])
+            del os.environ["RXD_CALL"]
+            self.assertIn("no callsign or grid", rxd.station_status()["missing"])
         finally:
             for k, v in old.items():
                 if v is None:

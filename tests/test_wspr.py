@@ -291,7 +291,6 @@ class Api(unittest.TestCase):
     def test_status_and_feed(self):
         st = self.call("/api/status")
         self.assertEqual(st["decoder"], "wspr")
-        self.assertFalse(st["js8"])
         self.assertIn(st["wspr"]["state"], ("waiting", "recording"))
         self.assertEqual(st["wspr"]["report"]["call"], "KA1PID")
         self.assertEqual(self.call("/api/wspr?after=0"), {"seq": 0, "lines": []})

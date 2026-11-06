@@ -3,8 +3,8 @@
 The script is cut out of setup.sh and loaded as a module with HOME in a temp
 dir. systemctl and journalctl are fake shell scripts on PATH that log their
 arguments and keep the "running" unit in a state file; a small HTTP server
-plays rxd's /api/status for whichever unit that file names. i3, JS8Call and
-PipeWire are stubbed on the module.
+plays rxd's /api/status for whichever unit that file names. i3 and the
+clock check are stubbed on the module.
 
     python3 -m unittest discover rxd
 """
@@ -136,13 +136,8 @@ class RadioTest(unittest.TestCase):
 
         # Desktop side effects, recorded instead of run.
         self.calls = []
-        self.js8_up = False
         r = self.r
-        r.close = lambda proc, crit: self.calls.append(("close", proc))
-        r.running = lambda proc: proc == "js8call" and self.js8_up
-        r.start = lambda argv, pat: self.calls.append(("start", argv[0]))
-        r.ensure_js8_sink = lambda: self.calls.append(("sink",))
-        r.check_clock = lambda *a: None
+        r.check_clock = lambda *a: self.calls.append(("clock",) + a)
         r.i3 = lambda cmd: self.calls.append(("i3", cmd))
 
     def tearDown(self):
@@ -229,7 +224,7 @@ class RadioTest(unittest.TestCase):
         # An old SDR++-era file still carrying vfo_offset.
         self.write_saved("vhf", dict(self.r.PROFILES["vhf"], vfo_offset=-250000.0))
         self.run_unit("vhf")
-        self.rxd.status = {"freq": 146940000.0, "vfo_hz": 146940000.0, "mode": "FM",
+        self.rxd.status = {"freq": 146940000.0, "mode": "FM",
                            "bandwidth": 10000.0, "gain_db": 28.0, "volume": 0.7}
         _, err = self.radio("js8")
 
@@ -245,26 +240,26 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(self.up(), "rxd@js8.service")
         self.assertEqual(self.r.active(), "js8")
         self.assertIn("--user start rxd@js8.service", self.systemctl_log())
-        # JS8 side: sink made, dial written, JS8Call started, warning shown.
-        self.assertIn(("sink",), self.calls)
-        self.assertEqual(self.r.read_ini().get("Common", "DialFreq"), "7078000")
-        self.assertIn(("start", self.r.JS8CALL), self.calls)
+        # rxd decodes JS8 itself: nothing else starts, the clock is checked.
+        self.assertEqual(self.calls, [("clock", "JS8")])
         self.assertIn("flip the Ham It Up to UPCONVERT", err)
 
-    def test_js8_capture_keeps_dial_and_calibration(self):
+    def test_js8_profile_is_the_dial_and_the_speaker(self):
+        p = self.r.PROFILES["js8"]
+        self.assertEqual((p["frequency"], p["decoder"], p["sink"]),
+                         (7078000.0, "js8", self.r.SPEAKER))
+        self.assertGreater(p["volume"], 0)
         self.radio("js8")
-        self.rxd.status = {"freq": 7080000.0, "vfo_hz": 7079900.0, "mode": "USB",
-                           "bandwidth": 2800.0, "gain_db": 3.7, "volume": 0.2}
+        self.rxd.status = {"freq": 7080000.0, "mode": "USB", "bandwidth": 2800.0,
+                           "gain_db": 3.7, "volume": 0.0}
         self.radio("vhf")
         p = self.saved("js8")
-        self.assertEqual(p["js8call_dial"], 7080000)
-        self.assertEqual(p["frequency"], 7079900.0)
-        self.assertEqual(p["js8call_dial"] - p["frequency"], 100.0)
+        self.assertEqual((p["frequency"], p["volume"]), (7080000.0, 0.0))  # muted is muted
 
     def test_rerun_active_profile_does_not_restart(self):
         self.radio("vhf")
         before = self.saved("vhf")
-        self.rxd.status = {"freq": 146940000.0, "vfo_hz": 146940000.0, "mode": "FM",
+        self.rxd.status = {"freq": 146940000.0, "mode": "FM",
                            "bandwidth": 10000.0, "gain_db": 28.0, "volume": 0.7}
         self.clear_log()
         self.radio("vhf")
@@ -272,16 +267,6 @@ class RadioTest(unittest.TestCase):
         self.assertFalse([ln for ln in log if " start " in ln or " stop " in ln], log)
         self.assertEqual(self.up(), "rxd@vhf.service")
         self.assertEqual(self.saved("vhf"), before)  # live tuning not frozen
-
-    def test_rerun_active_js8_keeps_running_dial(self):
-        self.radio("js8")
-        self.js8_up = True
-        self.calls.clear()
-        self.rxd.status = {"freq": 7078500.0, "vfo_hz": 7078400.0, "mode": "USB"}
-        self.r.write_dial("7078500")  # what JS8Call has on its dial
-        self.radio("js8")
-        self.assertNotIn(("close", "js8call"), self.calls)
-        self.assertEqual(self.r.read_ini().get("Common", "DialFreq"), "7078500")
 
     def test_active_profile_on_another_unit_is_restarted(self):
         # 'radio save NEW' makes NEW active while rxd@vhf still plays.
@@ -294,12 +279,11 @@ class RadioTest(unittest.TestCase):
 
     def test_off_saves_and_stops(self):
         self.run_unit("vhf")
-        self.rxd.status = {"vfo_hz": 162550000.0, "mode": "FM", "bandwidth": 12500.0}
+        self.rxd.status = {"freq": 162550000.0, "mode": "FM", "bandwidth": 12500.0}
         out, _ = self.radio("off")
         self.assertEqual(self.saved("vhf")["frequency"], 162550000.0)
         self.assertIn("--user stop rxd@*.service", self.systemctl_log())
         self.assertIsNone(self.up())
-        self.assertIn(("close", "js8call"), self.calls)
         self.assertIn("radio resume", out)
 
     def test_off_without_rxd_keeps_saved_profile(self):
@@ -310,7 +294,7 @@ class RadioTest(unittest.TestCase):
 
     def test_save_active_and_new_name(self):
         self.run_unit("vhf")
-        self.rxd.status = {"vfo_hz": 146580000.0, "mode": "FM", "bandwidth": 12500.0,
+        self.rxd.status = {"freq": 146580000.0, "mode": "FM", "bandwidth": 12500.0,
                            "gain_db": 33.8, "volume": 0.5}
         self.radio("save")
         self.assertEqual(self.saved("vhf")["frequency"], 146580000.0)
@@ -393,7 +377,7 @@ class RadioTest(unittest.TestCase):
 
     def test_capture_keeps_offset_mode(self):
         self.radio("js8")
-        self.rxd.status = {"freq": 7078000.0, "vfo_hz": 7077900.0, "mode": "USB",
+        self.rxd.status = {"freq": 7078000.0, "mode": "USB",
                            "upconverter_hz": 125e6, "offset_mode": "auto"}
         self.radio("vhf")
         p = self.saved("js8")
@@ -415,11 +399,6 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(p["audio"], {"auto": True, "filter": True, "norm": False,
                                       "limit": True, "squelch": True, "nr": None})
 
-    def test_capture_never_saves_js8_silent(self):
-        p = self.r.capture(self.r.profile("js8"), {"volume": 0.0})
-        self.assertEqual(p["volume"], self.r.profile("js8")["volume"])
-        self.assertEqual(self.r.capture(self.r.profile("vhf"), {"volume": 0.0})["volume"], 0.0)
-
     def test_capture_keeps_squelch(self):
         p = self.r.capture(self.r.profile("vhf"), {"squelch": -55.0})
         self.assertEqual((p["demod_settings"]["squelchEnabled"],
@@ -439,19 +418,11 @@ class RadioTest(unittest.TestCase):
         self.assertTrue(self.r.capture(p, cant)["wspr_report"])
         self.assertNotIn("wspr_report", self.r.capture(self.r.profile("js8"), off))
 
-    def test_js8_on_rxd_engine_closes_js8call_and_skips_it(self):
-        self.write_saved("js8", dict(self.r.profile("js8"), js8_engine="rxd"))
-        self.calls.clear()
-        self.radio("js8")
-        self.assertEqual(self.up(), "rxd@js8.service")
-        self.assertIn(("close", "js8call"), self.calls)
-        self.assertNotIn(("start", self.r.JS8CALL), self.calls)
-
-    def test_switch_to_wspr_closes_js8call(self):
+    def test_switch_to_wspr_checks_the_clock_and_nothing_else(self):
         self.radio("js8")
         self.calls.clear()
         self.radio("wspr")
-        self.assertIn(("close", "js8call"), self.calls)
+        self.assertEqual(self.calls, [("clock", "WSPR")])
         self.assertEqual(self.up(), "rxd@wspr.service")
         self.assertEqual(self.saved("wspr")["decoder"], "wspr")
 

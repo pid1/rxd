@@ -1,25 +1,24 @@
 # rxd
 
-A small RTL-SDR receiver daemon in Python, meant to replace SDR++ for the
-`radio` profiles. It reads the same profile JSON as `radio`, opens the dongle
-by serial, demodulates one channel and plays it to a PipeWire sink. It has
-two control ports on 127.0.0.1:
+A small RTL-SDR receiver daemon in Python, the receiver behind the `radio`
+profiles. It reads the same profile JSON as `radio`, opens the dongle by
+serial, demodulates one channel, plays it to a PipeWire sink, and decodes JS8
+and WSPR from it. It is controlled over HTTP, on 127.0.0.1 by default:
 
-- **4532, Hamlib NET rigctl.** JS8Call (Rig: *Hamlib NET rigctl*) or
-  `rigctl -m 2 -r 127.0.0.1:4532` can get and set frequency and mode.
 - **8073, HTTP JSON.** `GET /api/status`, and `POST /api/tune` with any of
   `freq`, `mode`, `bandwidth`, `gain_db` and `volume`. Status also reports
-  `profile`, `vfo_hz` (the carrier, which is what a profile's `frequency`
-  means), `cal_hz` and `gains` (the dongle's gain steps in dB). This is what
-  `radio save` reads. `GET /api/spectrum` gives the whole captured band
+  `profile`, `gains` (the dongle's gain steps in dB) and `station` (the
+  callsign and grid from `RXD_CALL` and `RXD_GRID`, with `missing` saying
+  what to set when either isn't). This is what `radio save` reads. `GET /api/spectrum` gives the whole captured band
   about 5 times a second: 512 dB bins with `start_hz`, `stop_hz`, `dial_hz`
   and the demodulated `passband`, all on the dial's scale. `GET /` serves the
   browser UI from `$RXD_WEB`, `/usr/local/share/rxd/index.html` or
-  `web/index.html` beside rxd.py. Listen addresses default to `$RXD_HTTP` and
-  `$RXD_RIGCTL` when there's no `--http` or `--rigctl` flag.
+  `web/index.html` beside rxd.py. The listen address defaults to `$RXD_HTTP`
+  when there's no `--http` flag.
 
 Modes: USB, LSB, AM, FM and WFM (mono, no RDS). A profile with
-`"decoder": "wspr"` also decodes WSPR: each two-minute slot of its audio goes
+`"decoder": "js8"` decodes JS8 (below). One with `"decoder": "wspr"` decodes
+WSPR: each two-minute slot of its audio goes
 to `wsprd`, the spots to `GET /api/wspr?after=SEQ` and, unless
 `"wspr_report": false`, to WSPRnet (see docs/radio.md). Status reports the
 decoder (`decoder`: js8, wspr or null) and the WSPR cycle and reporting
@@ -30,7 +29,7 @@ loaded with ctypes.
 ```
 rxd js8                       # ~/.config/rx/radio/js8.json, to its sink
 rxd js8 --audio stdout | ...  # raw s16le mono 48 kHz
-rxd js8 --iq synth --audio null --rigctl 127.0.0.1:4542 --http 127.0.0.1:8083
+rxd js8 --iq synth --audio null --http 127.0.0.1:8083
                               # no dongle: noise plus a tone, for testing
 ```
 
@@ -44,15 +43,13 @@ warn from.
 A profile's `rtl.gain_db` wins over `rtl.gain`, SDR++'s index into the tuner's
 gain table.
 
-Frequencies on both ports are the dial. A JS8 profile whose VFO sits 100 Hz
-under its `js8call_dial` keeps that offset as a calibration, so rigctl
-reports 7078000.
+A profile's `frequency` is the dial: on USB, a signal 1500 Hz up in the
+audio is 1500 Hz above it. `rtl.ppm` corrects the dongle's crystal.
 
 ## JS8, decoded by rxd (rxd/js8.py)
 
-A JS8 profile with `"js8_engine": "rxd"` (or `RXD_JS8_ENGINE=rxd`) decodes
-JS8 in rxd, with no JS8Call. The default, `"js8call"`, leaves it to JS8Call
-as before. Receive only: nothing here transmits.
+A JS8 profile (`"decoder": "js8"`) decodes JS8 in rxd. Receive only:
+nothing here transmits.
 
 - **Recording:** like WSPR, from the audio before squelch and volume,
   resampled to 12 kHz, in slots by the system clock with up to 2.5 s of
@@ -68,13 +65,13 @@ as before. Receive only: nothing here transmits.
   belief propagation on LDPC(174,87), all candidates at once; CRC-12. Decoded
   signals are subtracted and the slot is searched again.
 - **Output:** `ALL.TXT` (frames) and `DIRECTED.TXT` (messages) under
-  `~/.local/share/rxd/js8/`, in JS8Call's formats, each rolled over to `.1`
-  past 8 MB. `/api/js8` tails that DIRECTED.TXT, so its lines keep their
+  `~/.local/share/rxd/js8/`, in JS8's usual log formats, each rolled over to
+  `.1` past 8 MB. `/api/js8` tails that DIRECTED.TXT, so its lines keep their
   shape, and history survives a restart.
 - **Status:** `js8_decoder`: state (waiting, recording or decoding), the last
   slot's decode, message, CPU and wall-clock counts, skipped slots, the
-  error, and whether the JSC table is installed. For a JS8 profile left to
-  JS8Call it is `{"engine": "js8call"}`.
+  error, and whether the JSC table is installed. It is null on other
+  profiles.
 
 Two places where rxd's lines differ from JS8Call's DIRECTED.TXT, both on
 purpose:
@@ -86,18 +83,19 @@ purpose:
 
 Heartbeats, CQs, directed commands and SNR reports, callsigns (compound ones
 too), grids and uncompressed (Huffman) data frames all decode without help.
-Most free text is sent compressed with JS8Call's "JSC" code, which needs its
-262,144-word table. In the 1,135 frames of the box's ALL.TXT, 214 (19%)
-needed it; every message with free text contains such frames. The table is
-JS8Call's (GPL-3), so rxd doesn't ship it. Instead,
+Most free text is sent compressed with JS8's "JSC" code, which needs its
+262,144-word table. In 1,135 frames heard on 40 m, 214 (19%) needed it;
+every message with free text contains such frames. The table is JS8Call's
+(GPL-3), so rx doesn't ship it, and setup doesn't fetch it. Without it, the
+parts of a message that need it show as `……`. Given JS8Call's `jsc_map.cpp`
+(`JSC_SOURCE_URL` in js8.py, pinned by size and SHA-256),
 
 ```
-python3 js8.py --jsc-import /usr/bin/js8call
+python3 js8.py --jsc-import jsc_map.cpp
 ```
 
-reads it out of the user's own installed js8call program into
-`~/.local/share/rxd/js8/jsc_map.txt` (`$RXD_JSC` overrides). Without it, the
-parts of a message that need it show as `……`.
+writes it to `~/.local/share/rxd/js8/jsc_map.txt` (`$RXD_JSC` overrides),
+where rxd finds it at its next start.
 
 ### Sources and licences
 
@@ -122,8 +120,8 @@ No JS8Call or WSJT-X code is used or translated.
 
 ### Checked against JS8Call (2026-11-06, 40 m, 7.078 MHz)
 
-JS8Call 2.2.0 and rxd decoded the same audio for 17 minutes, 13:03 to 13:20
-UTC. rxd ran live in place of the rxd@js8 unit and still fed JS8Call's sink.
+JS8Call 2.2.0, the desktop application, and rxd decoded the same audio for
+17 minutes, 13:03 to 13:20 UTC, rxd live and JS8Call from rxd's audio output.
 JS8Call stamps each ALL.TXT decode with the start of the slot *before* the
 one it was sent in. Its DIRECTED.TXT write times and the synced clock show
 rxd's slot is the right one, so frames were compared a slot apart.
@@ -142,10 +140,6 @@ rxd's slot is the right one, so frames were compared a slot apart.
 - **Agreement:** rxd's SNR reads about 2 dB above JS8Call's, and its dt
   0.2 s below.
 
-An earlier session, 11:59 to 12:17 UTC, gave 56 frames to rxd and none to
-JS8Call, because the saved js8 profile's volume was 0 and JS8Call heard
-silence.
-
 ### CPU on the uConsole
 
 CM4, Python 3.11.2, numpy 1.24.2, scipy 1.10.1, at nice 10, from the 13:03
@@ -159,8 +153,9 @@ recording:
 | slow | 1.32 s (1.52 s) | 4.4% |
 
 Live, decoding normal, fast and slow with an earlier and cheaper build, the
-decoder process used 25% of one core and rxd 17% (its DSP included). JS8Call
-used 63% for its `js8` decoder and 12.5% for its window.
+decoder process used 25% of one core and rxd 17% (its DSP included). For
+comparison, JS8Call on the same audio used 63% for its `js8` decoder and
+12.5% for its window.
 
 On synthetic slots with white noise, decoding is certain down to -18 dB SNR
 in 2500 Hz and about half the time at -20 dB.
@@ -192,8 +187,8 @@ in 2500 Hz and about half the time at -20 dB.
   has `gain_auto`, `gain_db` (the gain in use) and `gain_loop` (state,
   reason, floor, margin, RMS, clip fraction, steps).
 - **Audio clean-up** (`AudioFx`) is for listening only: the uConsole speaker
-  on listening profiles and the phone/TUI stream always. JS8Call's cable and
-  the WSPR decoder get the audio untouched. Stages, each an `audio_*` tune
+  and the phone/TUI stream. The JS8 and WSPR decoders get the audio
+  untouched. Stages, each an `audio_*` tune
   field and reported under status `audio`: `audio_squelch` (an NFM noise
   squelch, off while a level squelch is set), `audio_filter` (hum and DC; on
   NFM a 300-3500 Hz voice band, which also takes out sub-audible tones and
@@ -207,7 +202,7 @@ in 2500 Hz and about half the time at -20 dB.
 | | CPU |
 |---|---|
 | 30 s of 240 kS/s IQ from a file, as fast as it runs | 5.0 CPU-s, about 16% of one core in real time, including startup |
-| DSP thread, live, while JS8Call decodes | 25% of one core |
+| DSP thread, live, on a JS8 profile (before rxd decoded JS8) | 25% of one core |
 | SDR++Brown today, for comparison | about 220% |
 
 numpy's OpenBLAS thread pool must be held to one thread, and rxd does this
@@ -222,20 +217,16 @@ python3 -m unittest discover rxd
 ```
 
 They cover the DSP (block-invariant filtering, sideband rejection, the
-passband, AM, WFM and AGC), retuning, the rigctl and HTTP protocols, and
-profile loading. test_js8 covers the JS8 decoder on synthesized slots (all
+passband, AM, WFM and AGC), retuning, the HTTP API, and profile loading. test_js8 covers the JS8 decoder on synthesized slots (all
 four speeds, several SNRs, offsets and times, overlapping signals, noise
 alone), frame unpacking, message assembly, slot recording and the decoder
 process. Real recordings hold other stations' callsigns, so they stay out
-of git: `RXD_JS8_REAL=DIR` runs the decoder over a directory of them. They pass on Python 3.11, numpy 1.24 and scipy 1.10 (the
-uConsole's) both locally and on the device. Separately, `rigctl -m 2` from
-Hamlib 4.5.4 on the device talks to rxd without errors.
+of git: `RXD_JS8_REAL=DIR` runs the decoder over a directory of them. They
+pass on Python 3.11, numpy 1.24 and scipy 1.10 (the uConsole's) both locally
+and on the device.
 
 ## Not done yet
 
-- **`radio` integration:** an `"engine": "rxd"` profile key, and setup.sh
-  installing rxd to /usr/local/bin.
-- **JS8Call:** switching it to Hamlib NET rigctl.
 - **I/Q correction:** none yet. A strong signal mirrored around the tuner
   frequency could leak in at roughly -30 to -40 dB.
 - **Signal strength:** `l STRENGTH` is uncalibrated: dBFS + 73.

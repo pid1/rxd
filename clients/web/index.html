@@ -156,11 +156,6 @@ body[data-view=digital] .jlist{max-height:none;overflow:visible}
 .prof .pf{font-size:16px;font-weight:600;color:var(--dim)}
 .prof .pa{font-size:16px;font-weight:800;color:var(--accent)}
 .prof .pw{font-size:15px;font-weight:700;color:var(--warn)}
-dialog{background:var(--panel);color:var(--fg);border:2px solid var(--line);border-radius:14px;padding:16px;width:calc(100vw - 24px);max-width:520px}
-dialog::backdrop{background:rgba(0,0,0,.65)}
-dialog h2{margin:0 0 10px;font-size:22px}
-dialog p{margin:0 0 12px;font-size:18px}
-dialog .row2{margin-top:6px}
 .jf{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px}
 .jmsg{margin:8px 0 0;color:var(--dim);font-size:16px;font-weight:600}
 .jlist{list-style:none;margin:8px 0 0;padding:0;max-height:480px;overflow-y:auto;border-top:1px solid var(--line)}
@@ -320,7 +315,7 @@ body[data-view=listen] #gWhy{display:none}
 <fieldset id="ctl" data-v="manual" disabled>
 <div class="layout">
   <section class="card tuner">
-    <div class="lbl"><span>Dial, MHz</span><span id="cal"></span></div>
+    <div class="lbl"><span>Dial, MHz</span></div>
     <div id="freq" class="freq live" aria-live="off"><span id="fM">—</span><span id="fH" class="hz"></span></div>
     <div class="meter live">
       <div class="mbar" role="meter" aria-label="Signal level" aria-valuemin="-100" aria-valuemax="0" id="mbar"><i id="mfill"></i></div>
@@ -363,7 +358,7 @@ body[data-view=listen] #gWhy{display:none}
 <fieldset class="card" id="audioCard" data-v="manual" data-live disabled hidden>
   <div class="lbl"><span>Audio clean-up</span><span id="auState" class="val"></span></div>
   <div class="augrid" role="group" aria-label="Audio clean-up" id="auGrid"></div>
-  <p class="note">For the uConsole speaker and the audio on this device. JS8Call and the WSPR decoder always get the audio untouched.</p>
+  <p class="note">For the uConsole speaker and the audio on this device. The JS8 and WSPR decoders always get the audio untouched.</p>
 </fieldset>
 <section class="card" id="aPick" data-v="manual">
   <div class="lbl"><span>Profiles</span></div>
@@ -375,10 +370,6 @@ body[data-view=listen] #gWhy{display:none}
   <div class="appear" role="group" aria-label="Appearance" id="appear"></div>
 </section>
 </div>
-<dialog id="dlg" aria-labelledby="dlgT">
-  <h2 id="dlgT"></h2><div id="dlgB"></div>
-  <div class="row2"><button type="button" class="btn" id="dlgNo">Cancel</button><button type="button" class="btn pri" id="dlgYes">Switch</button></div>
-</dialog>
 <script>
 "use strict";
 (function () {
@@ -418,7 +409,7 @@ function fmtHz(v) {
   return [String(v), "Hz"];
 }
 function fmtBw(v) { const p = fmtHz(v); return p[0] + " " + p[1]; }
-// rxd sends UTC: "2026-11-06 10:47:03" (JS8Call) or "2026-11-06T12:20:00Z".
+// rxd sends UTC: "2026-11-06 10:47:03" (JS8) or "2026-11-06T12:20:00Z" (WSPR).
 // Everything shown is the browser's local time, 24 hour.
 function utcDate(t) {
   const m = /^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?/.exec(String(t || ""));
@@ -557,7 +548,6 @@ function applyStatus(s) {
   renderFreq();
   setText($("profile"), s.profile || "rxd");
   const tag = $("modeTag"); tag.hidden = false; setText(tag, localMode);
-  setText($("cal"), s.cal_hz ? "VFO " + freqParts(s.vfo_hz).join(" ") + " (cal " + (s.cal_hz > 0 ? "+" : "−") + Math.abs(Math.round(s.cal_hz)) + " Hz)" : "");
   for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.m === localMode));
 
   // Ham It Up
@@ -607,8 +597,6 @@ function applyStatus(s) {
 
   syncMute();
   autoView();
-  // JS8's audio is only tones; WSPR's speaker is muted by design, so the phone may listen
-  if (A.on && pdec(s) === "js8" && view === "digital") stopListen();
   const vk = [view, curKind(), pdec(s), profAvail, A.on].join();
   if (vk !== viewKey) { viewKey = vk; renderView(); }
   renderProfiles(); renderQual();
@@ -981,7 +969,7 @@ let profiles = null, profAvail = true, profLoading = false, profAskedFor = null;
 let switching = null, switchTimer = 0, flipText = "";
 let view = load("view") === "manual" ? "manual" : null, viewFor = null;
 // rxd and radio say "decoder"; older ones only the js8 flag
-function pdec(p) { return p.decoder !== undefined ? p.decoder || null : p.js8 ? "js8" : null; }
+function pdec(p) { return p.decoder || null; }
 function pkind(p) { return pdec(p) ? "digital" : LISTEN_MODES.indexOf(p.mode) >= 0 ? "listen" : "manual"; }
 function curDec() { if (st) return pdec(st); const p = activeProf(); return p ? pdec(p) : null; }
 function decName(d) { const x = DECODERS.find(x => x[0] === d); return x ? x[1] : "digital"; }
@@ -1047,13 +1035,13 @@ function renderView() {
     if (el.parentElement.closest("[data-v]")) { el.hidden = el.dataset.v.split(" ").indexOf(v) < 0; continue; }
     el.hidden = !v || el.dataset.v.split(" ").indexOf(v) < 0 || (el.hasAttribute("data-live") && mis);
   }
-  // each decode list needs its decoder; Listen stays reachable while audio
-  // plays, and on WSPR, where the phone is the only way to hear it
+  // each decode list needs its decoder; Listen stays reachable on JS8 and
+  // WSPR, so the phone can hear the band too
   const dec = curDec();
   if (!st || pdec(st) !== "js8") $("js8").hidden = true;
   if (!st || pdec(st) !== "wspr") $("wspr").hidden = $("wStat").hidden = true;
   $("jCount").hidden = $("wCount").hidden = v === "digital";
-  if (v === "digital" && (A.on || (dec === "wspr" && !mis))) $("listenCard").hidden = false;
+  if (v === "digital" && (A.on || (dec && !mis))) $("listenCard").hidden = false;
   $("aPick").hidden = $("aPick").hidden || !profiles;
   $("lPick").hidden = $("lPick").hidden || !profAvail;
   $("jPick").hidden = $("jPick").hidden || !profAvail;
@@ -1085,7 +1073,7 @@ function profBtn(p, top, sub) {
     if (switching && switching.name === p.name) add("pa", "■ Switching…");
     else if (!!p.upconvert !== curUp()) add("pw", "▲ Flip the Ham It Up to " + hiuWord(p.upconvert));
     el.disabled = conn !== "ok" || !!switching;
-    el.onclick = () => askSwitch(p);
+    el.onclick = () => doSwitch(p);
   }
   return el;
 }
@@ -1118,23 +1106,6 @@ function renderProfiles() {
 }
 
 // switching
-const dlg = $("dlg");
-let dlgAct = null;
-$("dlgNo").onclick = () => dlg.close();
-$("dlgYes").onclick = () => { dlg.close(); if (dlgAct) dlgAct(); };
-dlg.addEventListener("close", () => { dlgAct = null; });
-function askSwitch(p) {
-  const cur = activeProf(), leavingJs8 = curDec() === "js8" || !!(cur && pdec(cur) === "js8");
-  if (!leavingJs8) return doSwitch(p);
-  $("dlgT").textContent = "Switch to " + p.name + "?";
-  const b = $("dlgB"); b.textContent = "";
-  const para = t => { const e = document.createElement("p"); e.textContent = t; b.appendChild(e); };
-  para("Leaving " + activeName() + " closes JS8Call. rxd restarts, which takes a few seconds.");
-  if (!!p.upconvert !== curUp()) para("▲ Then flip the Ham It Up to " + hiuWord(p.upconvert) + ".");
-  $("dlgYes").textContent = "Switch";
-  dlgAct = () => doSwitch(p);
-  dlg.showModal();
-}
 async function doSwitch(p) {
   showPmsg(""); $("swErr").hidden = true; $("flip").hidden = true;
   let r;
@@ -1157,8 +1128,8 @@ function finishSwitch() {
     setText($("flipT"), "▲ Flip the Ham It Up to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
     $("flip").hidden = false;
   }
-  // a mute carries over to the next station, never to JS8: its audio is JS8Call's input
-  if (muted() && st.volume > 0 && !feedsDecoder(st)) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
+  // a mute carries over to the next station
+  if (muted() && st.volume > 0) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
   jKey = null; wKey = null;
   renderConn(); renderView();
   loadProfiles();
@@ -1233,12 +1204,11 @@ function renderQual() {
 // ---------------------------------------------------------------- uConsole speaker mute
 function muted() { return load("spkprev") !== null; }
 function syncMute() {
-  if (muted() && st && st.volume > 0 && !held("volume") && !feedsDecoder(st)) forget("spkprev");
+  if (muted() && st && st.volume > 0 && !held("volume")) forget("spkprev");
   renderMute();
 }
 function renderMute() {
   const b = $("mute"), m = muted();
-  b.hidden = feedsDecoder(st);
   b.disabled = conn !== "ok" || !!switching || !st || (!m && st.volume === 0);
   b.setAttribute("aria-pressed", String(m));
   if (m) setText(b, "Unmute uConsole speaker (back to " + Math.round(+load("spkprev") * 100) + " %)");
@@ -1430,14 +1400,14 @@ async function pollJs8() {
 }
 function mineLine(l) {
   if (l.mycall === true) return true;
-  const c = (st && st.js8_call || "").toUpperCase();
+  const c = (st && st.station && st.station.call || "").toUpperCase();
   if (!c) return false;
   return (l.to || "").toUpperCase() === c || String(l.text || "").toUpperCase().split(/[^A-Z0-9\/]+/).indexOf(c) >= 0;
 }
 function jMatch(li) { return !jFilt || li.dataset.k.indexOf(jFilt) >= 0; }
 function addJs8(lines) {
   if (!lines.length) return jStatus("");
-  const list = $("jList"), frag = document.createDocumentFragment(), call = (st && st.js8_call) || "";
+  const list = $("jList"), frag = document.createDocumentFragment(), call = (st && st.station && st.station.call) || "";
   for (let i = lines.length - 1; i >= 0; i--) {
     const l = lines[i], li = document.createElement("li"), mine = mineLine(l), fr = String(l.from || "?");
     li.className = "jl" + (mine ? " me" : "");
@@ -1469,7 +1439,7 @@ function jStatus(err) {
   let shown = 0; if (jFilt) for (const li of list.children) if (!li.hidden) shown++;
   setText($("jCount"), heard); setText($("jHeard"), n + (n === 1 ? " station" : " stations"), "v");
   if (err) setText($("jMsg"), err);
-  else if (!list.children.length) setText($("jMsg"), "No decodes yet. They appear here as JS8Call hears them.");
+  else if (!list.children.length) setText($("jMsg"), "No decodes yet. They appear here as rxd decodes each slot.");
   else if (jFilt) setText($("jMsg"), shown ? "Showing " + shown + " of " + list.children.length + " lines with " + jFilt : "No lines with " + jFilt + ".");
   else setText($("jMsg"), "");
 }
@@ -1562,11 +1532,7 @@ function sqRenderAuto(level) {
   $("sqOff").setAttribute("aria-pressed", String(!level && !au));
   $("sqOn").textContent = av ? "Level" : "On";
 }
-// A JS8 profile's speaker audio is JS8Call's input (rxd refuses a volume
-// under volume_min there), so no speaker volume or mute is offered.
-function feedsDecoder(s) { return !!s && (s.volume_min > 0 || pdec(s) === "js8"); }
 function renderGainAudio(s) {
-  $("volSl").hidden = feedsDecoder(s);
   const has = typeof s.gain_auto === "boolean";
   $("gAuto").hidden = !has;
   if (has) {
@@ -1764,7 +1730,7 @@ function bandBtn(p, best) {
     else if (best) add("ba", "★ Best now");
     el.setAttribute("aria-label", decName(pdec(p)) + " " + bandWord(p.band) + ", " + fmtMHz(p.freq) + (best ? ", best now" : ""));
     el.disabled = conn !== "ok" || !!switching;
-    el.onclick = () => askSwitch(p);
+    el.onclick = () => doSwitch(p);
   }
   return el;
 }

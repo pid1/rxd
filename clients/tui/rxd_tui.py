@@ -6,23 +6,22 @@ has three views, like rxd's browser UI. The view follows the receiver's
 profile; 1, 2 and 3 pick one.
 
   1 Digital  the digital modes, with a picker for their profiles grouped
-             by mode (JS8: Ghostnet or regular JS8Call; WSPR). On JS8 it
-             shows JS8Call's decodes and the clock; on WSPR, rxd's own spots,
-             the two-minute cycle and the reporting to WSPRnet, which r turns
-             on and off. Nothing to tune.
+             by mode (JS8: GhostNet or the band plan's; WSPR). On JS8 it
+             shows rxd's decodes and the clock; on WSPR, its spots, the
+             two-minute cycle and the reporting to WSPRnet, which r turns on
+             and off. Nothing to tune.
   2 Listen   a picker of broadcast FM, VHF/UHF and AM stations, with gain,
              bandwidth, squelch (NFM) and the uConsole speaker's volume.
   3 Manual   the full instrument: tuning, spectrum and waterfall.
 
 Picking a station or frequency switches rxd's profile; rxd restarts, which
-takes a few seconds. Leaving a JS8 profile asks first, since it closes
-JS8Call.
+takes a few seconds.
 
 Times are shown in this machine's time zone ($TZ), 24-hour.
 
 l plays the receiver's audio on this machine, through the first of pw-cat,
 paplay, aplay, ffplay or sox's play on PATH (or --player), so the TUI works
-as a remote listening station; on JS8 the audio goes to JS8Call instead.
+as a remote listening station, on any profile.
 [ ] set its volume here; M mutes the uConsole's own speaker meanwhile.
 --listen starts with it on.
 
@@ -231,11 +230,8 @@ def mode_label(mode):
 
 
 def decoder_of(d):
-    """What decodes a profile's (or a status's) audio: "js8", "wspr" or None.
-    An older rxd or `radio --json` has only the js8 flag."""
-    if "decoder" in d:
-        return d["decoder"] if d["decoder"] in dict(DECODERS) else None
-    return "js8" if d.get("js8") else None
+    """What rxd decodes in a profile's (or a status's) audio: "js8", "wspr" or None."""
+    return d.get("decoder") if d.get("decoder") in dict(DECODERS) else None
 
 
 def profile_kind(p):
@@ -986,12 +982,8 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
         items = [(ud + " Enter", "switch")] + ([("a", "auto")] if plan else [])
         if decoder == "wspr" and report:
             items.append(("r", "reporting"))
-        if decoder != "js8":
-            items += [("l", "listen")] + ([("[ ]", "volume")] if listening else [])
-        items += [("PgUp PgDn", "scroll"), ("/", "filter")]
-        if decoder == "js8" and listening:
-            items.append(("l", "stop audio"))
-        items.append(("1 2 3", "view"))
+        items += [("l", "listen")] + ([("[ ]", "volume")] if listening else [])
+        items += [("PgUp PgDn", "scroll"), ("/", "filter"), ("1 2 3", "view")]
     elif view == "listen":
         items = [(ud + " Enter", "station"), ("g G", "gain"), ("a", "auto gain"),
                  ("A", "auto audio"), ("b", "bandwidth")]
@@ -1003,7 +995,7 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
         items = [(k["left"] + k["sep"] + k["right"], "tune"), (k["up"] + k["sep"] + k["down"], "step"),
                  ("f", "freq"), ("m", "mode"), ("l", "listen"), ("[ ]", "bandwidth"),
                  ("g G", "gain"), ("a", "auto gain"), ("A n h e c", "clean-up")] + \
-            ([] if decoder == "js8" else [("- +", "volume")]) + [("1 2 3", "view")]
+            [("- +", "volume"), ("1 2 3", "view")]
     return items + [("?", "help"), ("q", "quit")]
 
 
@@ -1744,7 +1736,6 @@ class App:
         self.entry = None       # text being typed, or None
         self.entry_kind = None  # "freq" or "filter"
         self.show_help = False
-        self.confirm = None     # the profile a y/n question is about
         self.lo = self.hi = None  # smoothed spectrum range
         self.wf_cache = {}      # waterfall rows already resampled to the screen
         # views
@@ -1867,7 +1858,7 @@ class App:
                      % (self.g.drop, hiu_word(up), sw["desc"]), "warn")
         else:
             self.say("%s Now on %s" % (self.g.rx, sw["desc"]), "ok")
-        if sw.get("muted") is not None and st.get("volume") and decoder_of(st) != "js8":
+        if sw.get("muted") is not None and st.get("volume"):
             self.mute_prev = st["volume"]
             self.send(volume=0.0)
         self.js8_scroll = 0
@@ -1896,13 +1887,6 @@ class App:
         s = self.update()
         if self.show_help:
             self.show_help = False
-            return True
-        if self.confirm is not None:
-            p, self.confirm = self.confirm, None
-            if ch in (ord("y"), ord("Y")):
-                self.do_switch(p, s)
-            else:
-                self.say("Stayed on %s" % self.active_name(s))
             return True
         if self.entry is not None:
             return self.entry_key(ch)
@@ -1979,11 +1963,7 @@ class App:
         elif not s["reachable"]:
             self.say("Not switched: can't reach rxd", "err")
         else:
-            cur = self.active_profile(s)
-            if decoder_of(st) == "js8" or (cur and decoder_of(cur) == "js8"):
-                self.confirm = p
-            else:
-                self.do_switch(p, s)
+            self.do_switch(p, s)
 
     def do_switch(self, p, s):
         st = s["status"]
@@ -2000,8 +1980,6 @@ class App:
         elif self.audio.on:
             self.audio.stop()
             self.say("%s Stopped listening here" % self.g.stop)
-        elif self.decoder(s) == "js8":
-            self.say("No audio here on JS8: it goes to JS8Call. 2 or 3 to listen.")
         else:
             self.audio.start(rate_for(s["status"].get("mode")))
 
@@ -2018,9 +1996,7 @@ class App:
 
     def mute_key(self, s):
         st = s["status"]
-        if self.decoder(s) == "js8":
-            self.say("Not on JS8: the receiver's audio feeds JS8Call")
-        elif st.get("volume") is None:
+        if st.get("volume") is None:
             self.not_yet()
         elif self.mute_prev is not None:
             v, self.mute_prev = self.mute_prev, None
@@ -2032,8 +2008,6 @@ class App:
             self.send(volume=0.0)
 
     def speaker_key(self, ch, st):
-        if decoder_of(st) == "js8":
-            return self.say("Not on JS8: the receiver's audio feeds JS8Call")
         if st.get("volume") is None:
             return self.not_yet()
         d = 1 if ch in (ord("+"), ord("=")) else -1
@@ -2286,8 +2260,6 @@ class App:
             x += len(text)
         if self.show_help:
             self.draw_box(scr, self.help_lines())
-        elif self.confirm is not None:
-            self.draw_box(scr, self.confirm_lines(s))
 
     def draw_bar(self, scr, s):
         g, w = self.g, scr.w
@@ -2525,12 +2497,12 @@ class App:
             elif wspr:
                 text = "No spots yet. They appear here as each two-minute slot is decoded."
             else:
-                text = "No decodes yet. They appear here as JS8Call hears them."
+                text = "No decodes yet. They appear here as rxd decodes each slot."
             scr.put(y, 2, clip(text, w - 3, g), "dim")
             return
         end = len(shown) - self.js8_scroll
         view = shown[max(0, end - area):end]
-        call = st.get("js8_call")
+        call = (st.get("station") or {}).get("call")
         for i, line in enumerate(view):
             if wspr:
                 scr.put(y + i, 1, format_wspr(line, st.get("freq"), w - 2, g))
@@ -2809,7 +2781,6 @@ class App:
                 "m         Auto listens for WSPR / JS8",
                 "s         scan the bands now (and Auto)",
                 "l         play the audio on this machine / stop",
-                "          (not on JS8: its audio goes to JS8Call)",
                 "[ ]       volume of the audio here",
             ] + views + [
                 "",
@@ -2866,18 +2837,6 @@ class App:
             "",
             "Any key closes this.",
         ]
-
-    def confirm_lines(self, s):
-        p = self.confirm
-        lines = ["Switch to %s?" % p["name"], ""]
-        if p.get("description"):
-            lines[0] = "Switch to %s (%s)?" % (p["name"], p["description"])
-        lines += ["Leaving %s closes JS8Call. rxd restarts," % self.active_name(s),
-                  "which takes a few seconds."]
-        if flip_needed(p, s["status"]):
-            lines += ["", "%s Then flip the Ham It Up to %s." % (self.g.drop,
-                                                                 hiu_word(p.get("upconvert")))]
-        return lines + ["", "y switches; any other key stays."]
 
     def draw_box(self, scr, lines):
         lines = [self.g.text(x) for x in lines]
