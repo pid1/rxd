@@ -61,7 +61,7 @@ class Code(unittest.TestCase):
             self.assertIsNone(js8.bits_frame(bad))
 
     def test_tones_carry_the_costas_arrays(self):
-        frame, i3 = js8.pack_heartbeat("KA1PID", "EM13")
+        frame, i3 = js8.pack_heartbeat("KA1PID", "EN52")
         t = js8.tones(frame, i3, "normal")
         self.assertEqual(list(t[0:7]), [4, 2, 5, 6, 1, 3, 0])
         self.assertEqual(list(t[72:79]), [4, 2, 5, 6, 1, 3, 0])
@@ -84,11 +84,11 @@ class Frames(unittest.TestCase):
     """Unpacking, against what JS8Call shows for the same frames."""
 
     def test_heartbeat_and_cq_keep_the_grid(self):
-        u = js8.unpack(*js8.pack_heartbeat("KA1PID", "EM13"))
+        u = js8.unpack(*js8.pack_heartbeat("KA1PID", "EN52"))
         self.assertEqual(u["kind"], "heartbeat")
-        self.assertEqual(u["text"], "KA1PID: @HB HEARTBEAT EM13 ")
-        u = js8.unpack(*js8.pack_heartbeat("KA1PID", "EM13", cq="CQ CQ CQ"))
-        self.assertEqual(u["text"], "KA1PID: @ALLCALL CQ CQ CQ EM13 ")
+        self.assertEqual(u["text"], "KA1PID: @HB HEARTBEAT EN52 ")
+        u = js8.unpack(*js8.pack_heartbeat("KA1PID", "EN52", cq="CQ CQ CQ"))
+        self.assertEqual(u["text"], "KA1PID: @ALLCALL CQ CQ CQ EN52 ")
         u = js8.unpack(*js8.pack_heartbeat("Q1ABC/P"))
         self.assertEqual(u["text"], "Q1ABC/P: @HB HEARTBEAT  ")
 
@@ -120,7 +120,7 @@ class Frames(unittest.TestCase):
         for call in ("KA1PID", "Q1ABC", "Q1ABC/P", "Q2X", "@ALLCALL", "@HB"):
             v, p = js8.pack_call(call)
             self.assertEqual(js8.unpack_call(v, p), call)
-        for grid in ("EM13", "FN42", "JO65", "QF22", "AA00"):
+        for grid in ("EN52", "FN42", "JO65", "QF22", "AA00"):
             self.assertEqual(js8.unpack_grid(js8.pack_grid(grid)), grid)
 
     def test_jsc_decoding_with_a_supplied_table(self):
@@ -276,8 +276,8 @@ class Messages(unittest.TestCase):
 
     def test_single_frame_messages(self):
         a = js8.Assembler()
-        out = self.feed(a, 0, js8.pack_heartbeat("KA1PID", "EM13"))
-        self.assertEqual(out[0]["text"], "KA1PID: @HB HEARTBEAT EM13 ♢")
+        out = self.feed(a, 0, js8.pack_heartbeat("KA1PID", "EN52"))
+        self.assertEqual(out[0]["text"], "KA1PID: @HB HEARTBEAT EN52 ♢")
         out = self.feed(a, 15, js8.pack_directed("Q1ABC", "KA1PID", " HEARTBEAT SNR", -9))
         self.assertEqual(out[0]["text"], "Q1ABC: KA1PID HEARTBEAT SNR -09 ♢")
         self.assertEqual((out[0]["from"], out[0]["to"]), ("Q1ABC", "KA1PID"))
@@ -323,13 +323,13 @@ class Messages(unittest.TestCase):
         import rxd
         msg = js8.Assembler().feed(0, [{"frame": f, "i3": i3, "freq": 1234.4, "snr": -12,
                                         "submode": "A"} for f, i3 in
-                                       [js8.pack_heartbeat("KA1PID", "EM13")]], 15, "A")[0]
+                                       [js8.pack_heartbeat("KA1PID", "EN52")]], 15, "A")[0]
         line = js8.directed_line(1762430415, 7078000, msg)
         got = rxd.Js8Feed.parse(line)
         when = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(1762430415))
         self.assertEqual(got, {"time": when, "freq": 7078000.0, "offset": 1234,
                                "snr": -12, "from": "KA1PID", "to": None,
-                               "text": "KA1PID: @HB HEARTBEAT EM13"})
+                               "text": "KA1PID: @HB HEARTBEAT EN52"})
 
 
 class Decoding(unittest.TestCase):
@@ -404,7 +404,7 @@ class Recording(unittest.TestCase):
             # 12 kHz audio for the slot, then up-sampled to rxd's 48 kHz.
             total = 3 + 15 + 2.0
             x12 = rng.normal(0, 0.05, int(total * 12000)).astype(np.float32)
-            f, i3 = js8.pack_heartbeat("KA1PID", "EM13")
+            f, i3 = js8.pack_heartbeat("KA1PID", "EN52")
             s = js8.synth(js8.tones(f, i3), 1500, "normal", 0.05)
             a = int((3 + 0.5) * 12000)
             x12[a:a + len(s)] += s
@@ -424,7 +424,7 @@ class Recording(unittest.TestCase):
                 row = fh.read().strip().split("\t")
             self.assertEqual(row[1], "7.078000")
             self.assertAlmostEqual(int(row[2]), 1500, delta=2)
-            self.assertEqual(row[4], "KA1PID: @HB HEARTBEAT EM13 ♢")
+            self.assertEqual(row[4], "KA1PID: @HB HEARTBEAT EN52 ♢")
             sd.close()
 
     def test_retune_drops_the_slot(self):
@@ -443,7 +443,7 @@ class Recording(unittest.TestCase):
         import io
         rng = np.random.default_rng(9)
         x, t0 = noise_slot("normal", rng)
-        f, i3 = js8.pack_heartbeat("KA1PID", "EM13")
+        f, i3 = js8.pack_heartbeat("KA1PID", "EN52")
         add_signal(x, t0, f, i3, "normal", 800, 0.2, -10)
         inp = io.BytesIO((json.dumps({"submode": "normal", "t0": t0, "n": len(x)}) + "\n")
                          .encode() + x.astype("<f4").tobytes())

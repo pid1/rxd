@@ -196,7 +196,7 @@ class DataSteps(Base):
         self.assertIn("callsign database up to date", out.stdout)
         with open(self.table) as fh:
             self.assertEqual(fh.read(), "pretend table\n")
-        self.assertEqual(rxd.CallBook(self.db).lookup("KA1PID")["grid"], "EM13lc")
+        self.assertEqual(rxd.CallBook(self.db).lookup("KA1PID")["grid"], "EN52lk")
         out = self.install("--callsigns-url", self.release)
         self.assertIn("JS8's JSC word table is current", out.stdout)
         self.assertNotIn("installed JS8's", out.stdout)

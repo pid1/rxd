@@ -119,7 +119,7 @@ class Http(unittest.TestCase):
         cls.http.tile_root = rxd.tile_root((root,))
         cls.http.stations = rxd.StationMap(
             js8=cls.http.js8, wspr=lambda: cls.http.rx.wspr, all_path=os.path.join(cls.dir, "ALL.TXT"),
-            grids_path=os.path.join(cls.dir, "grids.json"), clock=lambda: NOW, me=("KA1PID", "EM13lc"))
+            grids_path=os.path.join(cls.dir, "grids.json"), clock=lambda: NOW, me=("KA1PID", "EN52lk"))
         threading.Thread(target=cls.http.serve_forever, daemon=True).start()
 
     @classmethod
@@ -174,7 +174,7 @@ class Http(unittest.TestCase):
         doc = json.loads(body)
         self.assertEqual(code, 200)
         self.assertEqual(doc["decoder"], "wspr")
-        self.assertEqual(doc["me"]["grid"], "EM13lc")
+        self.assertEqual(doc["me"]["grid"], "EN52lk")
         by = {(s["mode"], s["call"]): s for s in doc["stations"]}
         self.assertEqual(set(by), {("js8", "N0CALL"), ("wspr", "K1ABC")})
         self.assertEqual(by[("js8", "N0CALL")]["grid"], "EN34")
@@ -195,12 +195,12 @@ class Stations(unittest.TestCase):
 
     def make(self, wspr=None, now=NOW):
         return rxd.StationMap(js8=rxd.Js8Feed(self.directed), wspr=lambda: wspr, all_path=self.all,
-                              grids_path=self.grids, clock=lambda: now, me=("KA1PID", "EM13lc"))
+                              grids_path=self.grids, clock=lambda: now, me=("KA1PID", "EN52lk"))
 
     def test_js8_grid(self):
         self.assertEqual(rxd.js8_grid("WD4UQ: @HB HEARTBEAT EM88"), ("WD4UQ", "EM88"))
         self.assertEqual(rxd.js8_grid("W1AW: @ALLCALL CQ CQ CQ fn31PR ♢"), ("W1AW", "FN31pr"))
-        self.assertEqual(rxd.js8_grid("K1ABC: N0CALL GRID EM13LC"), ("K1ABC", "EM13lc"))
+        self.assertEqual(rxd.js8_grid("K1ABC: N0CALL GRID EN52LK"), ("K1ABC", "EN52lk"))
         for none in ("WD4UQ: @HB HEARTBEAT", "KK7BXZ: N7EQQ HEARTBEAT SNR -09", "N0CALL: K1ABC EN34",
                      "@HB: HEARTBEAT EM88", "", None, "LHU/UJE//0K: @HB HEARTBEAT AR05"):
             self.assertIsNone(rxd.js8_grid(none), none)
@@ -226,7 +226,7 @@ class Stations(unittest.TestCase):
         self.assertEqual((s["grid"], s["snr"], s["last"], s["last_snr"]),
                          ("EM88", -3, "2026-11-06T11:40:00Z", -3))
         self.assertEqual((s["lat"], s["lon"]), (38.5, -83.0))
-        self.assertEqual(s["km"], rxd.grid_km("EM13lc", "EM88"))
+        self.assertEqual(s["km"], rxd.grid_km("EN52lk", "EM88"))
         k = by[("js8", "WD4KQX")]
         self.assertEqual((k["snr"], k["last"], k["last_snr"]), (-8, "2026-11-06T11:20:15Z", -15))
         w = by[("wspr", "K1ABC")]
@@ -235,8 +235,8 @@ class Stations(unittest.TestCase):
         # newest first
         self.assertEqual(doc["stations"][0]["call"], "K1ABC")
         self.assertEqual(doc["no_grid"], {"js8": 1, "wspr": 1})  # K4XQQ, PJ4/K1ABC
-        self.assertEqual(doc["me"], {"call": "KA1PID", "grid": "EM13lc",
-                                     "lat": rxd.grid_latlon("EM13lc")[0], "lon": rxd.grid_latlon("EM13lc")[1]})
+        self.assertEqual(doc["me"], {"call": "KA1PID", "grid": "EN52lk",
+                                     "lat": rxd.grid_latlon("EN52lk")[0], "lon": rxd.grid_latlon("EN52lk")[1]})
 
     def test_window(self):
         mkfile(self.directed, b"2026-11-04 11:40:00\t7.078000\t900\t-3\tWD4UQ: @HB HEARTBEAT EM88\n")
@@ -312,12 +312,12 @@ class Projection(unittest.TestCase):
             self.assertAlmostEqual(unmerc_y(merc_y(lat, 5), 5), lat, places=9)
 
     def test_grid_squares_land_in_the_right_tiles(self):
-        # EM13lc (north of Dallas) is in z6 tile 14/25, the tile showing Dallas
-        x, y = grid_px("EM13lc", 6)
-        self.assertEqual((int(x // TILE), int(y // TILE)), (14, 25))
+        # EN52lk (northern Illinois) is in z6 tile 16/23
+        x, y = grid_px("EN52lk", 6)
+        self.assertEqual((int(x // TILE), int(y // TILE)), (16, 23))
         # a grid square's centre is half a square from its corner
-        x0, _ = grid_px("EM13", 6)
-        self.assertAlmostEqual(x0, merc_x(-97.0, 6))
+        x0, _ = grid_px("EN52", 6)
+        self.assertAlmostEqual(x0, merc_x(-89.0, 6))
         _, yc = grid_px("JO62", 0)  # Berlin, north of the equator: upper half
         self.assertLess(yc, 128)
         _, ys = grid_px("QF56", 0)  # Sydney: lower half
@@ -339,7 +339,7 @@ class Projection(unittest.TestCase):
         return json.loads(out.stdout)
 
     def test_javascript_matches(self):
-        cases = [(lat, lon, z) for lat in (-70, -33.9, 0, 33.1042, 64.2) for lon in (-179.9, -97.04, 0, 151.2)
+        cases = [(lat, lon, z) for lat in (-70, -33.9, 0, 42.4375, 64.2) for lon in (-179.9, -89.04, 0, 151.2)
                  for z in (0, 1, 6, 9.5)]
         got = self.run_js("[" + ",".join("[mercX(%r,%r),mercY(%r,%r),unmercY(mercY(%r,%r),%r)]"
                                          % (lon, z, lat, z, lat, z, z) for lat, lon, z in cases) + "]")
@@ -349,12 +349,12 @@ class Projection(unittest.TestCase):
             self.assertAlmostEqual(back, lat, places=6)
 
     def test_great_circle(self):
-        pts = self.run_js("[greatCircle(0,0,0,90,2), greatCircle(33.1,-97.04,51.5,-0.1,32), greatCircle(10,10,10,10,4)]")
+        pts = self.run_js("[greatCircle(0,0,0,90,2), greatCircle(42.44,-89.04,51.5,-0.1,32), greatCircle(10,10,10,10,4)]")
         self.assertEqual(len(pts[0]), 3)
         self.assertAlmostEqual(pts[0][1][0], 0, places=9)
         self.assertAlmostEqual(pts[0][1][1], 45, places=9)
         line = pts[1]
-        self.assertAlmostEqual(line[0][0], 33.1, places=9)
+        self.assertAlmostEqual(line[0][0], 42.44, places=9)
         self.assertAlmostEqual(line[-1][1], -0.1, places=9)
         # Texas to London bows north of both ends, and every step is the same length
         self.assertGreater(max(p[0] for p in line), 51.5)

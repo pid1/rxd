@@ -538,9 +538,9 @@ class Profiles(unittest.TestCase):
     def test_station_from_the_environment(self):
         old = {k: os.environ.get(k) for k in ("RXD_CALL", "RXD_GRID")}
         try:
-            os.environ["RXD_CALL"], os.environ["RXD_GRID"] = "ka1pid", "em13LC"
+            os.environ["RXD_CALL"], os.environ["RXD_GRID"] = "ka1pid", "en52LK"
             doc = rxd.station_status()
-            self.assertEqual((doc["call"], doc["grid"]), ("KA1PID", "EM13lc"))
+            self.assertEqual((doc["call"], doc["grid"]), ("KA1PID", "EN52lk"))
             self.assertNotIn("missing", doc)
             self.assertEqual(doc["upconverter"]["name"], "Ham It Up")
             del os.environ["RXD_GRID"]

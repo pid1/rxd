@@ -407,7 +407,7 @@ class RadioTest(unittest.TestCase):
         p = self.r.profile("wspr")
         self.assertEqual((p["decoder"], p["wspr_report"], p["volume"]), ("wspr", True, 0.0))
         self.assertTrue(self.r.upconverting(p))
-        off = {"wspr": {"report": {"enabled": False, "call": "KA1PID", "grid": "EM13lc"}}}
+        off = {"wspr": {"report": {"enabled": False, "call": "KA1PID", "grid": "EN52lk"}}}
         self.assertFalse(self.r.capture(p, off)["wspr_report"])
         # No callsign: rxd can't report, which says nothing about the setting.
         cant = {"wspr": {"report": {"enabled": False, "reason": "no callsign"}}}

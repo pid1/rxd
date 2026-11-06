@@ -166,11 +166,11 @@ class Geodesy(unittest.TestCase):
         self.assertEqual(L.maidenhead(-33.87, 151.21), "QF56od")
         self.assertEqual(L.maidenhead(90, 180), "RR99xx")
         self.assertEqual(L.maidenhead(-90, -180), "AA00aa")
-        for g in ("EM13lc", "FN31pr", "QF56od", "JO01aa"):
+        for g in ("EN52lk", "FN31pr", "QF56od", "JO01aa"):
             self.assertEqual(L.maidenhead(*rxd.grid_latlon(g)), g)
         # through ECEF, as a receiver would report it
         self.assertEqual(L.maidenhead(*L.ecef_to_geodetic(
-            *L.geodetic_to_ecef(*rxd.grid_latlon("EM13lc"), 178))), "EM13lc")
+            *L.geodetic_to_ecef(*rxd.grid_latlon("EN52lk"), 178))), "EN52lk")
 
 
 # ------------------------------------------------------------- placeholders
@@ -346,39 +346,39 @@ class Precedence(unittest.TestCase):
         return L.SavedGrid(self.path, log=self.logs.append)
 
     def test_the_chain(self):
-        default = ["EM13lc"]
+        default = ["EN52lk"]
         loc = L.Location(lambda: default[0], self.saved())
-        self.assertEqual(loc.grid(), ("EM13lc", "station"))
+        self.assertEqual(loc.grid(), ("EN52lk", "station"))
         st = loc.status()
         self.assertEqual((st["grid_source"], st["gps"]["state"]), ("station", "off"))
-        self.assertEqual(st["grid_reason"], "EM13lc from station config: GPS is off")
+        self.assertEqual(st["grid_reason"], "EN52lk from station config: GPS is off")
         default[0] = None
         self.assertEqual(loc.grid(), (None, None))
         self.assertIn("No grid", loc.status()["grid_reason"])
-        default[0] = "EM13lc"
+        default[0] = "EN52lk"
 
         fake = FakeGps(state="no fix")
         loc.attach(fake)
-        self.assertEqual(loc.status()["grid_reason"], "EM13lc from station config: GPS has no fix")
+        self.assertEqual(loc.status()["grid_reason"], "EN52lk from station config: GPS has no fix")
         fake._live, fake.state, fake.sats = ("FN42ec", "gps/ubx"), "fix", 10
         fake.on_accept("FN42ec", "gps/ubx")
         st = loc.status()
         self.assertEqual((st["grid"], st["grid_source"], st["default_grid"], st["saved_grid"]),
-                         ("FN42ec", "gps", "EM13lc", "FN42ec"))
-        self.assertEqual(st["grid_reason"], "FN42ec from GPS (10 satellites); station config says EM13lc")
+                         ("FN42ec", "gps", "EN52lk", "FN42ec"))
+        self.assertEqual(st["grid_reason"], "FN42ec from GPS (10 satellites); station config says EN52lk")
         # the fix goes: the saved one stands in
         fake._live, fake.state, fake.sats = None, "no fix", None
         st = loc.status()
         self.assertEqual((st["grid"], st["grid_source"]), ("FN42ec", "gps-saved"))
         self.assertEqual(st["grid_reason"],
-                         "FN42ec from the last GPS fix: GPS has no fix; station config says EM13lc")
+                         "FN42ec from the last GPS fix: GPS has no fix; station config says EN52lk")
         # and after a restart, offline, with no GPS at all
-        loc2 = L.Location(lambda: "EM13lc", self.saved())
+        loc2 = L.Location(lambda: "EN52lk", self.saved())
         self.assertEqual(loc2.grid(), ("FN42ec", "gps-saved"))
 
     def test_settling_is_said(self):
-        loc = L.Location(lambda: "EM13lc", self.saved(), FakeGps(state="fix", sats=9))
-        self.assertEqual(loc.status()["grid_reason"], "EM13lc from station config: GPS is settling")
+        loc = L.Location(lambda: "EN52lk", self.saved(), FakeGps(state="fix", sats=9))
+        self.assertEqual(loc.status()["grid_reason"], "EN52lk from station config: GPS is settling")
 
     def test_saved_atomically_and_only_the_grid(self):
         s = self.saved()
@@ -400,8 +400,8 @@ class Precedence(unittest.TestCase):
             s = self.saved()
             self.assertIsNone(s.doc, body)
             self.assertIn("ignoring it", s.problem)
-            loc = L.Location(lambda: "EM13lc", s)
-            self.assertEqual(loc.grid(), ("EM13lc", "station"))
+            loc = L.Location(lambda: "EN52lk", s)
+            self.assertEqual(loc.grid(), ("EN52lk", "station"))
             self.assertIn("ignoring it", loc.status()["saved_problem"])
         s.save("FN42ec", "gps/tpv")   # a good save replaces it
         self.assertEqual(self.saved().doc["grid"], "FN42ec")
@@ -416,7 +416,7 @@ class Privacy(unittest.TestCase):
         try:
             path = os.path.join(d, "location.json")
             g, clock, logs = gps(hold=30)
-            loc = L.Location(lambda: "EM13lc", L.SavedGrid(path, log=logs.append))
+            loc = L.Location(lambda: "EN52lk", L.SavedGrid(path, log=logs.append))
             loc.attach(g)
             for _ in range(40):
                 g.feed(FAKE_GGA + js(EMPTY_SKY) + js(FAKE_TPV) + nav_sol(*SECRET) +
@@ -522,7 +522,7 @@ class InRxd(unittest.TestCase):
         os.environ["RXD_STATION"] = os.path.join(self.dir, "station.json")
         os.environ["RXD_LOCATION"] = os.path.join(self.dir, "location.json")
         with open(os.environ["RXD_STATION"], "w") as fh:
-            json.dump({"call": "KA1PID", "grid": "EM13lc"}, fh)
+            json.dump({"call": "KA1PID", "grid": "EN52lk"}, fh)
         rxd._location["loc"] = None
         self.gps = FakeGps(state="no fix")
         rxd.location().attach(self.gps)
@@ -543,14 +543,14 @@ class InRxd(unittest.TestCase):
     def test_status(self):
         st = rxd.station_status()
         self.assertEqual((st["call"], st["grid"], st["grid_source"], st["default_grid"]),
-                         ("KA1PID", "EM13lc", "station", "EM13lc"))
+                         ("KA1PID", "EN52lk", "station", "EN52lk"))
         self.assertEqual(st["gps"]["state"], "no fix")
         self.move("FN42ec")
         st = rxd.station_status()
         self.assertEqual((st["grid"], st["grid_source"], st["default_grid"]),
-                         ("FN42ec", "gps", "EM13lc"))
+                         ("FN42ec", "gps", "EN52lk"))
         self.assertEqual(rxd.station_id(), ("KA1PID", "FN42ec"))
-        self.assertEqual(st["grid_reason"], "FN42ec from GPS (10 satellites); station config says EM13lc")
+        self.assertEqual(st["grid_reason"], "FN42ec from GPS (10 satellites); station config says EN52lk")
 
     def test_corrupt_saved_grid_is_a_station_problem(self):
         with open(os.environ["RXD_LOCATION"], "w") as fh:
@@ -571,7 +571,7 @@ class InRxd(unittest.TestCase):
         net.queue_slot([spot], 7038600)
         net.flush(7038600, True)
         net.flush(7038600, False)
-        self.assertEqual([f["rgrid"] for f in sent], ["EM13lc", "FN31pr", "FN31pr"])
+        self.assertEqual([f["rgrid"] for f in sent], ["EN52lk", "FN31pr", "FN31pr"])
         self.assertEqual(net.status()["grid"], "FN31pr")
 
     def test_wsprnet_waits_for_a_grid(self):
@@ -590,7 +590,7 @@ class InRxd(unittest.TestCase):
         d = tempfile.mkdtemp(dir=self.dir)
         m = rxd.StationMap(js8=None, wspr=lambda: None, all_path=os.path.join(d, "ALL.TXT"),
                            grids_path=os.path.join(d, "grids.json"), book=False)
-        self.assertEqual(m.snapshot()["me"]["grid"], "EM13lc")
+        self.assertEqual(m.snapshot()["me"]["grid"], "EN52lk")
         self.move("FN42ec")
         me = m.snapshot()["me"]
         self.assertEqual((me["call"], me["grid"]), ("KA1PID", "FN42ec"))
@@ -598,8 +598,8 @@ class InRxd(unittest.TestCase):
         bp = rxd.BandPlanner.__new__(rxd.BandPlanner)
         bp._latlon = Ellipsis
         self.assertEqual(bp.latlon, rxd.grid_latlon("FN42ec"))
-        self.move("EM13lc")
-        self.assertEqual(bp.latlon, rxd.grid_latlon("EM13lc"))
+        self.move("EN52lk")
+        self.assertEqual(bp.latlon, rxd.grid_latlon("EN52lk"))
         bp.latlon = (1.0, 2.0)
         self.assertEqual(bp.latlon, (1.0, 2.0))
 

@@ -85,9 +85,9 @@ def state_for(name):
             "level_dbfs": -62.4, "tuner_hz": 132028000.0, "offset_hz": 50000.0,
             "sample_rate": 240000, "dsp_cpu": 0.25, "blocks": 100, "dropped": 0,
             "error": None, "running": True, "gains": list(GAINS),
-            "station": {"call": "KA1PID", "grid": "EM13lc", "file": "/etc/rxd/station.json",
-                        "grid_source": "gps", "default_grid": "EM13lc", "saved_grid": "EM13lc",
-                        "grid_reason": "EM13lc from GPS (10 satellites)",
+            "station": {"call": "KA1PID", "grid": "EN52lk", "file": "/etc/rxd/station.json",
+                        "grid_source": "gps", "default_grid": "EN52lk", "saved_grid": "EN52lk",
+                        "grid_reason": "EN52lk from GPS (10 satellites)",
                         "gps": {"state": "fix", "reason": "GPS fix", "satellites": 10,
                                 "accuracy_m": 3, "source": "ubx", "gpsd": "127.0.0.1:2947"},
                         "upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
@@ -105,7 +105,7 @@ def state_for(name):
 
 def wspr_status(state="recording", **report):
     """rxd's status["wspr"] while recording the 12:20 UTC slot, reporting as KA1PID."""
-    r = {"enabled": True, "call": "KA1PID", "grid": "EM13lc", "sent": 12, "pending": 0,
+    r = {"enabled": True, "call": "KA1PID", "grid": "EN52lk", "sent": 12, "pending": 0,
          "online": True, "error": None}
     r.update(report)
     return {"state": state, "slot": "2026-11-06T12:22:00Z" if state == "waiting"
@@ -907,13 +907,13 @@ class Views(unittest.TestCase):
             self.assertTrue(t.clock_words(c, A)[0].isascii())
 
     def test_station_words(self):
-        st = {"station": {"grid_reason": "EM13lc from GPS (10 satellites)", "grid_source": "gps",
+        st = {"station": {"grid_reason": "EN52lk from GPS (10 satellites)", "grid_source": "gps",
                           "gps": {"state": "fix"}}}
-        self.assertEqual(t.station_words(st, U), ("● Station EM13lc from GPS (10 satellites)", "ok"))
-        st["station"].update(grid_source="station", grid_reason="EM13lc from station config: "
+        self.assertEqual(t.station_words(st, U), ("● Station EN52lk from GPS (10 satellites)", "ok"))
+        st["station"].update(grid_source="station", grid_reason="EN52lk from station config: "
                              "GPS has no fix", gps={"state": "no fix"})
         self.assertEqual(t.station_words(st, U),
-                         ("· Station EM13lc from station config: GPS has no fix", "label"))
+                         ("· Station EN52lk from station config: GPS has no fix", "label"))
         st["station"]["gps"]["state"] = "rejected"
         self.assertEqual(t.station_words(st, A)[1], "warn")
         self.assertTrue(t.station_words(st, A)[0].startswith("! Station"))
@@ -1044,16 +1044,16 @@ class WsprSpots(unittest.TestCase):
     def test_reporting_in_words(self):
         def words(g=U, **r):
             return t.wspr_report_words(wspr_status(**r), g)
-        self.assertEqual(words(), ("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", "ok"))
+        self.assertEqual(words(), ("● Reporting to WSPRnet as KA1PID EN52lk · 12 sent", "ok"))
         self.assertEqual(words(pending=2)[0],
-                         "● Reporting to WSPRnet as KA1PID EM13lc · 12 sent, 2 waiting")
+                         "● Reporting to WSPRnet as KA1PID EN52lk · 12 sent, 2 waiting")
         self.assertEqual(words(online=False, pending=5, error="can't reach WSPRnet: x"),
                          ("▲ Offline: 5 spots waiting", "warn"))
         self.assertEqual(words(online=False, pending=1)[0], "▲ Offline: 1 spot waiting")
         self.assertEqual(words(error="WSPRnet refused a spot: no"),
                          ("✕ WSPRnet refused a spot: no", "bad"))
         self.assertEqual(words(enabled=False)[0],
-                         "■ Not reporting to WSPRnet (r reports as KA1PID EM13lc)")
+                         "■ Not reporting to WSPRnet (r reports as KA1PID EN52lk)")
         w = wspr_status()
         w["report"] = {"enabled": False, "call": None, "grid": None,
                        "reason": "no callsign and grid"}
@@ -1291,7 +1291,7 @@ class Drawing(unittest.TestCase):
     def test_js8_clock_ok_and_unknown(self):
         app = app_on("js8")
         self.assertIn("● Clock synced (GPS)", frame(app).text())
-        self.assertIn("● Station EM13lc from GPS (10 satellites)", frame(app).text())
+        self.assertIn("● Station EN52lk from GPS (10 satellites)", frame(app).text())
         app.p.status["clock"] = {"synced": None}
         self.assertIn("? Clock unknown", frame(app).text())
 
@@ -1308,7 +1308,7 @@ class Drawing(unittest.TestCase):
         self.assertIn("3 stations heard", text)
         self.assertIn("● Clock synced (GPS)", text)
         self.assertIn("● Recording the 12:20 slot   3 spots in the 12:18 slot", text)
-        self.assertIn("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", text)
+        self.assertIn("● Reporting to WSPRnet as KA1PID EN52lk · 12 sent", text)
         self.assertIn(t.WSPR_HEADER, text)
         self.assertNotIn(t.JS8_HEADER, text)
         self.assertIn("12:18  VE3QXZ", lines[-3])                    # newest at the bottom
@@ -1352,7 +1352,7 @@ class Drawing(unittest.TestCase):
         self.assertEqual(app.p.sent, [{"wspr_report": False}])
         self.assertIn("Stopped reporting", app.message)
         text = frame(app).text()                       # shown before rxd confirms it
-        self.assertIn("■ Not reporting to WSPRnet (r reports as KA1PID EM13lc)", text)
+        self.assertIn("■ Not reporting to WSPRnet (r reports as KA1PID EN52lk)", text)
         app.key(ord("r"))
         self.assertEqual(app.p.sent[-1], {"wspr_report": True})
         self.assertIn("● Reporting to WSPRnet", frame(app).text())
@@ -1969,7 +1969,7 @@ class RealProgram(unittest.TestCase):
         self.assertIn("1 ● Digital", screen)
         self.assertIn("● Recording the 06:20 slot", screen)
         self.assertIn("3 spots in the 06:18 slot", screen)
-        self.assertIn("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", screen)
+        self.assertIn("● Reporting to WSPRnet as KA1PID EN52lk · 12 sent", screen)
         self.assertIn(t.WSPR_HEADER, screen)
         self.assertNotIn("12:18", screen)
         tui.send(b"r")
