@@ -406,6 +406,20 @@ class RadioTest(unittest.TestCase):
         out, _ = self.radio("show", "vhf")
         self.assertEqual(json.loads(out), self.r.PROFILES["vhf"])
 
+    def test_capture_keeps_auto_gain_and_audio(self):
+        st = {"gain_db": 16.6, "gain_auto": False,
+              "audio": {"auto": True, "nr": True, "nr_setting": None, "filter": True,
+                        "norm": False, "limit": True, "squelch": True, "active": ["nr"]}}
+        p = self.r.capture(self.r.profile("noaa"), st)
+        self.assertEqual((p["rtl"]["gain_db"], p["rtl"]["gain_auto"]), (16.6, False))
+        self.assertEqual(p["audio"], {"auto": True, "filter": True, "norm": False,
+                                      "limit": True, "squelch": True, "nr": None})
+
+    def test_capture_never_saves_js8_silent(self):
+        p = self.r.capture(self.r.profile("js8"), {"volume": 0.0})
+        self.assertEqual(p["volume"], self.r.profile("js8")["volume"])
+        self.assertEqual(self.r.capture(self.r.profile("vhf"), {"volume": 0.0})["volume"], 0.0)
+
     def test_capture_keeps_squelch(self):
         p = self.r.capture(self.r.profile("vhf"), {"squelch": -55.0})
         self.assertEqual((p["demod_settings"]["squelchEnabled"],
