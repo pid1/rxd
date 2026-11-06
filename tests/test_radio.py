@@ -406,6 +406,14 @@ class RadioTest(unittest.TestCase):
         out, _ = self.radio("show", "vhf")
         self.assertEqual(json.loads(out), self.r.PROFILES["vhf"])
 
+    def test_capture_keeps_squelch(self):
+        p = self.r.capture(self.r.profile("vhf"), {"squelch": -55.0})
+        self.assertEqual((p["demod_settings"]["squelchEnabled"],
+                          p["demod_settings"]["squelchLevel"]), (True, -55.0))
+        p = self.r.capture(p, {"squelch": None})
+        self.assertFalse(p["demod_settings"]["squelchEnabled"])
+        self.assertEqual(self.r.capture(p, {})["demod_settings"], p["demod_settings"])
+
     def test_json_lists_profiles_for_the_web_ui(self):
         self.radio("js8")
         doc = json.loads(self.radio("--json")[0])

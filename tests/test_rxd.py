@@ -339,6 +339,11 @@ class Control(unittest.TestCase):
         code, st = self.api("POST", "/api/tune", {"freq": 7079000, "mode": "usb"})
         self.assertEqual((code, st["freq"], st["mode"]), (200, 7079000, "USB"))
         self.assertEqual(self.api("POST", "/api/tune", {"squelch": 1})[0], 400)
+        self.assertEqual(self.api("POST", "/api/tune", {"nonsense": 1})[0], 400)
+        code, st = self.api("POST", "/api/tune", {"squelch": -60})
+        self.assertEqual((code, st["squelch"]), (200, -60.0))
+        code, st = self.api("POST", "/api/tune", {"squelch": None})
+        self.assertEqual((code, st["squelch"]), (200, None))
         self.assertEqual(self.api("POST", "/api/tune", {"mode": "CW"})[0], 400)
         self.assertEqual(self.api("POST", "/api/tune", {"mode": 5})[0], 400)
         self.assertEqual(self.api("POST", "/api/tune", {"freq": 1})[0], 400)
@@ -519,6 +524,28 @@ class Profiles(unittest.TestCase):
                     os.environ.pop(k, None)
                 else:
                     os.environ[k] = v
+
+    def test_squelch_settings(self):
+        s = rxd.Settings(dict(JS8, demod="FM", demod_settings={"squelchEnabled": True,
+                                                                "squelchLevel": -60.0}))
+        self.assertEqual(s.squelch, -60.0)
+        self.assertIsNone(rxd.Settings(dict(JS8, demod="FM", demod_settings={
+            "squelchEnabled": False, "squelchLevel": -60.0})).squelch)
+        s.update(freq=146.52e6)            # leaving squelch out keeps it
+        self.assertEqual(s.squelch, -60.0)
+        s.update(squelch=None)             # null turns it off
+        self.assertIsNone(s.squelch)
+        with self.assertRaises(ValueError):
+            s.update(squelch=20)
+
+    def test_squelch_gate_hysteresis(self):
+        rx = rxd.Receiver(rxd.Settings(dict(JS8)), FastSynth(0), Capture())
+        rx.chain = rxd.Chain("FM", 12500, 0, 0)
+        a = np.ones(10, np.float32)
+        for level, want in ((-70, 0), (-50, 1), (-52, 1), (-54, 0), (-51, 0), (-49, 1)):
+            rx.chain.level_db = level
+            self.assertEqual(rx.gate(a, -50.0).max(), want, "at %d dBFS" % level)
+        self.assertEqual(rx.gate(a, None).max(), 1)
 
     def test_unsupported_mode(self):
         with self.assertRaises(ValueError):

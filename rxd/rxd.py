@@ -108,6 +108,9 @@ class Settings:
             self.agc_attack = float(ds.get("agcAttack", 50.0))
             self.agc_decay = float(ds.get("agcDecay", 5.0))
             self.volume = float(p.get("volume", 0.5))
+            # SDR++'s squelchEnabled/squelchLevel, carried in demod_settings.
+            self.squelch = float(ds["squelchLevel"]) if ds.get("squelchEnabled") and \
+                ds.get("squelchLevel") is not None else None
             carrier = float(p["frequency"])  # SDR++'s VFO: the carrier
             dial = float(p.get("js8call_dial", carrier))
             self.cal = dial - carrier
@@ -136,7 +139,7 @@ class Settings:
                         offset_mode=self.offset_mode,
                         upconvert_below=self.upconvert_below,
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
-                        volume=self.volume, gain_db=self.gain_db,
+                        volume=self.volume, gain_db=self.gain_db, squelch=self.squelch,
                         version=self.version)
 
     def upconverter(self):
@@ -148,7 +151,7 @@ class Settings:
         return 0.0
 
     def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
-               volume=None):
+               volume=None, squelch=Ellipsis):
         with self.lock:
             if mode is not None:
                 mode = mode.upper()
@@ -171,6 +174,12 @@ class Settings:
                 if not 0 <= volume <= 4:
                     raise ValueError("volume must be between 0 and 4")
                 self.volume = volume
+            if squelch is not Ellipsis:  # None (JSON null) turns it off
+                if squelch is not None:
+                    squelch = float(squelch)
+                    if not -150 <= squelch <= 0:
+                        raise ValueError("squelch must be in dBFS, -150 to 0, or null")
+                self.squelch = squelch
             self.version += 1
 
 
@@ -589,6 +598,7 @@ class Receiver:
         self.offset = 0.0
         self.spectrum = None
         self.spectrum_at = 0.0
+        self.squelch_open = True
         self.listeners = []          # (rate, queue) per streaming client
         self.listen_lock = threading.Lock()
         self.resamplers = {}         # rate -> FirDecimator from 48 kHz
@@ -680,6 +690,7 @@ class Receiver:
                     continue  # the block in hand was at the old rate
             t0 = time.thread_time()
             audio = self.chain(x, self.offset)
+            audio = self.gate(audio, snap["squelch"])
             pcm = np.clip(audio * snap["volume"] * 32767, -32768, 32767).astype("<i2")
             self.sink.write(pcm)
             if self.listeners:
@@ -720,6 +731,15 @@ class Receiver:
         return {"bins": [round(float(v), 1) for v in db], "start_hz": center - rate / 2,
                 "stop_hz": center + rate / 2, "dial_hz": dial, "passband": band,
                 "seq": (self.spectrum or {}).get("seq", 0) + 1}
+
+    def gate(self, audio, level):
+        """Squelch: silence below level dBFS; opens at it, closes 3 dB under."""
+        if level is None:
+            self.squelch_open = True
+            return audio
+        lv = self.chain.level_db
+        self.squelch_open = lv >= (level - 3 if self.squelch_open else level)
+        return audio if self.squelch_open else np.zeros_like(audio)
 
     # ------------------------------------------------ audio to the clients
 
@@ -767,6 +787,7 @@ class Receiver:
                 "vfo_hz": snap["dial"] - snap["cal"], "cal_hz": snap["cal"],
                 "mode": snap["mode"], "bandwidth": snap["bandwidth"],
                 "gain_db": snap["gain_db"], "volume": snap["volume"],
+                "squelch": snap["squelch"], "squelch_open": self.squelch_open,
                 "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
                 "upconvert_below_hz": snap["upconvert_below"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
@@ -1112,7 +1133,7 @@ class Api(BaseHTTPRequestHandler):
             doc = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(doc, dict):
                 raise ValueError("body must be a JSON object")
-            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume"}
+            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume", "squelch"}
             if unknown:
                 raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
             self.server.rx.s.update(**doc)
