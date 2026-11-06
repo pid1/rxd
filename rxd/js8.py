@@ -1401,13 +1401,15 @@ class SlotDecoder:
         m = SUBMODES[name]
         msgs = self.assembler.feed(slot, decodes, m.slot, m.letter)
         now = self.clock()
+        # The logs first: once `last` says the slot is done, its lines must
+        # already be in the feed that /api/js8 reads.
+        self._append(self.all_path, [all_line(slot, d, d["unpacked"]["text"]) for d in decodes])
+        if dial is not None:
+            self._append(self.directed_path, [directed_line(now, dial, x) for x in msgs])
         with self.lock:
             self.cpu = (self.cpu + [(cpu, m.slot)])[-40:]
             self.last = {"slot": iso(slot), "submode": name, "decodes": len(decodes),
                          "messages": len(msgs), "cpu_s": round(cpu, 2), "wall_s": round(wall, 2)}
-        self._append(self.all_path, [all_line(slot, d, d["unpacked"]["text"]) for d in decodes])
-        if dial is not None:
-            self._append(self.directed_path, [directed_line(now, dial, x) for x in msgs])
 
     def _append(self, path, rows):
         if not rows:
