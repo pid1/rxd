@@ -3,9 +3,9 @@ name: callsign database
 
 # Builds the offline callsign -> grid database rxd's map uses for stations
 # that never send a grid, and publishes it as assets of the rolling release
-# `data-callsigns`. The Pi never builds anything: setup.sh (and so `maint`)
-# runs `callsign_db.py install`, which fetches callsigns.sqlite.gz only when
-# its .sha256 changed.
+# `data-callsigns` of this repository. A receiver never builds anything:
+# install.py runs `callsign_db.py install`, which fetches callsigns.sqlite.gz
+# only when its .sha256 changed.
 #
 # Sources (all fetched here, on the runner): the FCC ULS amateur licences
 # (l_amat.zip, public domain, refreshed by the FCC every Sunday), the Census
