@@ -1,0 +1,20 @@
+# Managed by rx/setup.sh — tab completion for radio.
+_radio() {
+    local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
+    local names
+    names=$(radio --names 2>/dev/null)
+    case $prev in
+        save|reset|show)
+            COMPREPLY=($(compgen -W "$names" -- "$cur")) ;;
+        radio|--no-focus)
+            COMPREPLY=($(compgen -W "$names meshtastic meshcore mesh off resume save reset show help --no-focus" -- "$cur")) ;;
+        mesh)
+            COMPREPLY=($(compgen -W "nodes send dm join info on off" -- "$cur")) ;;
+        dm)
+            # Names seen by the last 'radio mesh nodes' on the active network.
+            local net
+            net=$(cat ~/.config/rx/radio/mesh 2>/dev/null || echo meshtastic)
+            COMPREPLY=($(compgen -W "$(cat ~/.cache/rx/mesh-names-"$net" 2>/dev/null)" -- "$cur")) ;;
+    esac
+}
+complete -F _radio radio
