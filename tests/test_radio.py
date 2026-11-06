@@ -439,6 +439,14 @@ class RadioTest(unittest.TestCase):
         self.assertTrue(self.r.capture(p, cant)["wspr_report"])
         self.assertNotIn("wspr_report", self.r.capture(self.r.profile("js8"), off))
 
+    def test_js8_on_rxd_engine_closes_js8call_and_skips_it(self):
+        self.write_saved("js8", dict(self.r.profile("js8"), js8_engine="rxd"))
+        self.calls.clear()
+        self.radio("js8")
+        self.assertEqual(self.up(), "rxd@js8.service")
+        self.assertIn(("close", "js8call"), self.calls)
+        self.assertNotIn(("start", self.r.JS8CALL), self.calls)
+
     def test_switch_to_wspr_closes_js8call(self):
         self.radio("js8")
         self.calls.clear()

@@ -48,6 +48,123 @@ Frequencies on both ports are the dial. A JS8 profile whose VFO sits 100 Hz
 under its `js8call_dial` keeps that offset as a calibration, so rigctl
 reports 7078000.
 
+## JS8, decoded by rxd (rxd/js8.py)
+
+A JS8 profile with `"js8_engine": "rxd"` (or `RXD_JS8_ENGINE=rxd`) decodes
+JS8 in rxd, with no JS8Call. The default, `"js8call"`, leaves it to JS8Call
+as before. Receive only: nothing here transmits.
+
+- **Recording:** like WSPR, from the audio before squelch and volume,
+  resampled to 12 kHz, in slots by the system clock with up to 2.5 s of
+  audio either side. A slot is dropped if the dial moves or the audio stalls
+  during it.
+- **Decoding:** in a separate `js8.py --serve` process at nice 10, so a busy
+  band can't starve the DSP thread. `"js8_submodes"` picks the speeds: normal
+  (15 s), fast (10 s), turbo (6 s) and slow (30 s). The default is normal,
+  fast and slow.
+- **Stages:** candidates from a quarter-symbol spectrogram scored against
+  the three Costas arrays; each one mixed to baseband from one FFT of the
+  slot, then timed to 1/24 symbol and tuned to 1/16 tone; Rician soft bits;
+  belief propagation on LDPC(174,87), all candidates at once; CRC-12. Decoded
+  signals are subtracted and the slot is searched again.
+- **Output:** `ALL.TXT` (frames) and `DIRECTED.TXT` (messages) under
+  `~/.local/share/rxd/js8/`, in JS8Call's formats, each rolled over to `.1`
+  past 8 MB. `/api/js8` tails that DIRECTED.TXT, so its lines keep their
+  shape, and history survives a restart.
+- **Status:** `js8_decoder`: state (waiting, recording or decoding), the last
+  slot's decode, message, CPU and wall-clock counts, skipped slots, the
+  error, and whether the JSC table is installed. For a JS8 profile left to
+  JS8Call it is `{"engine": "js8call"}`.
+
+Two places where rxd's lines differ from JS8Call's DIRECTED.TXT, both on
+purpose:
+- The offset column is the sending station's. JS8Call writes its own
+  transmit offset there.
+- Heartbeats and CQs keep their grid, for the station map.
+
+### Compressed text and the JSC table
+
+Heartbeats, CQs, directed commands and SNR reports, callsigns (compound ones
+too), grids and uncompressed (Huffman) data frames all decode without help.
+Most free text is sent compressed with JS8Call's "JSC" code, which needs its
+262,144-word table. In the 1,135 frames of the box's ALL.TXT, 214 (19%)
+needed it; every message with free text contains such frames. The table is
+JS8Call's (GPL-3), so rxd doesn't ship it. Instead,
+
+```
+python3 js8.py --jsc-import /usr/bin/js8call
+```
+
+reads it out of the user's own installed js8call program into
+`~/.local/share/rxd/js8/jsc_map.txt` (`$RXD_JSC` overrides). Without it, the
+parts of a message that need it show as `……`.
+
+### Sources and licences
+
+No JS8Call or WSJT-X code is used or translated.
+- **ft8_lib** by Kārlis Goba (MIT, github.com/kgoba/ft8_lib, its 2018 FT8 v1
+  commits) is the source for the (174,87) generator matrix, the bit order on
+  the air and the CRC-12 polynomial.
+- **The sparse parity checks** were derived from that generator here, as the
+  87 lowest-weight words of the code's dual. test_js8 checks them.
+- **JS8's own protocol constants** are facts about the protocol, taken from
+  JS8Call 2.2's behaviour and its GPL source as the only specification: the
+  Costas arrays, symbol lengths and start delays, the CRC's XOR with 42, the
+  frame layouts, the callsign, group, command and CQ tables, and the Huffman
+  code. They were checked by decoding real signals off the air and by
+  reproducing JS8Call's text for 1,129 of 1,135 frames in its ALL.TXT. The
+  other 6 differ only in padding.
+- **The JSC decompressor** is (s,c)-dense coding (Brisaboa et al., 2003),
+  with JS8's parameters: 4-bit digits, s = 7, c = 9, and a space flag after
+  each word.
+- **Ordered-statistics decoding** (Fossorier and Lin, 1995) is a second try
+  for the few strongest candidates that belief propagation fails on.
+
+### Checked against JS8Call (2026-11-06, 40 m, 7.078 MHz)
+
+JS8Call 2.2.0 and rxd decoded the same audio for 17 minutes, 13:03 to 13:20
+UTC. rxd ran live in place of the rxd@js8 unit and still fed JS8Call's sink.
+JS8Call stamps each ALL.TXT decode with the start of the slot *before* the
+one it was sent in. Its DIRECTED.TXT write times and the synced clock show
+rxd's slot is the right one, so frames were compared a slot apart.
+
+| | JS8Call | rxd | Both | Recall |
+|---|---|---|---|---|
+| Frames, live (an earlier build) | 68 | 60 | 58 | 85% |
+| Frames, the same audio decoded again (this build) | 67 | 64 | 61 | 91% |
+| Messages, as in DIRECTED.TXT (this build) | 36 | 38 | 33 | 92% |
+
+- **Frames only rxd decoded** (3 to 5) are real: heartbeat replies JS8Call
+  missed, and frames JS8Call caught in a neighbouring slot.
+- **False decodes:** none seen, and none in 200 slots of pure noise.
+- **What rxd misses** is mostly at -18 to -23 dB, signals more than 1 s
+  early, or symbols hit at the slot's edges.
+- **Agreement:** rxd's SNR reads about 2 dB above JS8Call's, and its dt
+  0.2 s below.
+
+An earlier session, 11:59 to 12:17 UTC, gave 56 frames to rxd and none to
+JS8Call, because the saved js8 profile's volume was 0 and JS8Call heard
+silence.
+
+### CPU on the uConsole
+
+CM4, Python 3.11.2, numpy 1.24.2, scipy 1.10.1, at nice 10, from the 13:03
+recording:
+
+| Submode | Mean (max) per slot | Share of one core |
+|---|---|---|
+| normal | 2.35 s (2.91 s) | 15.6% |
+| fast | 1.28 s (2.55 s) | 12.8% |
+| turbo | 1.09 s (1.23 s) | 18.2% |
+| slow | 1.32 s (1.52 s) | 4.4% |
+
+Live, decoding normal, fast and slow with an earlier and cheaper build, the
+decoder process used 25% of one core and rxd 17% (its DSP included). JS8Call
+used 63% for its `js8` decoder and 12.5% for its window.
+
+On synthetic slots with white noise, decoding is certain down to -18 dB SNR
+in 2500 Hz and about half the time at -20 dB.
+
 ## How it works
 
 - **Tuning:** the dongle runs at 240 kS/s (1.2 MS/s for WFM). It tunes 50 kHz
@@ -106,7 +223,11 @@ python3 -m unittest discover rxd
 
 They cover the DSP (block-invariant filtering, sideband rejection, the
 passband, AM, WFM and AGC), retuning, the rigctl and HTTP protocols, and
-profile loading. They pass on Python 3.11, numpy 1.24 and scipy 1.10 (the
+profile loading. test_js8 covers the JS8 decoder on synthesized slots (all
+four speeds, several SNRs, offsets and times, overlapping signals, noise
+alone), frame unpacking, message assembly, slot recording and the decoder
+process. Real recordings hold other stations' callsigns, so they stay out
+of git: `RXD_JS8_REAL=DIR` runs the decoder over a directory of them. They pass on Python 3.11, numpy 1.24 and scipy 1.10 (the
 uConsole's) both locally and on the device. Separately, `rigctl -m 2` from
 Hamlib 4.5.4 on the device talks to rxd without errors.
 

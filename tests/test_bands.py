@@ -802,5 +802,18 @@ class Tui(unittest.TestCase):
         self.assertIn("mode must be wspr or js8", acks[1][1])
 
 
+
+class Js8Decoding(unittest.TestCase):
+    def test_rxd_decoder_counts_as_decoding(self):
+        class Dec:
+            def __init__(self, err): self.err = err
+            def status(self): return {"engine": "rxd", "error": self.err}
+        class Rx: pass
+        rx = Rx()
+        rx.js8dec = Dec(None)
+        self.assertTrue(rxd.js8_decoding(rx))
+        rx.js8dec = Dec("decoder process died")
+        self.assertFalse(rxd.js8_decoding(rx))
+
 if __name__ == "__main__":
     unittest.main()
