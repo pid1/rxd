@@ -11,7 +11,7 @@ in plain ustar, gzipped by Python's zlib at level 9 with no name and a zero
 time in the header. The same REF gives the same bytes on any machine, so a
 local build of a tag must match the published release's .sha256.
 
-What goes in: everything at REF but .github/, tests/ and dotfiles, under
+What goes in: everything at REF but .github/, tests/, docs/screenshots/ and dotfiles, under
 rxd-X.Y.Z/. X.Y.Z is VERSION in rxd/rxd.py at REF.
 """
 import argparse
@@ -25,7 +25,7 @@ import sys
 import tarfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
-SKIP = (".github/", "tests/")
+SKIP = (".github/", "tests/", "docs/screenshots/")  # the README's images stay on GitHub
 
 
 def git(*args, binary=False):
