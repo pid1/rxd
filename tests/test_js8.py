@@ -150,6 +150,19 @@ class Messages(unittest.TestCase):
         out = self.feed(a, 30, js8.pack_huffman("FROM TEXAS", js8.LAST))
         self.assertEqual(out[0]["text"], "KA1PID: Q1ABC  GOOD MORNING FROM TEXAS ♢")
 
+    def test_relay_checksum_is_checked_and_removed(self):
+        text = "Q2XYZ HELLO"   # (a real relay names its next hop with ">", sent compressed)
+        for good in (True, False):
+            a = js8.Assembler()
+            self.feed(a, 0, js8.pack_directed("KA1PID", "Q1ABC", ">", i3=js8.FIRST))
+            tail = " " + (js8.checksum16(text) if good else "AAA")
+            self.feed(a, 15, js8.pack_huffman(text, 0))
+            out = self.feed(a, 30, js8.pack_huffman(tail, js8.LAST))
+            if good:
+                self.assertEqual(out[0]["text"], "KA1PID: Q1ABC> Q2XYZ HELLO \u2662")
+            else:
+                self.assertEqual(out, [])   # JS8Call drops it too
+
     def test_missing_frame_shows_a_gap(self):
         a = js8.Assembler()
         self.feed(a, 0, js8.pack_directed("KA1PID", "Q1ABC", " ", i3=js8.FIRST))

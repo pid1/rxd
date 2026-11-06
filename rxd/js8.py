@@ -307,6 +307,53 @@ def bp_decode(llr, iters=30, patience=8):
         r[:, pad] = 0
     return out, done, used
 
+_GFULL = np.concatenate([_GEN.T, np.eye(87, dtype=np.uint8)], 1)   # message bit -> codeword
+_PAIRS = np.array([(i, j) for i in range(87) for j in range(i + 1, 87)], np.intp)
+
+
+def osd_decode(llr, order=2):
+    """Ordered-statistics decoding (Fossorier and Lin): take the 87 most
+    reliable independent bits as given, re-encode, and try flipping one or two
+    of them. Returns (codeword, discrepancy): the sum of |llr| over the bits
+    where the codeword disagrees with the received hard decisions."""
+    llr = np.asarray(llr, np.float64)
+    hard = (llr > 0).astype(np.uint8)
+    rel = np.abs(llr)
+    perm = np.argsort(-rel, kind="stable")
+    G = _GFULL[:, perm].copy()
+    piv = []
+    r = 0
+    for col in range(174):
+        nz = np.nonzero(G[r:, col])[0]
+        if len(nz) == 0:
+            continue
+        p = r + nz[0]
+        if p != r:
+            G[[r, p]] = G[[p, r]]
+        mask = G[:, col].astype(bool)
+        mask[r] = False
+        G[mask] ^= G[r]
+        piv.append(col)
+        r += 1
+        if r == 87:
+            break
+    hp, rp = hard[perm], rel[perm]
+    info = hp[piv]
+    c0 = (info.astype(np.int32) @ G) % 2
+    c0 = c0.astype(np.uint8)
+    cands = [c0[None]]
+    if order >= 1:
+        cands.append(c0[None] ^ G)
+    if order >= 2:
+        cands.append(c0[None] ^ G[_PAIRS[:, 0]] ^ G[_PAIRS[:, 1]])
+    C = np.concatenate(cands)
+    dis = (C != hp[None]).astype(np.float32) @ rp.astype(np.float32)
+    best = int(np.argmin(dis))
+    cw = np.empty(174, np.uint8)
+    cw[perm] = C[best]
+    return cw, float(dis[best])
+
+
 # ------------------------------------------------------------ the decoder
 
 class Decoder:
@@ -314,6 +361,12 @@ class Decoder:
     first sample is t0 seconds from the slot's start (negative: before it)."""
 
     SPS_DS = 24          # baseband samples per symbol
+    LLR_MAX = 6.0
+    # Ordered-statistics decoding is slow (tens of ms a candidate on a CM4),
+    # so it gets only the strongest few candidates belief propagation failed
+    # on, and a result only counts if it disagrees with what was received
+    # on little of the total confidence (true decodes ~0.04, noise >0.06).
+    OSD_SYNC, OSD_MAX, OSD_DISCREPANCY = 4.0, 6, 0.045
     DT_MAX = {"normal": 2.5, "fast": 2.0, "turbo": 1.0, "slow": 3.0}
 
     def __init__(self, submode="normal", fmin=200.0, fmax=3000.0, max_candidates=None,
@@ -482,7 +535,25 @@ class Decoder:
             Sy = self.symbols(y, n, df)
             rows.append(from_air(self.soft(Sy)))
             info.append((c, n, fc + df, Sy))
-        bits, ok, used = bp_decode(np.array(rows), self.iters)
+        rows = np.array(rows)
+        bits, ok, used = bp_decode(rows, self.iters)
+        # A strong signal gives each bit so much confidence that one symbol
+        # hit by a fade or a burst of QRM can't be overruled (seen off the
+        # air at +4 dB): try those that failed again with the confidence
+        # capped. Each way decodes some the other doesn't.
+        again = np.nonzero(~ok)[0]
+        if len(again):
+            b2, ok2, u2 = bp_decode(np.clip(rows[again], -self.LLR_MAX, self.LLR_MAX), self.iters)
+            bits[again[ok2]], ok[again[ok2]], used[again[ok2]] = b2[ok2], True, u2[ok2]
+        tried = 0
+        for j in sorted(np.nonzero(~ok)[0], key=lambda j: -cands[j]["sync"]):
+            if cands[j]["sync"] < self.OSD_SYNC or tried >= self.OSD_MAX:
+                break
+            tried += 1
+            cw, dis = osd_decode(rows[j])
+            if dis < self.OSD_DISCREPANCY * np.abs(rows[j]).sum() and \
+                    bits_frame(cw[87:]) is not None:
+                bits[j], ok[j], used[j] = cw, True, -1
         out = []
         for j in np.nonzero(ok)[0]:
             got = bits_frame(bits[j, 87:])
@@ -566,6 +637,11 @@ COMMANDS = {0: " SNR?", 1: " DIT DIT", 2: " NACK", 3: " HEARING?", 4: " GRID?", 
             29: " HEARTBEAT SNR", 30: " AGN?", 31: " "}
 COMMAND_CODE = {v: k for k, v in COMMANDS.items()}
 SNR_COMMANDS = (25, 29)
+# Commands whose text comes after them in data frames, with a checksum of
+# that text at the end: relay, MSG, MSG TO:, QUERY, QUERY MSGS, QUERY CALL,
+# CMD. JS8Call drops one whose checksum is wrong, and so does rxd.
+CHECKSUMMED = (5, 9, 10, 11, 12, 13, 24)
+CHECK_CHARS = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ+-./?"
 CQS = ("CQ CQ CQ", "CQ DX", "CQ QRP", "CQ CONTEST", "CQ FIELD", "CQ FD", "CQ CQ", "CQ")
 
 # Uncompressed data frames: a fixed character code (a protocol constant).
@@ -696,6 +772,22 @@ def pack_grid(grid):
     lon = 180 - 20 * (ord(g[0]) - 65) - 2 * (ord(g[2]) - 48) - 5 * 12.5 / 60
     lat = -90 + 10 * (ord(g[1]) - 65) + (ord(g[3]) - 48) + 2.5 * 12.5 / 60
     return ((int(lon) + 180) // 2) * 180 + int(lat + 90)
+
+
+def crc16_kermit(data):
+    crc = 0
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0x8408 if crc & 1 else crc >> 1
+    return crc
+
+
+def checksum16(text):
+    """The 3 characters a checksummed command's text ends with."""
+    v = crc16_kermit(text.encode("latin-1", "replace"))
+    n = len(CHECK_CHARS)
+    return CHECK_CHARS[v // (n * n)] + CHECK_CHARS[v // n % n] + CHECK_CHARS[v % n]
 
 
 def snr_text(snr):
@@ -1032,6 +1124,15 @@ class Assembler:
         else:
             text = "%s: %s%s" % (h["from"], h["to"], " ".join([h["cmd"]] + h.get("extra", [])))
             frm, to = h["from"], h["to"]
+        code = COMMAND_CODE.get(h.get("cmd")) if h is not None else None
+        if code in CHECKSUMMED and h["kind"] == "directed":
+            # The text is the data frames run together; it ends in a space
+            # and its checksum, which is checked and taken off.
+            whole = "".join(p for p in msg["parts"] if p != GAP).strip()
+            if not complete or GAP in msg["parts"] or len(whole) < 4 or \
+                    checksum16(whole[:-4]) != whole[-3:]:
+                return None
+            body = whole[:-4]
         if h is not None and body:
             text = text.rstrip() + " " + body if h.get("cmd") != " " else text + " " + body
         text = text.rstrip()

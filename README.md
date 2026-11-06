@@ -117,26 +117,53 @@ No JS8Call or WSJT-X code is used or translated.
 - **The JSC decompressor** is (s,c)-dense coding (Brisaboa et al., 2003),
   with JS8's parameters: 4-bit digits, s = 7, c = 9, and a space flag after
   each word.
-- **Ordered-statistics decoding** (Fossorier and Lin) was tried and dropped:
-  it gained almost nothing over belief propagation here, at many times the
-  CPU.
+- **Ordered-statistics decoding** (Fossorier and Lin, 1995) is a second try
+  for the few strongest candidates that belief propagation fails on.
 
-### Measured
+### Checked against JS8Call (2026-11-06, 40 m, 7.078 MHz)
 
-On the uConsole (CM4, Python 3.11.2, numpy 1.24.2, scipy 1.10.1), from 18
-minutes of 40 m audio recorded at 7.078 MHz, 2026-11-06. CPU per slot at
-nice 10, as a share of one core:
+JS8Call 2.2.0 and rxd decoded the same audio for 17 minutes, 13:03 to 13:20
+UTC. rxd ran live in place of the rxd@js8 unit and still fed JS8Call's sink.
+JS8Call stamps each ALL.TXT decode with the start of the slot *before* the
+one it was sent in. Its DIRECTED.TXT write times and the synced clock show
+rxd's slot is the right one, so frames were compared a slot apart.
+
+| | JS8Call | rxd | Both | Recall |
+|---|---|---|---|---|
+| Frames, live (an earlier build) | 68 | 60 | 58 | 85% |
+| Frames, the same audio decoded again (this build) | 67 | 64 | 61 | 91% |
+| Messages, as in DIRECTED.TXT (this build) | 36 | 38 | 33 | 92% |
+
+- **Frames only rxd decoded** (3 to 5) are real: heartbeat replies JS8Call
+  missed, and frames JS8Call caught in a neighbouring slot.
+- **False decodes:** none seen, and none in 200 slots of pure noise.
+- **What rxd misses** is mostly at -18 to -23 dB, signals more than 1 s
+  early, or symbols hit at the slot's edges.
+- **Agreement:** rxd's SNR reads about 2 dB above JS8Call's, and its dt
+  0.2 s below.
+
+An earlier session, 11:59 to 12:17 UTC, gave 56 frames to rxd and none to
+JS8Call, because the saved js8 profile's volume was 0 and JS8Call heard
+silence.
+
+### CPU on the uConsole
+
+CM4, Python 3.11.2, numpy 1.24.2, scipy 1.10.1, at nice 10, from the 13:03
+recording:
 
 | Submode | Mean (max) per slot | Share of one core |
 |---|---|---|
-| normal | 1.16 s (1.95 s) | 7.7% |
-| fast | 0.96 s (1.88 s) | 9.6% |
-| turbo | 0.84 s (0.88 s) | 14.1% |
-| slow | 1.00 s (1.16 s) | 3.3% |
+| normal | 2.35 s (2.91 s) | 15.6% |
+| fast | 1.28 s (2.55 s) | 12.8% |
+| turbo | 1.09 s (1.23 s) | 18.2% |
+| slow | 1.32 s (1.52 s) | 4.4% |
+
+Live, decoding normal, fast and slow with an earlier and cheaper build, the
+decoder process used 25% of one core and rxd 17% (its DSP included). JS8Call
+used 63% for its `js8` decoder and 12.5% for its window.
 
 On synthetic slots with white noise, decoding is certain down to -18 dB SNR
-in 2500 Hz and about half the time at -20 dB, with no false decodes in
-noise.
+in 2500 Hz and about half the time at -20 dB.
 
 ## How it works
 
