@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""rxd: a small RTL-SDR receiver daemon, a lighter stand-in for SDR++.
+"""rxd: a small RTL-SDR receiver daemon, the receiver behind `radio`.
 
   rxd PROFILE                 receive with a radio profile (a name under
                               ~/.config/rx/radio/ or a path to its JSON)
@@ -50,7 +50,7 @@ from scipy import signal as sps  # noqa: E402
 
 STATE = os.path.expanduser("~/.config/rx/radio")
 AUDIO_RATE = 48000
-# Upconverter offsets by the names SDR++ files them under in a profile.
+# Upconverter offsets by name. Profiles began as SDR++ settings, hence its names.
 OFFSETS = {"None": 0.0, "Manual": 0.0, "Ham-It-Up": 125e6}
 # Profile sink descriptions -> PipeWire node names (None: default sink).
 SINKS = {"SDR to JS8 (virtual cable)": "SDR_to_JS8", "Built-in Audio": None}
@@ -184,7 +184,7 @@ class RtlSource:
             sys.exit("rxd: dongle SN %s is not plugged in" % serial)
         self.dev = ctypes.c_void_p()
         if lib.rtlsdr_open(ctypes.byref(self.dev), index) != 0:
-            sys.exit("rxd: could not open dongle SN %s (is SDR++ holding it?)"
+            sys.exit("rxd: could not open dongle SN %s (is another rxd holding it? sudo fuser -v /dev/bus/usb/*/*)"
                      % serial)
         self.center = None
         self.rate = None
