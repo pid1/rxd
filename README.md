@@ -61,7 +61,7 @@ sudo apt install python3-numpy python3-scipy librtlsdr0 libpulse0 wsjtx chrony
 Then install a release, verified by its checksum:
 
 ```bash
-v=0.4.0
+v=0.4.1
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz.sha256
 sha256sum -c rxd-$v.tar.gz.sha256 && tar xzf rxd-$v.tar.gz

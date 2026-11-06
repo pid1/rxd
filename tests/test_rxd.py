@@ -164,6 +164,41 @@ class Engine(unittest.TestCase):
             time.sleep(0.02)
         return False
 
+    def test_a_read_failing_on_shutdown_is_not_an_error(self):
+        # Stopping closes the dongle; a read caught in flight then fails.
+        # That's the end of the stream, not a fault (rxd used to exit 1).
+        src = self.src
+        real = src.read
+
+        in_flight = threading.Event()
+
+        def read(n):
+            if self.rx.blocks > 3:  # a read the stop catches in flight
+                in_flight.set()
+                self.rx.stop.wait()
+                raise IOError("rtlsdr_read_sync returned -1")
+            return real(n)
+        src.read = read
+        self.rx.start()
+        self.assertTrue(in_flight.wait(5))
+        self.rx.stop.set()
+        time.sleep(0.5)
+        self.assertIsNone(self.rx.error)
+
+    def test_a_read_failing_while_running_is_an_error(self):
+        src = self.src
+        real, n_reads = src.read, [0]
+
+        def read(n):
+            n_reads[0] += 1
+            if n_reads[0] > 5:
+                raise IOError("rtlsdr_read_sync returned -1")
+            return real(n)
+        src.read = read
+        self.rx.start()
+        self.assertTrue(self.wait(lambda: self.rx.error is not None))
+        self.assertIn("rtlsdr_read_sync", self.rx.error)
+
     def test_profile_frequency_is_the_dial(self):
         snap = self.settings.snapshot()
         self.assertEqual(snap["dial"], 7078000)
