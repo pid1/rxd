@@ -41,6 +41,7 @@ UI and `rxd-tui`) do, they do through this API, so any client can do it too.
 | 200 | Done | the result |
 | 202 | Accepted, happening now (a profile switch) | `{"switching": NAME}` |
 | 400 | The request is wrong: an unknown field, a value out of range, bad JSON | `{"error": "why"}` |
+| 409 | Not without a person: a profile across the upconverter's switch needs it confirmed; or there's no switch to confirm | `{"error": "why"}` (and `needs`, `position` for a profile) |
 | 404 | No such endpoint, tile or API version; or no web UI installed | `{"error": "why"}` (and `api_version` for a version) |
 | 429 | Too many audio listeners (4) | `{"error": "4 clients are already listening"}` |
 | 503 | Not available now: no spectrum yet, no band plan, `radio` couldn't be run | `{"error": "why"}` |
@@ -68,6 +69,7 @@ What rxd is doing. Clients poll it, about twice a second.
 | `offset_mode` | string | `auto`, `Ham-It-Up` or `None` |
 | `upconverter_hz` | number | The upconverter offset in use now; 0 when the signal goes direct |
 | `upconvert_below_hz` | number | Where `auto` stops upconverting |
+| `upconverter` | object or null | The upconverter's switch, below; null when the station has no upconverter |
 | `level_dbfs` | number or null | Channel level |
 | `tuner_hz` | number | Where the tuner is, RF |
 | `offset_hz` | number | The software mixer's offset from it |
@@ -83,6 +85,15 @@ What rxd is doing. Clients poll it, about twice a second.
 | `clock` | object | `synced` (bool, null when chrony can't say), `source` (`GPS`, `network` or null), `offset_s` |
 | `band_plan` | object or null | The band plan's status (see `GET /api/v1/bands`); null when it isn't running |
 | `listeners` | int | Audio streams open |
+
+**`upconverter`**: `name`, `switch` (true: a person flips it), `needs`
+(`upconvert` or `bypass`: the side the tuning needs now), `position` (the
+switch as a person last confirmed it: `upconvert`, `bypass`, or `unknown`
+when nobody has since the machine started; null with no switch),
+`confirmed_at` (ISO time, or null), `why` (why it's unknown, or null) and
+`ok` (it's confirmed on the side needed, or there's no switch). Clients show
+it in words ("Ham It Up: ✓ BYPASS (confirmed 14:02)") and, while it's
+`unknown`, ask which way it is. See [station.md](station.md#the-switch).
 
 **`station`** comes from the station file ([station.md](station.md)) and the
 GPS: `call` and `grid` (null when not set), `missing` (what to set, only when
@@ -162,6 +173,24 @@ the next one starts, so the answer is `202 {"switching": NAME}` and the
 status stops answering for a few seconds. `400` for a name `radio` doesn't
 list. A switch made this way puts the band plan on Manual.
 
+**Across the switch.** When the upconverter has a switch a person flips and
+NAME needs the other side from the position confirmed (or none is), add
+`"switch": "upconvert"` or `"bypass"`, the side NAME needs, once the person
+has flipped it: that confirms the new position, then rxd switches. Without
+it the answer is `409` with a plain `error` ("fm-105.3 needs the Ham It Up on
+BYPASS, and it's on UPCONVERT. Flip the switch, then send "switch":
+"bypass" to confirm it."), `needs` and `position`, and nothing changes; a
+`switch` that isn't the side NAME needs is `400`. The profile already up,
+and stations with no such switch, need no `switch`. (This refuses what
+rxd 0.4 did without asking, on purpose: it heard nothing.)
+
+## POST /api/v1/switch
+
+`{"position": "upconvert"}` or `{"position": "bypass"}`: a person says which
+way the upconverter's switch is now. The answer is the new status. `400` for
+anything else; `409` when the station's upconverter has no switch to
+confirm, or there's no upconverter.
+
 ## GET /api/v1/js8?after=SEQ
 
 JS8 messages decoded, from DIRECTED.TXT: `{"seq": N, "lines": [...]}`, each
@@ -197,10 +226,18 @@ it).
 `GET` gives `config` (the settings below), `status` (as in the status's
 `band_plan`: `plan`, `mode`, `phase`, `profile`, `band`, `reason`, `scan`,
 `next_at`, `switching_to`, `bands`, `default_bands`, `dwell_min`,
-`every_min`, `cross_side`, `side`, `sun`, `conditions`, `conditions_error`),
+`every_min`, `cross_side`, `side`, `side_limit`, `sun`, `conditions`,
+`conditions_error`),
 `all_bands`, and `profiles`: every band profile with `name`, `mode`, `band`,
 `freq`, `upconvert`, `enabled`, `eligible`, `why_not`, `score`, `basis` and
 `heard`.
+
+With a switch a person flips, `phase` is `paused` (and `reason` "Paused:
+confirm the Ham It Up's switch") while its position is unknown; `side` is the
+position confirmed (`UPCONVERT` or `BYPASS`, null while unknown; without a
+switch, the tuning's side), and `side_limit` says so on Auto ("Only BYPASS
+bands: 6 m, 2 m"). A band across the switch has `why_not` "needs the Ham It
+Up on BYPASS".
 
 `POST` takes any of these and answers like `GET`:
 
@@ -211,7 +248,7 @@ it).
 | `bands` | list of bands, or null | null is the default: every band |
 | `dwell_min` | number | 2 to 60: time on each band when scanning |
 | `every_min` | number | 10 to 240: how often it looks for a better band |
-| `cross_side` | bool | may pick a band on the other side of an upconverter whose switch is manual |
+| `cross_side` | bool | accepted and kept, but no longer has an effect: Auto never crosses a switch a person flips |
 | `scan` | true | scan now |
 
 ## GET /api/v1/stations?hours=H
@@ -244,6 +281,8 @@ external requests.
 ```bash
 curl -s 127.0.0.1:8073/api/v1/status | python3 -m json.tool
 curl -s -XPOST -d '{"freq": 7078000, "mode": "USB"}' 127.0.0.1:8073/api/v1/tune
+curl -s -XPOST -d '{"position": "bypass"}' 127.0.0.1:8073/api/v1/switch
+curl -s -XPOST -d '{"name": "wspr-20m", "switch": "upconvert"}' 127.0.0.1:8073/api/v1/profile
 curl -s '127.0.0.1:8073/api/v1/js8?after=0'
 curl -s '127.0.0.1:8073/api/v1/audio?rate=24000' | aplay -f S16_LE -r 24000 -c 1
 ```
