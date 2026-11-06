@@ -70,7 +70,7 @@ Then, as the user (`--user NAME` when run as root; yourself otherwise):
    Set `0.0.0.0:8073` to serve your network, behind a firewall: there is no
    authentication.
 3. `radio js8` (as the user) starts rxd on the 40 m JS8 dial. `radio` lists
-   the profiles; [the README](../README.md#radio) says more.
+   the profiles; [reference.md](reference.md#radio) says more.
 4. Open `http://localhost:8073/`, or run `rxd-tui`.
 
 ## From a checkout
