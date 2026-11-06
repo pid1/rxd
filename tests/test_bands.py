@@ -435,7 +435,7 @@ class Planner(unittest.TestCase):
         self.assertEqual(st["reason"], "20 m: best by conditions (SFI 124, K 2, day)")
         self.assertEqual(st["conditions"]["credit"],
                          "Band conditions courtesy of N0NBH, www.hamqsl.com")
-        self.assertEqual(st["bands"], list(rxd.HF_BANDS))
+        self.assertEqual(st["bands"], list(rxd.BAND_ORDER))  # every band, by default
         self.assertEqual(st["side"], "UPCONVERT")
         # the next rxd, on 20 m, stays and doesn't fetch again
         bp2 = self.planner("wspr-20m")
@@ -445,6 +445,18 @@ class Planner(unittest.TestCase):
         self.assertEqual(bp2.conf["plan"], "auto")
         self.assertEqual(bp2.status()["phase"], "hold")
         self.assertEqual(self.fetches, 1)
+
+    def test_first_start_goes_to_the_best_band(self):
+        # at night 40 m and 80 m are close; with no margin on the first start,
+        # the best wins even if it's only a little better
+        self.t[0] = NIGHT
+        bp = self.planner("wspr-80m")
+        bp.tick()
+        self.assertEqual(self.switched, ["wspr"])
+        bp = self.planner("wspr-80m", conf={"plan": "manual"})
+        bp.configure({"plan": "auto"})
+        bp.tick()  # not a first start: 80 m is close enough to stay
+        self.assertEqual(self.switched, ["wspr"])
 
     def test_night_stays_on_40m(self):
         self.t[0] = NIGHT
@@ -575,10 +587,10 @@ class Planner(unittest.TestCase):
         bp.configure({"cross_side": True})
         self.assertIn("wspr-6m", [r["name"] for r in bp.candidates(self.t[0])[0]])
 
-    def test_bypass_side_defaults_to_6m_and_2m(self):
+    def test_bypass_side_uses_only_6m_and_2m(self):
         bp = self.planner("vhf")
         self.assertEqual(bp.status()["side"], "BYPASS")
-        self.assertEqual(bp.status()["bands"], ["6m", "2m"])
+        self.assertEqual([r["band"] for r in bp.candidates(self.t[0])[0]], ["6m", "2m"])
         bp.tick()
         self.assertEqual(len(self.switched), 1)
         self.assertIn(self.switched[0], ("wspr-6m", "wspr-2m"))

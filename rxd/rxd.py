@@ -1977,6 +1977,8 @@ class BandPlanner:
             st["reason"] = "Manual: %s was chosen outside the band plan" % name
             log("band plan: Manual, since %s was switched to by hand" % name)
         st["on"], st["requested"], st["requested_at"] = name, None, None
+        if self.fresh:
+            st["after_scan"] = True  # the very first choice: the best band, no margin
         self.save_state()
 
     # ------------------------------------------------------------- inputs
@@ -1999,8 +2001,8 @@ class BandPlanner:
 
     def enabled(self, up):
         b = self.conf.get("bands")
-        if b is None:  # the default: every band on the switch's current side
-            return list(HF_BANDS) if up else ["6m", "2m"]
+        if b is None:  # the default: every band (Win's call, 2026-11-06); the side
+            return list(BAND_ORDER)  # rule still keeps Auto to the switch's side
         return list(b)
 
     def plan_rows(self, now, mode=None):
