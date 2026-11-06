@@ -48,6 +48,24 @@ class Dsp(unittest.TestCase):
         parts = np.concatenate([d(x[i:i + 997]) for i in range(0, len(x), 997)])
         np.testing.assert_allclose(parts, whole, rtol=1e-4, atol=1e-5)
 
+    def test_cu8_lookup_matches_arithmetic(self):
+        b = np.random.default_rng(3).integers(0, 256, 20000, dtype=np.uint8)
+        f = (b.astype(np.float32) - 127.5) / 127.5
+        np.testing.assert_allclose(rxd.cu8_to_complex(b), f[0::2] + 1j * f[1::2], atol=1e-6)
+        self.assertEqual(len(rxd.cu8_to_complex(b[:-1])), 9999)  # odd: last byte dropped
+
+    def test_shift_is_block_invariant(self):
+        # The shift folded into stage1 must give the same audio however the
+        # input is cut into blocks, or the phase bookkeeping is wrong.
+        for mode, rate, off in (("USB", 240000, 50000), ("WFM", 1200000, 250000)):
+            x = tone(rate, off + 1234, rate // 2) + tone(rate, off - 40000, rate // 2, 0.2)
+            whole = rxd.Chain(mode, 2800 if mode == "USB" else 150000, 0, 0)
+            parts = rxd.Chain(mode, 2800 if mode == "USB" else 150000, 0, 0)
+            a = whole.shift_decimate(x, off)
+            b = np.concatenate([parts.shift_decimate(x[i:i + 7777], off)
+                                for i in range(0, len(x), 7777)])
+            np.testing.assert_allclose(b, a, rtol=1e-3, atol=1e-4)
+
     def check_sideband(self, mode, sign):
         # One tone 1000 Hz into the wanted sideband and an equal one 1700 Hz
         # into the other, in the same run, so the AGC treats both alike.

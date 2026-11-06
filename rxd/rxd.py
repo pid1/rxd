@@ -257,6 +257,8 @@ class RtlSource:
 class FileSource:
     """cu8 IQ from a file or stdin. Retuning only moves the software mixer."""
 
+    paced = False  # nothing is lost by waiting: block rather than drop
+
     def __init__(self, path, center=None):
         self.fh = sys.stdin.buffer if path == "-" else open(path, "rb")
         self.center = center
@@ -334,9 +336,14 @@ class SynthSource:
         pass
 
 
+# Every (I, Q) byte pair as one little-endian uint16 -> its complex sample.
+_CU8 = (np.arange(256, dtype=np.float32) - 127.5) / 127.5
+CU8_LUT = (_CU8[np.arange(65536) & 0xFF] + 1j * _CU8[np.arange(65536) >> 8]).astype(np.complex64)
+
+
 def cu8_to_complex(b):
-    f = (b.astype(np.float32) - 127.5) / 127.5
-    return (f[0::2] + 1j * f[1::2]).astype(np.complex64)
+    b = b[: len(b) // 2 * 2]
+    return CU8_LUT[np.ascontiguousarray(b).view("<u2")]
 
 
 # --------------------------------------------------------------------- sinks
@@ -415,6 +422,11 @@ class FirDecimator:
         self.hist = np.zeros(len(taps) - 1, np.complex64 if np.iscomplexobj(taps)
                              else np.float32)
         self.phase = 0  # index into the next block of the next output
+        self.count = 0  # samples taken in before this block
+
+    def set_taps(self, taps):
+        """New taps of the same length, keeping history and phase."""
+        self.taps = np.asarray(taps)[::-1].copy()
 
     def __call__(self, x):
         n = len(self.taps)
@@ -426,6 +438,7 @@ class FirDecimator:
         consumed = len(x) - self.phase
         self.phase = (-consumed) % self.decim
         self.hist = xx[len(xx) - (n - 1):]
+        self.count += len(x)
         return out.astype(np.complex64 if np.iscomplexobj(out) else np.float32)
 
 
@@ -460,7 +473,14 @@ class Agc:
 
 
 class Chain:
-    """Mixer -> decimator -> demodulator -> audio at 48 kHz, for one mode."""
+    """Shift and decimate -> channel filter -> demodulator -> 48 kHz audio.
+
+    The frequency shift is folded into the first filter: its taps are the
+    low-pass prototype moved up to the signal, and the output is turned back
+    down at the decimated rate. Mixing every input sample first costs a
+    complex exponential per sample, which at WFM's 1.2 MS/s alone was more
+    than the CM4 has.
+    """
 
     def __init__(self, mode, bandwidth, attack, decay):
         self.mode = mode
@@ -468,15 +488,20 @@ class Chain:
         if mode == "WFM":
             self.rate, self.if_rate = 1200000, 240000
             self.offset = 250000.0
-            cutoff = min(bandwidth / 2 + 10000, 110000)
+            cutoff = min(bandwidth / 2 + 15000, 100000)
         else:
             self.rate, self.if_rate = 240000, AUDIO_RATE
             self.offset = 50000.0
             cutoff = 20000.0 if mode in ("USB", "LSB") else min(bandwidth / 2 + 2000, 20000)
         d1 = self.rate // self.if_rate
-        self.stage1 = FirDecimator(sps.firwin(16 * d1 + 1, cutoff, fs=self.rate), d1)
+        self.proto1 = sps.firwin(16 * d1 + 1, cutoff, fs=self.rate)
+        self.stage1 = FirDecimator(self.proto1.astype(np.complex64), d1)
+        self.shift = None  # the offset stage1's taps are built for
         fs = self.if_rate
-        if mode in ("USB", "LSB"):
+        if mode == "WFM":
+            # stage1 already cuts at 90 kHz; a second filter adds nothing.
+            self.chan = None
+        elif mode in ("USB", "LSB"):
             lo, hi = 200.0, 200.0 + bandwidth
             half = (hi - lo) / 2
             proto = sps.firwin(255, half, fs=fs)
@@ -495,14 +520,18 @@ class Chain:
             self.deemph = ([1 - a], [1, -a])
             self.deemph_zi = np.zeros(1)
             self.stage2 = FirDecimator(sps.firwin(63, 15000, fs=fs), fs // AUDIO_RATE)
-        self.nco_phase = 0.0
         self.level_db = -120.0
 
-    def mix(self, x, offset):
-        w = -2 * np.pi * offset / self.rate
-        ph = self.nco_phase + w * np.arange(len(x))
-        self.nco_phase = float((self.nco_phase + w * len(x)) % (2 * np.pi))
-        return x * np.exp(1j * ph).astype(np.complex64)
+    def shift_decimate(self, x, offset):
+        w = 2 * np.pi * offset / self.rate
+        if offset != self.shift:
+            n = np.arange(len(self.proto1))
+            self.stage1.set_taps((self.proto1 * np.exp(1j * w * n)).astype(np.complex64))
+            self.shift = offset
+        first = self.stage1.count + self.stage1.phase
+        y = self.stage1(x)
+        m = first + self.stage1.decim * np.arange(len(y), dtype=np.int64)
+        return y * np.exp(-1j * ((w * m) % (2 * np.pi))).astype(np.complex64)
 
     def fm(self, y):
         z = np.concatenate([[self.prev], y])
@@ -510,7 +539,9 @@ class Chain:
         return np.angle(z[1:] * np.conj(z[:-1])).astype(np.float32)
 
     def __call__(self, iq, offset):
-        y = self.chan(self.stage1(self.mix(iq, offset)))
+        y = self.shift_decimate(iq, offset)
+        if self.chan is not None:
+            y = self.chan(y)
         if len(y):
             p = float(np.mean(np.abs(y) ** 2))
             self.level_db = 10 * np.log10(p + 1e-12)
@@ -600,6 +631,9 @@ class Receiver:
                 log("read failed: %s" % e)
                 self.q.put(None)
                 return
+            if not getattr(self.src, "paced", True):
+                self.q.put(x)
+                continue
             try:
                 self.q.put_nowait(x)
             except queue.Full:
