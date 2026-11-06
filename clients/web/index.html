@@ -1,0 +1,732 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="auto">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#f4f4f2">
+<title>rxd</title>
+<script>
+try { var t = localStorage.getItem("rxd.theme");
+  if (["auto", "light", "dark", "night"].indexOf(t) >= 0) document.documentElement.dataset.theme = t;
+} catch (e) {}
+</script>
+<style>
+:root{
+  --bg:#f4f4f2;--panel:#fff;--fg:#111;--dim:#555;--line:#c4c4bf;--accent:#0b57c9;--accent-fg:#fff;
+  --ok:#14713f;--warn:#9a5200;--bad:#b3261e;--plot:#fcfcfb;--grid:#e3e3df;--trace:#0b57c9;
+  --pass:rgba(11,87,201,.14);--mark:#c2185b;color-scheme:light;
+}
+@media (prefers-color-scheme:dark){:root[data-theme=auto]{
+  --bg:#111214;--panel:#1d1e21;--fg:#f2f2f2;--dim:#a8a8a8;--line:#3c3d42;--accent:#4c9dff;--accent-fg:#000;
+  --ok:#4fd27d;--warn:#ffb02e;--bad:#ff6b5e;--plot:#0a0a0b;--grid:#25262a;--trace:#74b6ff;
+  --pass:rgba(76,157,255,.18);--mark:#ff6fa8;color-scheme:dark}}
+:root[data-theme=dark]{
+  --bg:#111214;--panel:#1d1e21;--fg:#f2f2f2;--dim:#a8a8a8;--line:#3c3d42;--accent:#4c9dff;--accent-fg:#000;
+  --ok:#4fd27d;--warn:#ffb02e;--bad:#ff6b5e;--plot:#0a0a0b;--grid:#25262a;--trace:#74b6ff;
+  --pass:rgba(76,157,255,.18);--mark:#ff6fa8;color-scheme:dark}
+:root[data-theme=night]{
+  --bg:#000;--panel:#140000;--fg:#ff3b2f;--dim:#b8281f;--line:#4a0e09;--accent:#ff3b2f;--accent-fg:#000;
+  --ok:#ff3b2f;--warn:#ff3b2f;--bad:#ff3b2f;--plot:#000;--grid:#2a0604;--trace:#ff3b2f;
+  --pass:rgba(255,40,20,.20);--mark:#ff2a10;color-scheme:dark}
+*{box-sizing:border-box}
+html{background:var(--bg);color:var(--fg);scrollbar-color:var(--line) var(--bg)}
+body{margin:0;background:var(--bg);color:var(--fg);font:18px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  font-variant-numeric:tabular-nums;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  -webkit-text-size-adjust:100%}
+::selection{background:var(--accent);color:var(--accent-fg)}
+button,input{font:inherit;color:inherit}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.wrap{max-width:1400px;margin:0 auto;padding:10px 12px 16px;display:grid;gap:10px}
+header{display:flex;align-items:center;gap:10px;min-height:44px}
+header .id{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;font-size:22px;font-weight:700;white-space:nowrap;overflow:hidden}
+#profile{overflow:hidden;text-overflow:ellipsis}
+.tag{font-size:17px;font-weight:700;border:2px solid var(--fg);border-radius:6px;padding:0 6px}
+.app{color:var(--dim);font-weight:600}
+.pill{font-size:17px;font-weight:600;white-space:nowrap}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dimc{color:var(--dim)}
+.banner{border:2px solid var(--bad);color:var(--bad);background:var(--panel);border-radius:10px;padding:12px 14px;font-weight:700;font-size:19px}
+.hiu{border:2px solid var(--accent);border-radius:10px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;background:var(--panel)}
+.hiu b{font-size:22px}
+.hiu.up{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+:root[data-theme=night] .hiu.up{background:#3d0804;color:var(--fg);border-width:3px}
+.hiu span{font-size:16px}
+.hiu.stale{opacity:.55}
+input:disabled{opacity:.45}
+.stats{display:grid;grid-template-columns:1fr;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 12px}
+.stat{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:3px 0;min-width:0}
+.stat+.stat{border-top:1px solid var(--line)}
+.stat .v{text-align:right}
+@media (min-width:600px){.stats{grid-template-columns:repeat(3,1fr);background:none;border:0;padding:0;gap:8px}
+.stat,.stat+.stat{display:block;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px 10px}.stat .v{text-align:left}}
+.k{display:block;font-size:15px;color:var(--dim);font-weight:600;letter-spacing:.02em}
+.v{display:block;font-size:18px;font-weight:650;overflow-wrap:anywhere}
+fieldset{border:0;margin:0;padding:0;min-width:0}
+fieldset:disabled .live{opacity:.45}
+.layout{display:grid;gap:10px;grid-template-columns:minmax(0,1fr);grid-template-areas:"tuner" "scope" "modes" "sliders"}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;min-width:0}
+.tuner{grid-area:tuner}.scope{grid-area:scope}.modes{grid-area:modes}.sliders{grid-area:sliders}
+.lbl{display:flex;justify-content:space-between;gap:8px;font-size:15px;color:var(--dim);font-weight:600}
+.freq{font-size:clamp(40px,13.2vw,76px);font-weight:700;line-height:1.05;letter-spacing:-.01em;white-space:nowrap;margin:2px 0 6px;cursor:ns-resize}
+.freq .hz{font-size:.72em;color:var(--dim);margin-left:.18em}
+.meter{display:grid;grid-template-columns:1fr auto;align-items:center;gap:4px 12px;margin-bottom:10px}
+.mbar{height:14px;border:1px solid var(--line);border-radius:7px;overflow:hidden;background:var(--bg)}
+.mbar i{display:block;height:100%;width:0;background:var(--accent)}
+.mnum{font-size:22px;font-weight:700;min-width:6.5em;text-align:right}
+.mscale{grid-column:1;display:flex;justify-content:space-between;font-size:13px;color:var(--dim)}
+.btn{min-height:56px;border:2px solid var(--line);background:var(--bg);border-radius:10px;font-weight:700;font-size:20px;
+  cursor:pointer;touch-action:manipulation;padding:4px 8px}
+.btn[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.btn:disabled{cursor:default;opacity:.45}
+@media (hover:hover){.btn:not(:disabled):hover{border-color:var(--accent)}}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.steps{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin:8px 0}
+.steps .btn{font-size:17px;line-height:1.05;padding:2px;min-width:0}
+.steps .btn small{display:block;font-size:13px;font-weight:600}
+form{display:grid;grid-template-columns:1fr auto;gap:8px}
+input[type=text]{min-height:56px;border:2px solid var(--line);border-radius:10px;background:var(--bg);padding:0 12px;font-size:22px;width:100%;min-width:0}
+input[type=text]::placeholder{color:var(--dim);opacity:1}
+.msg{margin:8px 0 0;font-weight:700;color:var(--bad);font-size:17px}
+.hint{font-size:14px;color:var(--dim);margin:8px 0 0;display:none}
+@media (hover:hover) and (pointer:fine){.hint{display:block}}
+.scope{display:flex;flex-direction:column;gap:6px}
+canvas[hidden]{display:none}
+canvas{display:block;width:100%;border-radius:6px;cursor:crosshair;touch-action:manipulation;background:var(--plot)}
+#spec{height:150px}#wf{height:150px}
+.mgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-top:6px}
+.sl{margin-top:4px}.sl+.sl{margin-top:10px}
+.sl .lbl .val{color:var(--fg);font-size:19px}
+input[type=range]{-webkit-appearance:none;appearance:none;width:100%;height:56px;background:transparent;margin:0;cursor:pointer;touch-action:pan-y;--p:0%}
+input[type=range]::-webkit-slider-runnable-track{height:10px;border-radius:5px;background:linear-gradient(to right,var(--accent) var(--p),var(--line) var(--p))}
+input[type=range]::-moz-range-track{height:10px;border-radius:5px;background:linear-gradient(to right,var(--accent) var(--p),var(--line) var(--p))}
+input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:34px;height:34px;margin-top:-12px;border-radius:50%;background:var(--panel);border:4px solid var(--accent)}
+input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;background:var(--panel);border:4px solid var(--accent)}
+.appear{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:6px;max-width:620px}
+.appear .btn{font-size:17px;padding:2px}
+@media (min-width:900px){
+  .wrap{padding:14px 20px 20px}
+  .top{display:grid;grid-template-columns:minmax(0,1.2fr) minmax(0,1fr);gap:10px}
+  .layout{grid-template-columns:minmax(380px,460px) minmax(0,1fr);grid-template-areas:"tuner scope" "modes scope" "sliders scope"}
+  .scope{grid-row:1/4}
+  #spec{height:240px}#wf{flex:1;min-height:240px}
+  .freq{font-size:64px}
+}
+.top{display:grid;gap:10px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <div class="id"><span class="app">rxd</span><span id="profile">—</span><span id="modeTag" class="tag" hidden></span></div>
+  <div id="conn" class="pill dimc" aria-live="polite">◌ Connecting</div>
+</header>
+<div id="down" class="banner" hidden>✕ Disconnected from rxd. Retrying.</div>
+<div id="err" class="banner" hidden></div>
+<div class="top">
+  <div id="hiu" class="hiu"><b id="hiuW">Ham It Up: —</b><span id="hiuS"></span></div>
+  <div class="stats">
+    <div class="stat"><span class="k">Receiver</span><span id="sRx" class="v">—</span></div>
+    <div class="stat"><span class="k">DSP CPU</span><span id="sCpu" class="v">—</span></div>
+    <div class="stat"><span class="k">Blocks</span><span id="sDrop" class="v">—</span></div>
+  </div>
+</div>
+<fieldset id="ctl" disabled>
+<div class="layout">
+  <section class="card tuner">
+    <div class="lbl"><span>Dial, MHz</span><span id="cal"></span></div>
+    <div id="freq" class="freq live" aria-live="off"><span id="fM">—</span><span id="fH" class="hz"></span></div>
+    <div class="meter live">
+      <div class="mbar" role="meter" aria-label="Signal level" aria-valuemin="-100" aria-valuemax="0" id="mbar"><i id="mfill"></i></div>
+      <div id="mnum" class="mnum">— dBFS</div>
+      <div class="mscale"><span>−100</span><span>−75</span><span>−50</span><span>−25</span><span>0</span></div>
+    </div>
+    <div class="row2">
+      <button type="button" class="btn" id="dn">− 1 kHz</button>
+      <button type="button" class="btn" id="up">+ 1 kHz</button>
+    </div>
+    <div class="steps" role="group" aria-label="Tuning step" id="steps"></div>
+    <form id="entry" autocomplete="off">
+      <input type="text" id="fin" inputmode="decimal" enterkeyhint="go" spellcheck="false" aria-label="Frequency in MHz, kHz or Hz" placeholder="7.078, 146.52 or Hz">
+      <button class="btn" type="submit">Tune</button>
+    </form>
+    <p id="msg" class="msg" role="status" hidden></p>
+    <p class="hint">Keys: ← → tune by the step, ↑ ↓ change the step. Scroll over the dial or spectrum to tune.</p>
+  </section>
+  <section class="card scope">
+    <div class="lbl"><span>Spectrum and waterfall</span><span id="tapHint">Tap or click to tune</span></div>
+    <canvas id="spec" aria-label="Spectrum. Click to tune."></canvas>
+    <canvas id="wf" aria-label="Waterfall. Click to tune."></canvas>
+  </section>
+  <section class="card modes">
+    <div class="lbl"><span>Mode</span></div>
+    <div class="mgrid" role="group" aria-label="Mode" id="modes"></div>
+  </section>
+  <section class="card sliders">
+    <div class="sl"><div class="lbl"><label for="bw">Bandwidth</label><span id="bwV" class="val">—</span></div>
+      <input type="range" id="bw" min="300" max="4000" step="100"></div>
+    <div class="sl"><div class="lbl"><label for="gain">RF gain</label><span id="gainV" class="val">—</span></div>
+      <input type="range" id="gain" min="0" max="50" step="0.1"></div>
+    <div class="sl"><div class="lbl"><label for="vol">Volume</label><span id="volV" class="val">—</span></div>
+      <input type="range" id="vol" min="0" max="1000" step="1"></div>
+  </section>
+</div>
+</fieldset>
+<section class="card">
+  <div class="lbl"><span>Appearance</span></div>
+  <div class="appear" role="group" aria-label="Appearance" id="appear"></div>
+</section>
+</div>
+<script>
+"use strict";
+(function () {
+const $ = id => document.getElementById(id);
+const STEPS = [10, 100, 1e3, 5e3, 12.5e3, 100e3, 1e6];
+const MODES = ["USB", "LSB", "AM", "FM", "WFM"];
+const BWR = {USB: [300, 4000, 100], LSB: [300, 4000, 100], AM: [2000, 20000, 500], FM: [5000, 30000, 500], WFM: [50000, 250000, 5000]};
+const FMIN = 100e3, FMAX = 1.7e9;
+const THEMES = [["auto", "Automatic"], ["light", "Light"], ["dark", "Dark"], ["night", "Night"]];
+
+function load(k) { try { return localStorage.getItem("rxd." + k); } catch (e) { return null; } }
+function store(k, v) { try { localStorage.setItem("rxd." + k, v); } catch (e) {} }
+function now() { return performance.now(); }
+
+// ---------------------------------------------------------------- state
+let st = null;            // last status from rxd
+let conn = "connecting";  // connecting | ok | down
+let fails = 0;
+let localFreq = null, localMode = null;
+let step = +load("step"); if (STEPS.indexOf(step) < 0) step = 1e3;
+const holdUntil = {}, active = {};
+function held(k) { return !!active[k] || (holdUntil[k] || 0) > now(); }
+function hold(k, ms) { holdUntil[k] = Math.max(holdUntil[k] || 0, now() + ms); }
+function release(k) { holdUntil[k] = 0; }
+
+// ---------------------------------------------------------------- formatting
+function freqParts(hz) {
+  hz = Math.round(hz);
+  const m = Math.floor(hz / 1e6), r = hz - m * 1e6;
+  return [m + "." + String(Math.floor(r / 1000)).padStart(3, "0"), String(r % 1000).padStart(3, "0")];
+}
+function trim(x, d) { return x.toFixed(d).replace(/\.?0+$/, ""); }
+function fmtHz(v) {
+  if (v >= 1e6) return [trim(v / 1e6, 3), "MHz"];
+  if (v >= 1e3) return [trim(v / 1e3, 2), "kHz"];
+  return [String(v), "Hz"];
+}
+function fmtBw(v) { const p = fmtHz(v); return p[0] + " " + p[1]; }
+function parseFreq(t) {
+  t = t.trim().toLowerCase().replace(/[\s,_']/g, "");
+  const m = t.match(/^(\d+(?:\.\d*)?|\.\d+)(mhz|m|khz|k|hz)?$/);
+  if (!m) return null;
+  let v = parseFloat(m[1]); const u = m[2] || "";
+  if (u[0] === "m") v *= 1e6;
+  else if (u[0] === "k") v *= 1e3;
+  else if (u === "hz") {}
+  else if (v < 2000) v *= 1e6;      // bare 7.078, 146.52, 1296: MHz
+  else if (v < 100000) v *= 1e3;    // bare 14074: kHz
+  return Math.round(v);             // bare 7078000: Hz
+}
+
+// ---------------------------------------------------------------- network
+async function api(path, body) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 4000);
+  try {
+    const opt = body === undefined ? {cache: "no-store", signal: ctl.signal}
+      : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body), signal: ctl.signal};
+    const r = await fetch(path, opt);
+    let doc = null;
+    try { doc = await r.json(); } catch (e) {}
+    return {ok: r.ok, status: r.status, doc: doc};
+  } finally { clearTimeout(t); }
+}
+
+let statusTimer = 0, backoff = 0;
+async function pollStatus() {
+  clearTimeout(statusTimer);
+  try {
+    const r = await api("/api/status");
+    if (!r.ok || !r.doc || typeof r.doc.freq !== "number") throw new Error("bad status");
+    fails = 0; backoff = 0;
+    setConn("ok");
+    applyStatus(r.doc);
+  } catch (e) {
+    fails++;
+    backoff = Math.min(backoff ? backoff * 2 : 1000, 10000);
+    if (fails >= 2 || conn !== "ok") setConn("down");
+  }
+  statusTimer = setTimeout(pollStatus, backoff || (document.hidden ? 5000 : 500));
+}
+
+// Tuning: fields merge into one pending request; one request in flight at a time.
+let pend = {}, inflight = false, tuneTimer = 0, entryText = "";
+function tune(fields, delay) {
+  Object.assign(pend, fields);
+  for (const k in fields) hold(k, 2000);
+  if (!delay) { clearTimeout(tuneTimer); tuneTimer = 0; flush(); }
+  else if (!tuneTimer) tuneTimer = setTimeout(() => { tuneTimer = 0; flush(); }, delay);
+}
+async function flush() {
+  if (inflight || !Object.keys(pend).length) return;
+  const body = pend; pend = {}; inflight = true;
+  try {
+    const r = await api("/api/tune", body);
+    if (r.ok && r.doc && typeof r.doc.freq === "number") {
+      clearMsg();
+      if ("freq" in body) entryText = "";
+      for (const k in body) if (!(k in pend) && !active[k]) { release(k); hold(k, 400); }
+      setConn("ok");
+      applyStatus(r.doc);
+    } else {
+      fail(body, "rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status)));
+    }
+  } catch (e) {
+    fail(body, "Could not reach rxd. Nothing was changed.");
+  }
+  inflight = false;
+  if (Object.keys(pend).length) flush();
+}
+function fail(body, text) {
+  showMsg(text);
+  if ("freq" in body && entryText && !$("fin").value) $("fin").value = entryText;
+  for (const k in body) if (!(k in pend)) release(k);
+  if ("freq" in body && !("freq" in pend) && st) localFreq = st.freq;
+  if ("mode" in body && !("mode" in pend) && st) localMode = st.mode;
+  if (st) applyStatus(st);
+}
+function showMsg(t) { const m = $("msg"); m.textContent = "✕ " + t; m.hidden = false; }
+function clearMsg() { $("msg").hidden = true; }
+
+// ---------------------------------------------------------------- status rendering
+let lastDropped = null, dropAt = -1e9, lastBlocks = null, stallCount = 0, gainsKey = "";
+function setText(el, t, cls) {
+  if (el.textContent !== t) el.textContent = t;
+  if (cls !== undefined && el.className !== cls) el.className = cls;
+}
+function setConn(c) {
+  if (c === conn) return;
+  conn = c;
+  const el = $("conn");
+  if (c === "ok") setText(el, "● Connected", "pill ok");
+  else if (c === "down") setText(el, "✕ Disconnected", "pill bad");
+  $("down").hidden = c !== "down";
+  $("ctl").disabled = c !== "ok";
+  if (c === "down") {
+    setText($("sRx"), "— Unknown", "v dimc"); setText($("sCpu"), "—", "v dimc"); setText($("sDrop"), "—", "v dimc");
+    if (st) { $("hiu").classList.add("stale"); setText($("hiuS"), "Last known. rxd is not answering."); }
+    drawSpecMsg("✕ Disconnected");
+  }
+  if (c === "ok") pollSpecSoon();
+}
+
+function applyStatus(s) {
+  st = s;
+  if (!held("freq")) localFreq = s.freq;
+  if (!held("mode")) localMode = s.mode;
+  renderFreq();
+  setText($("profile"), s.profile || "rxd");
+  const tag = $("modeTag"); tag.hidden = false; setText(tag, localMode);
+  setText($("cal"), s.cal_hz ? "VFO " + freqParts(s.vfo_hz).join(" ") + " (cal " + (s.cal_hz > 0 ? "+" : "−") + Math.abs(Math.round(s.cal_hz)) + " Hz)" : "");
+  for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.m === localMode));
+
+  // Ham It Up
+  const up = s.upconverter_hz > 0, hiu = $("hiu");
+  hiu.className = "hiu" + (up ? " up" : "");
+  setText($("hiuW"), up ? "⇅ Ham It Up: UPCONVERT" : "→ Ham It Up: BYPASS");
+  setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below 30 MHz" : "")
+    : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", 30 MHz and up" : ""));
+
+  // receiver
+  if (s.error) { $("err").hidden = false; setText($("err"), "✕ rxd error: " + s.error); } else $("err").hidden = true;
+  if (lastBlocks !== null && s.blocks === lastBlocks) stallCount++; else stallCount = 0;
+  lastBlocks = s.blocks;
+  if (!s.running) setText($("sRx"), "■ Stopped", "v bad");
+  else if (s.error) setText($("sRx"), "✕ Error", "v bad");
+  else if (stallCount >= 3) setText($("sRx"), "▲ No samples", "v warn");
+  else setText($("sRx"), "● Receiving", "v ok");
+
+  const cpu = Math.round((s.dsp_cpu || 0) * 100);
+  setText($("sCpu"), (cpu >= 80 ? "▲ " : "") + cpu + " %", cpu >= 80 ? "v warn" : "v");
+
+  if (lastDropped !== null && s.dropped > lastDropped) dropAt = now();
+  lastDropped = s.dropped;
+  if (now() - dropAt < 10000) setText($("sDrop"), "▲ Dropping (" + s.dropped + " lost)", "v warn");
+  else if (s.dropped > 0) setText($("sDrop"), "✓ OK, " + s.dropped + " lost earlier", "v");
+  else setText($("sDrop"), "✓ None lost", "v ok");
+
+  // meter
+  const lv = s.level_dbfs;
+  if (typeof lv === "number") {
+    const pct = Math.max(0, Math.min(100, (lv + 100)));
+    $("mfill").style.width = pct + "%";
+    $("mbar").setAttribute("aria-valuenow", String(lv));
+    setText($("mnum"), (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS");
+  } else { $("mfill").style.width = "0"; setText($("mnum"), "— dBFS"); }
+
+  // sliders
+  if (!held("bandwidth")) setBw(localMode, s.bandwidth);
+  const gains = Array.isArray(s.gains) ? s.gains : [];
+  const gk = gains.join(",");
+  if (gk !== gainsKey) { gainsKey = gk; setupGain(gains); }
+  if (!held("gain_db")) setGain(s.gain_db);
+  if (!held("volume")) setVol(s.volume);
+}
+
+function renderFreq() {
+  if (localFreq == null) return;
+  const p = freqParts(localFreq);
+  setText($("fM"), p[0]); setText($("fH"), " " + p[1]);
+}
+
+// ---------------------------------------------------------------- tuning controls
+function clampF(f) { return Math.max(FMIN, Math.min(FMAX, f)); }
+function tuneTo(f) {
+  f = Math.round(clampF(f));
+  localFreq = f; renderFreq();
+  tune({freq: f}, 0);
+}
+function stepBy(n) {
+  if (localFreq == null || conn !== "ok") return;
+  const q = localFreq / step, e = 1e-6;
+  const k = n > 0 ? Math.floor(q + e) + n : Math.ceil(q - e) + n;
+  tuneTo(k * step);
+}
+function renderSteps() {
+  const p = fmtHz(step), t = p[0] + " " + p[1];
+  $("dn").textContent = "− " + t; $("up").textContent = "+ " + t;
+  $("dn").setAttribute("aria-label", "Tune down " + t); $("up").setAttribute("aria-label", "Tune up " + t);
+  for (const b of $("steps").children) b.setAttribute("aria-pressed", String(+b.dataset.s === step));
+}
+function setStep(s) { step = s; store("step", String(s)); renderSteps(); }
+for (const s of STEPS) {
+  const b = document.createElement("button");
+  const p = fmtHz(s);
+  b.type = "button"; b.className = "btn"; b.dataset.s = s;
+  b.setAttribute("aria-label", "Step " + p[0] + " " + p[1]);
+  b.innerHTML = p[0] + "<small>" + p[1] + "</small>";
+  b.onclick = () => setStep(s);
+  $("steps").appendChild(b);
+}
+$("dn").onclick = () => stepBy(-1);
+$("up").onclick = () => stepBy(1);
+renderSteps();
+
+$("entry").onsubmit = e => {
+  e.preventDefault();
+  const inp = $("fin"), t = inp.value;
+  if (!t.trim()) { showMsg("Type a frequency first: 7.078 (MHz), 14074 (kHz) or 7078000 (Hz)."); return; }
+  const f = parseFreq(t);
+  if (f == null) { showMsg("Not a frequency: " + t.trim() + ". Type MHz (7.078), kHz (14074) or Hz (7078000)."); return; }
+  if (f < FMIN || f > FMAX) { showMsg("Out of range: rxd tunes 0.1 to 1700 MHz."); return; }
+  inp.value = ""; inp.blur();
+  tuneTo(f);
+  entryText = t.trim();
+};
+
+for (const m of MODES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn"; b.textContent = m; b.dataset.m = m;
+  b.onclick = () => {
+    if (m === localMode) return;
+    localMode = m;
+    for (const x of $("modes").children) x.setAttribute("aria-pressed", String(x.dataset.m === m));
+    setText($("modeTag"), m);
+    release("bandwidth");
+    tune({mode: m}, 0);
+  };
+  $("modes").appendChild(b);
+}
+
+// ---------------------------------------------------------------- sliders
+function fill(el) {
+  const a = +el.min, b = +el.max, v = +el.value;
+  el.style.setProperty("--p", (b > a ? (v - a) / (b - a) * 100 : 0) + "%");
+}
+function track(el, key) {
+  el.addEventListener("pointerdown", () => { active[key] = true; });
+  const up = () => { if (active[key]) { active[key] = false; hold(key, 1500); } };
+  window.addEventListener("pointerup", up); window.addEventListener("pointercancel", up);
+  el.addEventListener("focus", () => hold(key, 1500));
+}
+const bwEl = $("bw"), gainEl = $("gain"), volEl = $("vol");
+let gainSteps = [];
+function setBw(mode, bw) {
+  const r = BWR[mode] || [100, 250000, 100];
+  bwEl.min = r[0]; bwEl.max = r[1]; bwEl.step = r[2];
+  bwEl.value = Math.max(r[0], Math.min(r[1], bw)); fill(bwEl);
+  setText($("bwV"), fmtBw(Math.round(bw)));
+}
+bwEl.oninput = () => { const v = +bwEl.value; setText($("bwV"), fmtBw(v)); fill(bwEl); tune({bandwidth: v}, 200); };
+function setupGain(g) {
+  gainSteps = g.slice().sort((a, b) => a - b);
+  if (gainSteps.length) { gainEl.min = 0; gainEl.max = gainSteps.length - 1; gainEl.step = 1; }
+  else { gainEl.min = 0; gainEl.max = 50; gainEl.step = 0.1; }
+}
+function gainFromEl() { return gainSteps.length ? gainSteps[+gainEl.value] : +gainEl.value; }
+function setGain(db) {
+  if (db == null) { setText($("gainV"), "—"); return; }
+  if (gainSteps.length) {
+    let bi = 0;
+    gainSteps.forEach((g, i) => { if (Math.abs(g - db) < Math.abs(gainSteps[bi] - db)) bi = i; });
+    gainEl.value = bi;
+  } else gainEl.value = db;
+  fill(gainEl);
+  setText($("gainV"), db.toFixed(1) + " dB");
+}
+gainEl.oninput = () => { const v = gainFromEl(); setText($("gainV"), v.toFixed(1) + " dB"); fill(gainEl); tune({gain_db: v}, 200); };
+// Volume 0..4 on a squared taper so the useful low end gets most of the travel.
+function setVol(v) {
+  if (v == null) return;
+  volEl.value = Math.round(Math.sqrt(Math.max(0, v) / 4) * 1000); fill(volEl);
+  setText($("volV"), Math.round(v * 100) + " %");
+}
+volEl.oninput = () => {
+  const p = +volEl.value / 1000, v = Math.round(4 * p * p * 100) / 100;
+  setText($("volV"), Math.round(v * 100) + " %"); fill(volEl); tune({volume: v}, 200);
+};
+track(bwEl, "bandwidth"); track(gainEl, "gain_db"); track(volEl, "volume");
+
+// ---------------------------------------------------------------- keys and wheel
+document.addEventListener("keydown", e => {
+  const t = e.target;
+  if (e.altKey || e.ctrlKey || e.metaKey || $("ctl").disabled) return;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.isContentEditable)) return;
+  const i = STEPS.indexOf(step);
+  if (e.key === "ArrowRight") stepBy(1);
+  else if (e.key === "ArrowLeft") stepBy(-1);
+  else if (e.key === "ArrowUp") setStep(STEPS[Math.min(STEPS.length - 1, i + 1)]);
+  else if (e.key === "ArrowDown") setStep(STEPS[Math.max(0, i - 1)]);
+  else return;
+  e.preventDefault();
+});
+let wheelAcc = 0;
+function onWheel(e) {
+  if ($("ctl").disabled) return;
+  e.preventDefault();
+  wheelAcc += e.deltaMode === 1 ? e.deltaY * 40 : e.deltaY;
+  while (Math.abs(wheelAcc) >= 100) { stepBy(wheelAcc < 0 ? 1 : -1); wheelAcc -= Math.sign(wheelAcc) * 100; }
+}
+
+// ---------------------------------------------------------------- spectrum and waterfall
+const spec = $("spec"), wf = $("wf");
+const wbuf = document.createElement("canvas");
+let col = {}, lut = null, last = null, range = null, ring = [], specMsg = "Waiting for the spectrum";
+const DAY = [[0, 0, 0, 16], [.25, 10, 26, 110], [.5, 29, 127, 214], [.7, 47, 209, 196], [.86, 245, 233, 74], [1, 255, 255, 255]];
+const NIGHT = [[0, 0, 0, 0], [.35, 60, 0, 0], [.7, 165, 8, 0], [1, 255, 40, 20]];
+function buildLut(stops) {
+  const a = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const x = i / 255; let j = 1;
+    while (j < stops.length - 1 && stops[j][0] < x) j++;
+    const s0 = stops[j - 1], s1 = stops[j], f = (x - s0[0]) / (s1[0] - s0[0]);
+    for (let c = 0; c < 3; c++) a[i * 3 + c] = s0[c + 1] + (s1[c + 1] - s0[c + 1]) * f;
+  }
+  return a;
+}
+function isNight() { return document.documentElement.dataset.theme === "night"; }
+function readColors() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const k of ["plot", "grid", "trace", "pass", "mark", "dim", "fg", "bg"]) col[k] = cs.getPropertyValue("--" + k).trim();
+  lut = buildLut(isNight() ? NIGHT : DAY);
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", col.bg);
+  rerenderWaterfall(); redrawSpec();
+}
+function dpr() { return window.devicePixelRatio || 1; }
+function fit(c) {
+  const r = c.getBoundingClientRect(), d = dpr();
+  const w = Math.max(1, Math.round(r.width * d)), h = Math.max(1, Math.round(r.height * d));
+  if (c.width !== w || c.height !== h) { c.width = w; c.height = h; return true; }
+  return false;
+}
+function onResize() {
+  const a = fit(spec), b = fit(wf);
+  if (b) { wbuf.width = wf.width; wbuf.height = wf.height; rerenderWaterfall(); }
+  if (a || b) redrawSpec();
+}
+function niceStep(span, maxLabels) {
+  const c = [100, 200, 500, 1e3, 2e3, 2.5e3, 5e3, 1e4, 2e4, 2.5e4, 5e4, 1e5, 2e5, 2.5e5, 5e5, 1e6, 2e6, 5e6];
+  for (const s of c) if (span / s <= maxLabels) return s;
+  return 1e7;
+}
+function decimals(s) { let d = 0; while (d < 6 && Math.abs(Math.round(s / 1e6 * 10 ** d) - s / 1e6 * 10 ** d) > 1e-9) d++; return d; }
+function updateRange(bins) {
+  const s = Array.from(bins).sort((a, b) => a - b);
+  const floor = s[Math.floor(s.length * 0.2)], peak = s[s.length - 1];
+  const lo = floor - 8, hi = Math.max(peak + 6, floor + 45);
+  if (!range) range = {lo: lo, hi: hi};
+  else { range.lo += (lo - range.lo) * 0.15; range.hi += (hi - range.hi) * 0.15; }
+}
+function redrawSpec() {
+  if (last && conn === "ok") drawSpec(last); else drawSpecMsg(conn === "down" ? "✕ Disconnected" : specMsg);
+}
+function drawSpecMsg(text) {
+  if (!spec.width) return;
+  const g = spec.getContext("2d"), d = dpr();
+  g.fillStyle = col.plot; g.fillRect(0, 0, spec.width, spec.height);
+  g.fillStyle = col.dim; g.font = "600 " + Math.round(17 * d) + "px system-ui,sans-serif";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  g.fillText(text, spec.width / 2, spec.height / 2);
+  drawWfView();
+}
+function drawSpec(s) {
+  const g = spec.getContext("2d"), d = dpr(), W = spec.width, H = spec.height;
+  const axis = Math.round(24 * d), ph = H - axis, span = s.stop_hz - s.start_hz;
+  const X = hz => (hz - s.start_hz) / span * W;
+  const lo = range.lo, hi = range.hi, Y = v => ph - (v - lo) / (hi - lo) * ph;
+  g.fillStyle = col.plot; g.fillRect(0, 0, W, H);
+  // passband
+  if (s.passband) { const a = X(s.passband[0]), b = X(s.passband[1]); g.fillStyle = col.pass; g.fillRect(a, 0, Math.max(b - a, d), ph); }
+  // dB grid
+  g.strokeStyle = col.grid; g.lineWidth = d; g.fillStyle = col.dim;
+  g.font = Math.round(13 * d) + "px system-ui,sans-serif"; g.textBaseline = "bottom"; g.textAlign = "left";
+  const dbStep = (hi - lo) > 60 ? 20 : 10, dbs = [];
+  for (let v = Math.ceil(lo / dbStep) * dbStep; v < hi; v += dbStep) {
+    const y = Math.round(Y(v)) + .5; g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke();
+    if (y > 14 * d && v > lo + (hi - lo) * 0.2) dbs.push([v, y]);
+  }
+  // frequency grid and labels
+  const fs = niceStep(span, Math.max(2, Math.floor(W / (62 * d)))), dec = decimals(fs);
+  g.textAlign = "center"; g.textBaseline = "middle";
+  for (let f = Math.ceil(s.start_hz / fs) * fs; f <= s.stop_hz; f += fs) {
+    const x = Math.round(X(f)) + .5;
+    g.beginPath(); g.moveTo(x, 0); g.lineTo(x, ph); g.stroke();
+    const t = (f / 1e6).toFixed(dec);
+    const tw = g.measureText(t).width / 2;
+    if (x - tw > 2 && x + tw < W - 2) g.fillText(t, x, ph + axis / 2);
+  }
+  // trace
+  const n = s.bins.length;
+  g.beginPath();
+  for (let i = 0; i < n; i++) { const x = (i + .5) / n * W, y = Math.max(0, Math.min(ph, Y(s.bins[i]))); i ? g.lineTo(x, y) : g.moveTo(x, y); }
+  g.strokeStyle = col.trace; g.lineWidth = 1.5 * d; g.stroke();
+  g.lineTo(W, ph); g.lineTo(0, ph); g.closePath();
+  g.globalAlpha = .18; g.fillStyle = col.trace; g.fill(); g.globalAlpha = 1;
+  // dB labels over the trace, with a halo
+  g.font = Math.round(13 * d) + "px system-ui,sans-serif"; g.textAlign = "left"; g.textBaseline = "bottom";
+  g.lineWidth = 3 * d; g.strokeStyle = col.plot; g.fillStyle = col.dim;
+  for (const [v, y] of dbs) { const t = (v < 0 ? "−" : "") + Math.abs(v) + " dB"; g.strokeText(t, 4 * d, y - 2 * d); g.fillText(t, 4 * d, y - 2 * d); }
+  // dial marker
+  const dx = Math.round(X(s.dial_hz)) + .5;
+  g.strokeStyle = col.mark; g.lineWidth = 2 * d; g.beginPath(); g.moveTo(dx, 0); g.lineTo(dx, ph); g.stroke();
+  g.strokeStyle = col.grid; g.lineWidth = d; g.beginPath(); g.moveTo(0, ph + .5); g.lineTo(W, ph + .5); g.stroke();
+}
+function rowH() { return Math.max(1, Math.round(2 * dpr())); }
+function paintRow(g, y, r, vs, ve, W) {
+  const h = rowH(), img = g.createImageData(W, h), px = img.data, n = r.bins.length;
+  const lo = range.lo, k = 255 / (range.hi - range.lo), rs = r.start, rspan = r.stop - r.start;
+  for (let x = 0; x < W; x++) {
+    const f0 = vs + x / W * (ve - vs), f1 = vs + (x + 1) / W * (ve - vs);
+    let b0 = Math.floor((f0 - rs) / rspan * n), b1 = Math.floor((f1 - rs) / rspan * n);
+    let ci = 0;
+    if (b1 >= 0 && b0 < n) {
+      b0 = Math.max(0, b0); b1 = Math.min(n - 1, Math.max(b0, b1));
+      let v = r.bins[b0]; for (let b = b0 + 1; b <= b1; b++) if (r.bins[b] > v) v = r.bins[b];
+      ci = Math.max(0, Math.min(255, Math.round((v - lo) * k)));
+    }
+    for (let yy = 0; yy < h; yy++) { const o = (yy * W + x) * 4; px[o] = lut[ci * 3]; px[o + 1] = lut[ci * 3 + 1]; px[o + 2] = lut[ci * 3 + 2]; px[o + 3] = 255; }
+  }
+  g.putImageData(img, 0, y);
+}
+function rerenderWaterfall() {
+  if (!wbuf.width || !lut) return;
+  const g = wbuf.getContext("2d"), W = wbuf.width, H = wbuf.height;
+  g.fillStyle = "rgb(" + lut[0] + "," + lut[1] + "," + lut[2] + ")"; g.fillRect(0, 0, W, H);
+  if (last && range) { const h = rowH(); for (let i = 0; i < ring.length && i * h < H; i++) paintRow(g, i * h, ring[i], last.start_hz, last.stop_hz, W); }
+  drawWfView();
+}
+function addRow(s) {
+  const r = {bins: s.bins, start: s.start_hz, stop: s.stop_hz};
+  const h = rowH(), cap = Math.ceil((wbuf.height || 300) / h) + 1;
+  const moved = !last || last.start_hz !== s.start_hz || last.stop_hz !== s.stop_hz;
+  ring.unshift(r); if (ring.length > cap) ring.length = cap;
+  last = s;
+  if (!wbuf.width) return;
+  if (moved) { rerenderWaterfall(); return; }
+  const g = wbuf.getContext("2d");
+  g.drawImage(wbuf, 0, 0, wbuf.width, wbuf.height - h, 0, h, wbuf.width, wbuf.height - h);
+  paintRow(g, 0, r, s.start_hz, s.stop_hz, wbuf.width);
+  drawWfView();
+}
+function drawWfView() {
+  if (!wf.width) return;
+  const g = wf.getContext("2d"), W = wf.width, H = wf.height, d = dpr();
+  g.drawImage(wbuf, 0, 0);
+  if (!last || conn !== "ok") return;
+  const span = last.stop_hz - last.start_hz, X = hz => (hz - last.start_hz) / span * W;
+  g.strokeStyle = col.mark; g.lineWidth = 2 * d; g.setLineDash([6 * d, 6 * d]);
+  const dx = Math.round(X(last.dial_hz)) + .5; g.beginPath(); g.moveTo(dx, 0); g.lineTo(dx, H); g.stroke();
+  g.setLineDash([]);
+}
+
+let specTimer = 0, specBusy = false, lastSeq = null;
+function pollSpecSoon() { clearTimeout(specTimer); specTimer = setTimeout(pollSpec, 0); }
+async function pollSpec() {
+  clearTimeout(specTimer);
+  if (document.hidden || specBusy) return;
+  specBusy = true;
+  const t0 = now(); let wait = 200;
+  if (conn === "ok") {
+    try {
+      const r = await api("/api/spectrum");
+      const s = r.doc;
+      if (r.ok && s && Array.isArray(s.bins) && s.bins.length && s.stop_hz > s.start_hz) {
+        specAvail(true);
+        if (s.seq !== lastSeq) { lastSeq = s.seq; updateRange(s.bins); addRow(s); if (conn === "ok") drawSpec(s); }
+      } else {
+        wait = 5000; last = null; specAvail(false);
+        specMsg = r.status === 404 ? "This rxd has no spectrum" : "No spectrum yet"; drawSpecMsg(specMsg);
+      }
+    } catch (e) { wait = 1000; }
+  } else wait = 1000;
+  specBusy = false;
+  if (!document.hidden) specTimer = setTimeout(pollSpec, Math.max(20, wait - (now() - t0)));
+}
+function specAvail(ok) {
+  if (wf.hidden === !ok) return;
+  wf.hidden = !ok; $("tapHint").hidden = !ok;
+  spec.style.cursor = ok ? "" : "default";
+  onResize();
+}
+function canvasTune(e) {
+  if (!last || conn !== "ok") return;
+  const r = e.currentTarget.getBoundingClientRect();
+  const x = Math.max(0, Math.min(1, (e.clientX - r.left) / r.width));
+  const span = last.stop_hz - last.start_hz;
+  let f = last.start_hz + x * span;
+  const q = step <= span / 10 ? step : 100;
+  f = Math.round(f / q) * q;
+  tuneTo(f);
+}
+for (const c of [spec, wf]) { c.addEventListener("click", canvasTune); c.addEventListener("wheel", onWheel, {passive: false}); }
+$("freq").addEventListener("wheel", onWheel, {passive: false});
+
+// ---------------------------------------------------------------- appearance
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  store("theme", t);
+  for (const b of $("appear").children) b.setAttribute("aria-pressed", String(b.dataset.t === t));
+  readColors();
+}
+for (const [t, name] of THEMES) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn"; b.dataset.t = t; b.textContent = name;
+  b.onclick = () => setTheme(t);
+  $("appear").appendChild(b);
+}
+for (const b of $("appear").children) b.setAttribute("aria-pressed", String(b.dataset.t === document.documentElement.dataset.theme));
+const mq = window.matchMedia("(prefers-color-scheme: dark)");
+(mq.addEventListener ? mq.addEventListener.bind(mq, "change") : mq.addListener.bind(mq))(readColors);
+
+// ---------------------------------------------------------------- start
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) { pollStatus(); pollSpecSoon(); }
+});
+if (window.ResizeObserver) new ResizeObserver(onResize).observe($("ctl"));
+window.addEventListener("resize", onResize);
+onResize(); readColors();
+pollStatus();
+})();
+</script>
+</body>
+</html>
