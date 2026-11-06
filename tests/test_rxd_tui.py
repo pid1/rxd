@@ -584,7 +584,7 @@ class Pty:
                 self.raw += data
                 self.vt.feed(data)
 
-    def wait_for(self, text, seconds=5.0):
+    def wait_for(self, text, seconds=15.0):  # generous: a loaded CM4 is slow to draw
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.pump(0.1)
@@ -1927,7 +1927,7 @@ class RealProgram(unittest.TestCase):
         self.assertEqual(fake.posts, [{"freq": 7201000}, {"freq": 7205000}, {"mode": "AM"},
                                       {"gain_db": 7.7}, {"volume": 0.25},
                                       {"freq": 146520000}])
-        self.assertIn("3 ● Manual", tui.vt.text())               # tuning to FM didn't move it
+        self.assertTrue(tui.wait_for("3 ● Manual"), tui.vt.text())               # tuning to FM didn't move it
         tui.send(b"?")
         self.assertTrue(tui.wait_for("Any key closes this"), tui.vt.text())
         tui.send(b" ")
@@ -1957,7 +1957,7 @@ class RealProgram(unittest.TestCase):
         self.assertNotIn("PgDn for newest", tui.vt.text())
         tui.send(b"g")
         tui.pump(0.3)
-        self.assertIn("isn't a key in Digital", tui.vt.text())
+        self.assertTrue(tui.wait_for("isn't a key in Digital"), tui.vt.text())
         self.assertEqual(fake.posts, [])
         self.quit_cleanly(tui)
 
@@ -1995,9 +1995,9 @@ class RealProgram(unittest.TestCase):
                                       {"squelch": -70.0}, {"squelch": -68.0}, {"squelch": -70.0},
                                       {"volume": 0.15}, {"volume": 0.2}, {"volume": 0.0},
                                       {"volume": 0.2}])
-        self.assertIn("Bandwidth Wide 16 kHz", tui.vt.text())
+        self.assertTrue(tui.wait_for("Bandwidth Wide 16 kHz"), tui.vt.text())
         tui.keys(b"M")
-        self.assertIn("Speaker Muted (M restores 20 %)", tui.vt.text())
+        self.assertTrue(tui.wait_for("Speaker Muted (M restores 20 %)"), tui.vt.text())
         self.quit_cleanly(tui)
         self.assertEqual(fake.posts[-2:], [{"volume": 0.0}, {"volume": 0.2}])  # given back on quit
 
@@ -2015,9 +2015,9 @@ class RealProgram(unittest.TestCase):
         tui.send(b"2")
         self.assertTrue(tui.wait_for("Pick a station to switch"), tui.vt.text())
         tui.keys(KEYS["enter"])
-        self.assertTrue(tui.wait_for("Flip the Ham It Up to BYPASS for WBUR Boston", 8),
+        self.assertTrue(tui.wait_for("Flip the Ham It Up to BYPASS for WBUR Boston"),
                         tui.vt.text())
-        self.assertIn("2 ● Listen", tui.vt.text())
+        self.assertTrue(tui.wait_for("2 ● Listen"), tui.vt.text())
         self.assertEqual(fake.switches, ["js8", "fm-105.3"])
         self.quit_cleanly(tui)
 
@@ -2039,7 +2039,7 @@ class RealProgram(unittest.TestCase):
             pid = int(fh.read())
         self.assertTrue(alive(pid))
         tui.keys(b"]", b"]")
-        self.assertIn("Volume here 120 %", tui.vt.text())
+        self.assertTrue(tui.wait_for("Volume here 120 %"), tui.vt.text())
         self.quit_cleanly(tui)
         self.assertFalse(alive(pid))
         self.assertTrue(AgainstFakeRxd.wait(self, lambda: fake.listeners == 0, 3))
@@ -2071,7 +2071,8 @@ class RealProgram(unittest.TestCase):
         fake.close()        # nothing listening
         tui = self.run_tui(url, env={"NO_COLOR": "1"})
         self.assertTrue(tui.wait_for("✕ NO RXD"), tui.vt.text())
-        self.assertIn("Can't reach rxd", tui.vt.text())
+        # The header can land a frame before the body on a busy machine.
+        self.assertTrue(tui.wait_for("Can't reach rxd"), tui.vt.text())
         # No colour at all: only the terminal's defaults (39, 49) are ever set.
         sgr = re.findall(r"\x1b\[([0-9;]*)m", tui.raw.decode("utf-8", "ignore"))
         codes = {c for p in sgr for c in p.split(";") if c}
