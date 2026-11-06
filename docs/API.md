@@ -144,7 +144,7 @@ An unknown field, or a value out of range, is `400` and changes nothing.
 
 The captured band, about 5 times a second: `bins` (512 numbers, dB),
 `start_hz` and `stop_hz` (the band's edges), `dial_hz`, `passband`
-(`[low, high]` Hz, what is demodulated), `seq`. All on the dial's scale.
+(`[low, high]` Hz, what is demodulated), `seq`, and `block` (the IQ block it was made from). All on the dial's scale.
 `503` until the first one is ready.
 
 ## GET /api/v1/profiles

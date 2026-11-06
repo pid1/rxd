@@ -720,6 +720,7 @@ class AutoGain:
         self.decoder = decoder
         self.key = None          # what it settled for: (mode, tuner MHz)
         self.spec_seq = None     # the last spectrum it took a floor from
+        self.fresh_from = 0      # the first block read at the current gain
         self.steps = 0
         self.state = "settling"
         self.reason = None
@@ -1282,11 +1283,15 @@ class Receiver:
         floor, sp = None, self.spectrum
         if sp is not None and sp.get("seq") != ag.spec_seq:
             ag.spec_seq = sp.get("seq")
-            floor = ag.floor_of(sp["bins"])
+            # Not a spectrum of a block read before the last step: its floor
+            # is the old gain's, and would ask for the same step again.
+            if sp.get("block", 0) >= ag.fresh_from:
+                floor = ag.floor_of(sp["bins"])
         new = ag.observe(x, snap["gain_db"], now, self.wallclock(), floor)
         if new is not None and self.s.set_auto_gain(new):
             self.src.set_gain(new)
             ag.skip = self.q.qsize() + 2   # blocks already read at the old gain
+            ag.fresh_from = self.blocks + 1 + ag.skip
             log("auto gain %.1f dB (%s)" % (new, ag.reason))
         ag.cpu += ((time.thread_time() - t0) / (len(x) / self.chain.rate) - ag.cpu) * 0.05
 
@@ -1324,7 +1329,7 @@ class Receiver:
             band = [dial - bw / 2, dial + bw / 2]
         return {"bins": [round(float(v), 1) for v in db], "start_hz": center - rate / 2,
                 "stop_hz": center + rate / 2, "dial_hz": dial, "passband": band,
-                "seq": (self.spectrum or {}).get("seq", 0) + 1}
+                "seq": (self.spectrum or {}).get("seq", 0) + 1, "block": self.blocks}
 
     def gate(self, audio, level):
         """Squelch: silence below level dBFS; opens at it, closes 3 dB under."""
