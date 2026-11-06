@@ -119,12 +119,23 @@ Hamlib 4.5.4 on the device talks to rxd without errors.
   frequency could leak in at roughly -30 to -40 dB.
 - **Signal strength:** `l STRENGTH` is uncalibrated: dBFS + 73.
 
+## Band plan
+
+`BandPlanner` picks the JS8 or WSPR band when it's on Auto; docs/radio.md
+says how it chooses. `GET /api/bands` gives its settings, its status and
+every band profile with its score; `POST /api/bands` takes `plan` (auto or
+manual), `mode` (wspr or js8), `bands` (a list, or null for the default),
+`dwell_min` (2 to 60), `every_min` (10 to 240), `cross_side`, and
+`{"scan": true}` to scan now. Status carries the same status as
+`band_plan`. It runs only on the dongle (`RXD_BANDS=on` forces it, `off`
+stops it). Its URLs can be pointed elsewhere with `RXD_HAMQSL`,
+`RXD_SWPC_FLUX` and `RXD_SWPC_KP`, its files with `RXD_BANDS_CONF` and
+`RXD_BANDS_DIR`.
+
 ## Ideas for later (Win, 2026-11-06)
 
-- **Band conditions and automatic band choice.**
-  - With internet: fetch current conditions (perhaps from a small page of our own, possibly inside Rally) and default the digital modes to the bands likely to hear the most for the time of day. The UI can override it.
-  - Without internet: auto-scan the candidate frequencies, score each from a slot or two of decodes and the noise floor, and learn what works best at each hour.
-  - Catch: the antenna is cut for 40 m today.
+- **Band conditions and automatic band choice:** done as the band plan
+  (above). The antenna is cut for 40 m today.
 - **A map in the web UI** of JS8 and WSPR stations, plotted at the grid-square centre, using the map tiles already downloaded for the mesh clients so it works offline.
 - **Auto-adjusting audio quality:** done 2026-11-06, see "Automatic gain and
   audio clean-up". Not done: per-mode AGC tuning.

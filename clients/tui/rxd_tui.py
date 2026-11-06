@@ -616,6 +616,43 @@ def wspr_report_words(w, g):
     return text, "ok"
 
 
+# ---- the band plan (rxd's status band_plan; POST /api/bands)
+
+def band_plan_words(bp, g):
+    """(text, role) for the band plan line: Auto or Manual, and why this band."""
+    if not isinstance(bp, dict):
+        return None
+    auto = bp.get("plan") == "auto"
+    mode = "WSPR" if bp.get("mode") == "wspr" else "JS8"
+    head = "Band plan Auto %s %s" % (g.dot, mode) if auto else "Band plan Manual"
+    phase = bp.get("phase")
+    sym = g.stop if not auto else g.wait if phase == "scan" else g.drop if phase == "idle" else g.rx
+    reason = bp.get("reason") or ""
+    if reason.startswith("Manual: "):
+        reason = reason[len("Manual: "):]
+    role = "warn" if auto and phase == "idle" else "ok" if auto else "label"
+    return "%s %s: %s" % (sym, head, reason), role
+
+
+def band_plan_extra(bp, g):
+    """The second band plan line: conditions (credited) and the sun, or why there are none."""
+    if not isinstance(bp, dict):
+        return None
+    sun = bp.get("sun") or {}
+    words = (sun.get("words") or "").capitalize()
+    c = bp.get("conditions")
+    if c:
+        who = "N0NBH, hamqsl.com" if c.get("source") == "hamqsl" else "NOAA SWPC"
+        text = "SFI %s %s K %s (%s)" % (c.get("sfi"), g.dot, c.get("k"), who)
+    else:
+        text = "No band conditions (offline?)"
+    if words:
+        text += "   %s" % words
+    if bp.get("plan") == "auto" and bp.get("phase") == "hold" and bp.get("next_at"):
+        text += "   next look %s" % time.strftime("%H:%M", time.localtime(bp["next_at"]))
+    return text
+
+
 # ---- audio here
 
 def rate_for(mode):
@@ -937,15 +974,16 @@ SHORT_LABELS = {"bandwidth": "bw", "volume": "vol", "speaker": "spkr", "station"
                 "clean-up": "clean"}
 
 
-def help_items(g, view="manual", mode=None, listening=False, decoder=None, report=False):
+def help_items(g, view="manual", mode=None, listening=False, decoder=None, report=False,
+               plan=False):
     """[(keys, label)] for a view's bottom line; ? and q always come last.
     In Digital, decoder is the receiver's ("js8", "wspr" or None) and report
-    whether r can switch WSPR reporting."""
+    whether r can switch WSPR reporting, plan whether rxd has a band plan."""
     k = g.keys
     ud = k["updown"]
     if view == "digital":
         # When they don't all fit, the ones just before the view keys go first.
-        items = [(ud + " Enter", "switch")]
+        items = [(ud + " Enter", "switch")] + ([("a", "auto")] if plan else [])
         if decoder == "wspr" and report:
             items.append(("r", "reporting"))
         if decoder != "js8":
@@ -1084,6 +1122,8 @@ class Poller:
         self.profiles_retry_at = 0.0
         self.switch_req = None
         self.switch_acks = []      # (name, error or None)
+        self.bands_req = None      # a POST /api/bands body, for the side thread
+        self.bands_acks = []       # (body, error or None)
         # The decoder's feed: one of these fills at a time, the other is empty.
         self.js8_lines = collections.deque(maxlen=JS8_KEEP)
         self.wspr_lines = collections.deque(maxlen=JS8_KEEP)
@@ -1117,6 +1157,17 @@ class Poller:
     def take_switch_acks(self):
         with self.lock:
             acks, self.switch_acks = self.switch_acks, []
+        return acks
+
+    def bands(self, body):
+        """The band plan's settings (Auto/Manual, mode, scan now), sent by the side thread."""
+        with self.lock:
+            self.bands_req = dict(self.bands_req or {}, **body)
+        self.side_wake.set()
+
+    def take_bands_acks(self):
+        with self.lock:
+            acks, self.bands_acks = self.bands_acks, []
         return acks
 
     def reload_profiles(self):
@@ -1233,7 +1284,11 @@ class Poller:
             self.side_wake.clear()
             with self.lock:
                 name, self.switch_req = self.switch_req, None
+                breq, self.bands_req = self.bands_req, None
                 st, reachable = dict(self.status), self.reachable
+            if breq:
+                self._bands(breq)
+                continue
             if name:
                 self._switch(name)
                 continue
@@ -1296,6 +1351,20 @@ class Poller:
             err = "Not switched: can't reach rxd (%s)" % reason(e)
         with self.lock:
             self.switch_acks.append((name, err))
+        self.changed.set()
+
+    def _bands(self, body):
+        try:
+            code, doc = self.link.post("/api/bands", body, timeout=SLOW_TIMEOUT)
+            err = None if code == 200 else \
+                "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
+        except OSError as e:
+            err = "Not sent: can't reach rxd (%s)" % reason(e)
+            doc = {}
+        with self.lock:
+            self.bands_acks.append((body, err))
+            if err is None and isinstance(doc.get("status"), dict):
+                self.status = dict(self.status, band_plan=doc["status"])
         self.changed.set()
 
     def _feed_reset(self, key):
@@ -1747,6 +1816,9 @@ class App:
             if err and self.switching and self.switching["name"] == name:
                 self.switching = None
                 self.say(err, "err")
+        for body, err in (self.p.take_bands_acks() if hasattr(self.p, "take_bands_acks") else ()):
+            if err:
+                self.say(err, "err")
 
     def update(self):
         """Everything that follows from rxd's state: views, switches, the audio rate."""
@@ -2017,10 +2089,34 @@ class App:
             self.mute_key(s)
         elif ch == ord("r"):
             self.report_key(s)
+        elif ch in (ord("a"), ord("m"), ord("s")):
+            self.band_plan_key(ch, s)
         elif ch in (ord("["), ord("]")) and self.decoder(s) != "js8":
             self.local_volume_key(ch)
         else:
             self.other_key(ch)
+
+    def band_plan_key(self, ch, s):
+        """a: Auto / Manual; m: Auto listens for WSPR / JS8; s: scan the bands now."""
+        bp = s["status"].get("band_plan")
+        if not isinstance(bp, dict):
+            self.say("This rxd has no band plan (it isn't on the radio)", "err")
+        elif not s["reachable"]:
+            self.say("Not sent: can't reach rxd", "err")
+        elif ch == ord("a"):
+            auto = bp.get("plan") != "auto"
+            self.p.bands({"plan": "auto" if auto else "manual"})
+            self.say("%s Band plan %s" % ((self.g.rx, "Auto: rxd picks the band") if auto
+                                          else (self.g.stop, "Manual: staying on this band")))
+        elif ch == ord("m"):
+            mode = "js8" if bp.get("mode") == "wspr" else "wspr"
+            self.p.bands({"mode": mode})
+            self.say("Auto listens for %s%s" % ("JS8" if mode == "js8" else "WSPR",
+                                                "" if bp.get("plan") == "auto"
+                                                else " (once a turns Auto on)"))
+        else:
+            self.p.bands({"scan": True})
+            self.say("%s Scanning the bands; Auto" % self.g.wait)
 
     def report_key(self, s):
         """r: WSPR reporting to WSPRnet on / off."""
@@ -2183,7 +2279,8 @@ class App:
         listening = bool(self.audio and self.audio.on)
         items = help_items(g, self.view or "manual", st.get("mode"), listening,
                            None if self.mismatch(s) else self.decoder(s),
-                           wspr_can_report(st.get("wspr")))
+                           wspr_can_report(st.get("wspr")),
+                           isinstance(st.get("band_plan"), dict))
         for text, r in help_line(w - 2, g, items):
             scr.put(h - 1, x, text, r)
             x += len(text)
@@ -2375,6 +2472,13 @@ class App:
         else:
             put(y, 1, clip(ctext, w - 2, g), crole)
         y += 1
+        bpw = band_plan_words(st.get("band_plan"), g)
+        if bpw:
+            put(y, 1, clip(g.text(bpw[0]), w - 2, g), bpw[1])
+            y += 1
+            if bottom - y > 10:
+                put(y, 3, clip(g.text(band_plan_extra(st["band_plan"], g)), w - 4, g), "label")
+                y += 1
         if wspr:
             y = self.draw_wspr_status(scr, st.get("wspr"), y, bottom)
         if self.audio and self.audio.on and y < bottom:
@@ -2701,6 +2805,9 @@ class App:
                 "/         show only lines with a callsign; Esc",
                 "          shows them all again",
                 "r         WSPR: report spots to WSPRnet / stop",
+                "a         band plan Auto (rxd picks the band) / Manual",
+                "m         Auto listens for WSPR / JS8",
+                "s         scan the bands now (and Auto)",
                 "l         play the audio on this machine / stop",
                 "          (not on JS8: its audio goes to JS8Call)",
                 "[ ]       volume of the audio here",

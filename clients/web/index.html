@@ -188,6 +188,23 @@ body[data-view=listen] #gWhy{display:none}
 .augrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px;margin-top:6px}
 .augrid .btn{font-size:18px;line-height:1.1;text-align:left;padding:4px 10px}
 @media (min-width:700px){#jStat{grid-template-columns:repeat(6,auto)}}
+/* band plan and the band picker */
+.seg{display:grid;grid-auto-flow:column;grid-auto-columns:1fr;gap:6px;margin-top:6px}
+.bgrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(96px,1fr));gap:6px;margin-top:8px}
+.bbtn{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:0;min-height:64px;padding:4px;line-height:1.1;text-align:center;width:100%}
+.bbtn .bb{font-size:21px;font-weight:750}
+.bbtn .bf{font-size:14px;font-weight:600;color:var(--dim)}
+.bbtn .ba{font-size:14px;font-weight:800;color:var(--accent)}
+.bbtn .bw{font-size:14px;font-weight:700;color:var(--warn)}
+.bbtn.cur{border:3px solid var(--accent);background:var(--panel);border-radius:10px;min-height:64px}
+.bbtn[aria-pressed=true] .bf,.bbtn[aria-pressed=true] .bw{color:inherit}
+.bpwhy{margin:4px 0 2px;font-size:21px;font-weight:750;overflow-wrap:anywhere}
+.bpsub{margin:0 0 4px;font-size:16px;font-weight:600;color:var(--dim)}
+.bpk{margin:12px 0 0;font-size:15px;color:var(--dim);font-weight:700}
+.bpstep{display:grid;grid-template-columns:72px 1fr 72px;gap:6px;align-items:center;margin-top:6px}
+.bpstep .val{text-align:center;font-size:20px;font-weight:700}
+.bpcred{font-size:14px;color:var(--dim);margin:6px 0 0}
+.bpcred a{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -229,6 +246,32 @@ body[data-view=listen] #gWhy{display:none}
     <input type="range" id="pvol" min="0" max="150" step="1"></div>
   <button type="button" class="btn wide" id="mute" aria-pressed="false" disabled>Mute uConsole speaker</button>
   <p class="note">Audio may stop when the phone locks or the browser goes to the background.</p>
+</section>
+<section class="card" id="bPlan" data-v="digital" data-live hidden>
+  <div class="lbl"><span>Band plan</span><span id="bpState"></span></div>
+  <p id="bpWhy" class="bpwhy" role="status" aria-live="polite">—</p>
+  <p id="bpSub" class="bpsub"></p>
+  <div class="row2" role="group" aria-label="Band plan"><button type="button" class="btn" id="bpAuto">Auto</button><button type="button" class="btn" id="bpMan">Manual</button></div>
+  <div id="bpAutoBox">
+    <p class="bpk">Auto listens for</p>
+    <div class="row2" role="group" aria-label="Auto listens for"><button type="button" class="btn" id="bpWspr">WSPR</button><button type="button" class="btn" id="bpJs8">JS8</button></div>
+  </div>
+  <p id="bpCond" class="bpsub"></p>
+  <p id="bpCred" class="bpcred" hidden></p>
+  <p id="bpMsg" class="msg" role="status" hidden></p>
+  <button type="button" class="btn wide" id="bpMore" aria-expanded="false" aria-controls="bpSet">Bands and timing ▾</button>
+  <div id="bpSet" hidden>
+    <p class="bpk">Bands Auto may use</p>
+    <div id="bpBands" class="bgrid" role="group" aria-label="Bands Auto may use"></div>
+    <button type="button" class="btn wide" id="bpDef">Use the default bands</button>
+    <p class="bpk">Other side of the Ham It Up</p>
+    <div class="row2" role="group" aria-label="Other side of the Ham It Up"><button type="button" class="btn" id="bpSideOff">Stay on this side</button><button type="button" class="btn" id="bpSideOn">Allow, I'll flip it</button></div>
+    <p class="bpk">Time on each band when scanning</p>
+    <div class="bpstep"><button type="button" class="btn" id="bpDwDn" aria-label="Less time on each band">−</button><span id="bpDw" class="val">—</span><button type="button" class="btn" id="bpDwUp" aria-label="More time on each band">+</button></div>
+    <p class="bpk">Check for a better band every</p>
+    <div id="bpEvery" class="seg" role="group" aria-label="Check for a better band every"></div>
+    <button type="button" class="btn wide" id="bpScan">Scan the bands now</button>
+  </div>
 </section>
 <section class="card" id="jPick" data-v="digital">
   <div class="lbl"><span>Mode and frequency</span></div>
@@ -572,6 +615,7 @@ function applyStatus(s) {
   renderJs8Stat(s, $("sRx").textContent, $("sRx").className);
   renderWsprStat(s);
   renderGainAudio(s);
+  renderBandPlan(s);
   if (profAvail && profiles && !switching && !profLoading && s.profile !== profiles.active && s.profile !== profAskedFor) loadProfiles();
   if (A.on && rateFor(s.mode) !== A.want) connectAudio();
   js8Sync(); wsprSync();
@@ -1046,7 +1090,7 @@ function profBtn(p, top, sub) {
   return el;
 }
 function renderProfiles() {
-  const key = JSON.stringify([profiles, activeName(), curUp(), conn === "ok", switching && switching.name, view]);
+  const key = JSON.stringify([profiles, activeName(), curUp(), conn === "ok", switching && switching.name, view, bandPickKey()]);
   if (key === pickKey) return;
   pickKey = key;
   const all = profiles ? profiles.profiles : [];
@@ -1067,8 +1111,7 @@ function renderProfiles() {
       for (const p of g) l.appendChild(f(p));
     }
   };
-  if (view === "digital") grouped("jPickL", all.filter(p => pdec(p)), DECODERS.map(([d, t]) => [d, t, p => pdec(p) === d]),
-    p => profBtn(p, p.name, (p.description ? p.description + " · " : "") + fmtMHz(p.freq)));
+  if (view === "digital") renderBandPicker(all, mk);
   if (view === "manual") mk("aPickL", all, p => profBtn(p, pdesc(p), p.name + " · " + fmtMHz(p.freq) + " · " + p.mode + (pdec(p) ? " · " + decName(pdec(p)) : "")));
   if (view === "listen") grouped("lPickL", all.filter(p => pkind(p) === "listen"), GROUPS.map(([m, t]) => [m, t, p => p.mode === m]),
     p => profBtn(p, pdesc(p), fmtMHz(p.freq) + " · " + (p.mode === "FM" ? "NFM" : p.mode)));
@@ -1686,6 +1729,197 @@ async function setReport(on) {
 }
 $("wRepOff").onclick = () => setReport(false);
 $("wRepOn").onclick = () => setReport(true);
+
+// ---------------------------------------------------------------- band plan and the band picker
+// rxd's band plan (status band_plan, GET/POST /api/bands): Auto picks the JS8
+// or WSPR band by conditions, time of day and what rxd has heard; Manual
+// stays put. The picker is a mode toggle plus a grid of bands.
+const BAND_ORDER = ["2190m", "630m", "160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m", "6m", "2m"];
+const DWELLS = [2, 4, 6, 8, 10, 15, 20, 30];
+const EVERY = [15, 30, 60, 120];
+let pickMode = null, bandsDoc = null, bandsAt = -1e9, bandsBusy = false, bpOpen = false;
+function bandWord(b) { return b ? b.replace(/m$/, " m") : "—"; }
+function bp() { return st && st.band_plan ? st.band_plan : null; }
+function bestBand(mode) {
+  if (!bandsDoc || !Array.isArray(bandsDoc.profiles)) return null;
+  let best = null;
+  for (const r of bandsDoc.profiles) if (r.mode === mode && r.eligible && (!best || r.score > best.score)) best = r;
+  return best && best.name;
+}
+function bandPickKey() { const b = bp(); return [pickMode, b && b.plan, b && b.mode, bestBand("js8"), bestBand("wspr")].join(); }
+function pickModeNow() { return pickMode || curDec() || (bp() && bp().mode) || "wspr"; }
+
+function bandBtn(p, best) {
+  const act = p.name === activeName() && !switching;
+  const el = document.createElement(act ? "div" : "button");
+  el.className = act ? "bbtn cur" : "btn bbtn";
+  const add = (cls, t) => { const s = document.createElement("span"); s.className = cls; s.textContent = t; el.appendChild(s); };
+  add("bb", bandWord(p.band));
+  add("bf", trim(p.freq / 1e6, 4));
+  if (act) add("ba", "● On");
+  else {
+    el.type = "button";
+    if (switching && switching.name === p.name) add("ba", "■ Switching");
+    else if (!!p.upconvert !== curUp()) add("bw", "▲ " + hiuWord(p.upconvert));
+    else if (best) add("ba", "★ Best now");
+    el.setAttribute("aria-label", decName(pdec(p)) + " " + bandWord(p.band) + ", " + fmtMHz(p.freq) + (best ? ", best now" : ""));
+    el.disabled = conn !== "ok" || !!switching;
+    el.onclick = () => askSwitch(p);
+  }
+  return el;
+}
+function renderBandPicker(all, mk) {
+  const box = $("jPickL");
+  const dig = all.filter(p => pdec(p));
+  if (!profiles || !dig.length) { mk("jPickL", dig, null); return; }
+  box.textContent = "";
+  const mode = pickModeNow();
+  const seg = document.createElement("div"); seg.className = "row2"; seg.setAttribute("role", "group"); seg.setAttribute("aria-label", "Mode");
+  for (const [d, t] of DECODERS) {
+    const b = document.createElement("button");
+    b.type = "button"; b.className = "btn"; b.setAttribute("aria-pressed", String(d === mode));
+    b.textContent = (d === mode ? "● " : "") + t + (d === curDec() ? " (on now)" : "");
+    b.onclick = () => { pickMode = d; pickKey = ""; renderProfiles(); };
+    seg.appendChild(b);
+  }
+  box.appendChild(seg);
+  const best = bp() && bp().plan === "auto" && bp().mode === mode ? bestBand(mode) : null;
+  const grid = document.createElement("div"); grid.className = "bgrid";
+  const plan = dig.filter(p => pdec(p) === mode && p.plan && p.band)
+    .sort((a, b) => BAND_ORDER.indexOf(a.band) - BAND_ORDER.indexOf(b.band));
+  for (const p of plan) grid.appendChild(bandBtn(p, p.name === best));
+  box.appendChild(grid);
+  const extra = dig.filter(p => pdec(p) === mode && !(p.plan && p.band));
+  if (extra.length) {
+    const h = document.createElement("div"); h.className = "pgroup"; h.textContent = "Other " + decName(mode) + " profiles"; box.appendChild(h);
+    const l = document.createElement("div"); l.className = "plist"; box.appendChild(l);
+    for (const p of extra) l.appendChild(profBtn(p, p.name, (p.description ? p.description + " · " : "") + fmtMHz(p.freq)));
+  }
+  if (bp() && bp().plan === "auto") {
+    const n = document.createElement("p"); n.className = "note";
+    n.textContent = "Auto is choosing the band. Picking one here sets the band plan to Manual.";
+    box.appendChild(n);
+  }
+}
+
+function bpMsg(t) { const m = $("bpMsg"); m.textContent = t ? "✕ " + t : ""; m.hidden = !t; }
+async function postBands(body) {
+  if (bandsBusy) return;
+  bandsBusy = true; bpMsg(""); renderBandPlan(st);
+  let r = null;
+  try { r = await api("/api/bands", body); } catch (e) {}
+  bandsBusy = false;
+  if (!r) bpMsg("Could not reach rxd. Nothing was changed.");
+  else if (!r.ok) bpMsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status)));
+  else if (r.doc) { bandsDoc = r.doc; bandsAt = now(); if (st) st.band_plan = r.doc.status; }
+  pickKey = ""; renderBandPlan(st); renderProfiles();
+}
+async function loadBands() {
+  bandsAt = now();
+  try {
+    const r = await api("/api/bands");
+    if (r.ok && r.doc) { bandsDoc = r.doc; pickKey = ""; renderProfiles(); }
+  } catch (e) {}
+}
+function localHM(epoch) { return epoch ? hhmm(new Date(epoch * 1000)) : "—"; }
+function pressed(id, on, text) {
+  const b = $(id); b.setAttribute("aria-pressed", String(!!on));
+  setText(b, (on ? "● " : "") + text);
+  b.disabled = conn !== "ok" || bandsBusy;
+}
+function renderBandPlan(s) {
+  const b = s && s.band_plan, card = $("bPlan");
+  if (!b) { card.hidden = true; return; }
+  if (view === "digital" && !card.hidden && now() - bandsAt > 60000) loadBands();
+  const auto = b.plan === "auto";
+  const sym = !auto ? "■ " : b.phase === "scan" ? "◔ " : b.phase === "idle" ? "▲ " : "● ";
+  setText($("bpState"), auto ? (b.phase === "scan" ? "Auto, scanning" : "Auto") : "Manual");
+  setText($("bpWhy"), sym + (b.reason || "—"), "bpwhy" + (b.phase === "idle" ? " warn" : ""));
+  const sun = b.sun || {};
+  const parts = [];
+  if (auto && b.phase === "hold" && b.next_at) parts.push("Next look " + localHM(b.next_at));
+  if (auto && b.switching_to && b.switching_to !== b.profile) parts.push("Switching to " + b.switching_to);
+  parts.push((sun.words ? sun.words[0].toUpperCase() + sun.words.slice(1) : "—") +
+    (sun.sunrise ? " · sunrise " + localHM(sun.sunrise) : "") + (sun.sunset ? " · sunset " + localHM(sun.sunset) : "") +
+    (sun.located === false ? " (no grid set: by this clock)" : ""));
+  setText($("bpSub"), parts.join(" · "));
+  pressed("bpAuto", auto, "Auto"); pressed("bpMan", !auto, "Manual");
+  $("bpAutoBox").hidden = !auto;
+  pressed("bpWspr", b.mode === "wspr", "WSPR"); pressed("bpJs8", b.mode === "js8", "JS8");
+  const c = b.conditions;
+  if (c) {
+    setText($("bpCond"), "Conditions: SFI " + c.sfi + " · A " + (c.a == null ? "—" : c.a) + " · K " + (c.k == null ? "—" : c.k) +
+      (c.fetched ? " · as of " + localHM(c.fetched) : ""));
+    const cr = $("bpCred");
+    if (c.source === "hamqsl") {
+      if (!cr.firstChild || cr.dataset.src !== "hamqsl") {
+        cr.textContent = "Band conditions courtesy of N0NBH, ";
+        const a = document.createElement("a"); a.href = "https://www.hamqsl.com/solar.html"; a.rel = "noopener"; a.target = "_blank";
+        a.textContent = "www.hamqsl.com"; cr.appendChild(a); cr.dataset.src = "hamqsl";
+      }
+    } else { cr.textContent = c.credit || ""; cr.dataset.src = c.source || ""; }
+    cr.hidden = false;
+  } else {
+    setText($("bpCond"), "▲ No band conditions" + (b.conditions_error ? ": can't reach hamqsl.com or NOAA" : "") +
+      ". Auto goes by time of day and what rxd has heard, scanning to learn.");
+    $("bpCred").hidden = true;
+  }
+  $("bpMore").setAttribute("aria-expanded", String(bpOpen));
+  setText($("bpMore"), bpOpen ? "Bands and timing ▴" : "Bands and timing ▾");
+  $("bpSet").hidden = !bpOpen;
+  if (!bpOpen) return;
+  // bands
+  const box = $("bpBands"), en = b.bands || [];
+  const key = JSON.stringify([en, b.side, b.cross_side, conn, bandsBusy]);
+  if (box.dataset.key !== key) {
+    box.dataset.key = key; box.textContent = "";
+    for (const band of BAND_ORDER) {
+      const on = en.indexOf(band) >= 0, up = !(band === "6m" || band === "2m");
+      const btn = document.createElement("button");
+      btn.type = "button"; btn.className = "btn bbtn"; btn.setAttribute("aria-pressed", String(on));
+      const t = document.createElement("span"); t.className = "bb"; t.textContent = bandWord(band); btn.appendChild(t);
+      const sub = document.createElement("span"); sub.className = "bf"; sub.textContent = on ? "✓ On" : "Off"; btn.appendChild(sub);
+      if ((up ? "UPCONVERT" : "BYPASS") !== b.side) {
+        const w = document.createElement("span"); w.className = "bw"; w.textContent = "▲ " + (up ? "UPCONVERT" : "BYPASS"); btn.appendChild(w);
+      }
+      btn.setAttribute("aria-label", bandWord(band) + (on ? ", on" : ", off") + ((up ? "UPCONVERT" : "BYPASS") !== b.side ? ", needs the Ham It Up on " + (up ? "UPCONVERT" : "BYPASS") : ""));
+      btn.disabled = conn !== "ok" || bandsBusy;
+      btn.onclick = () => postBands({bands: on ? en.filter(x => x !== band) : en.concat([band])});
+      box.appendChild(btn);
+    }
+  }
+  $("bpDef").hidden = !!b.default_bands;
+  $("bpDef").disabled = conn !== "ok" || bandsBusy;
+  pressed("bpSideOff", !b.cross_side, "Stay on this side"); pressed("bpSideOn", b.cross_side, "Allow, I'll flip it");
+  setText($("bpDw"), b.dwell_min + " min" + (b.mode === "wspr" ? ", 2 slots at least" : ""));
+  const di = DWELLS.indexOf(b.dwell_min);
+  $("bpDwDn").disabled = conn !== "ok" || bandsBusy || di === 0;
+  $("bpDwUp").disabled = conn !== "ok" || bandsBusy || di === DWELLS.length - 1;
+  const ev = $("bpEvery");
+  if (!ev.children.length) for (const m of EVERY) {
+    const x = document.createElement("button"); x.type = "button"; x.className = "btn"; x.dataset.m = m;
+    x.onclick = () => postBands({every_min: m}); ev.appendChild(x);
+  }
+  for (const x of ev.children) pressed(x.id || (x.id = "bpEv" + x.dataset.m), +x.dataset.m === b.every_min, x.dataset.m + " min");
+  $("bpScan").disabled = conn !== "ok" || bandsBusy;
+}
+$("bpAuto").onclick = () => postBands({plan: "auto"});
+$("bpMan").onclick = () => postBands({plan: "manual"});
+$("bpWspr").onclick = () => postBands({mode: "wspr"});
+$("bpJs8").onclick = () => postBands({mode: "js8"});
+$("bpMore").onclick = () => { bpOpen = !bpOpen; renderBandPlan(st); };
+$("bpDef").onclick = () => postBands({bands: null});
+$("bpSideOff").onclick = () => postBands({cross_side: false});
+$("bpSideOn").onclick = () => postBands({cross_side: true});
+function stepDwell(d) {
+  const b = bp(); if (!b) return;
+  let i = DWELLS.indexOf(b.dwell_min); if (i < 0) i = DWELLS.findIndex(x => x >= b.dwell_min);
+  const n = DWELLS[Math.max(0, Math.min(DWELLS.length - 1, (i < 0 ? 2 : i) + d))];
+  if (n !== b.dwell_min) postBands({dwell_min: n});
+}
+$("bpDwDn").onclick = () => stepDwell(-1);
+$("bpDwUp").onclick = () => stepDwell(1);
+$("bpScan").onclick = () => postBands({scan: true});
 
 // ---------------------------------------------------------------- start
 document.addEventListener("visibilitychange", () => {
