@@ -618,6 +618,7 @@ class Receiver:
         self.listen_lock = threading.Lock()
         self.resamplers = {}         # rate -> FirDecimator from 48 kHz
         self.wspr = None             # a WsprDecoder, for a WSPR profile
+        self.js8dec = None           # a js8.SlotDecoder, for JS8 decoded by rxd
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -708,6 +709,8 @@ class Receiver:
             audio = self.chain(x, self.offset)
             if self.wspr is not None:  # before squelch and volume
                 self.wspr.push(audio, snap["dial"])
+            if self.js8dec is not None:  # likewise
+                self.js8dec.push(audio, snap["dial"])
             audio = self.gate(audio, snap["squelch"])
             pcm = np.clip(audio * snap["volume"] * 32767, -32768, 32767).astype("<i2")
             self.sink.write(pcm)
@@ -818,6 +821,8 @@ class Receiver:
                 "js8": self.s.js8, "js8_call": js8_mycall() if self.s.js8 else None,
                 "decoder": self.s.decoder,
                 "wspr": self.wspr.status() if self.wspr is not None else None,
+                "js8_decoder": self.js8dec.status() if self.js8dec is not None else
+                ({"engine": "js8call"} if self.s.decoder == "js8" else None),
                 "clock": clock_status(),
                 "listeners": len(self.listeners)}
 
@@ -1101,6 +1106,55 @@ class Js8Feed:
             else:
                 out = [x for x in self.lines if x["seq"] > after]
             return {"seq": self.seq, "lines": out}
+
+
+# ------------------------------------------------- rxd's own JS8 decoder
+
+# A JS8 profile with "js8_engine": "rxd" (or RXD_JS8_ENGINE=rxd) decodes JS8
+# in rxd itself, with rxd/js8.py, instead of in JS8Call. It records slots of
+# this audio, before squelch and volume, and writes JS8Call-style ALL.TXT and
+# DIRECTED.TXT under ~/.local/share/rxd/js8/, which Js8Feed then tails, so
+# /api/js8 keeps its line shape. "js8_submodes" picks the speeds to decode
+# (default normal, fast and slow, about a fifth of one CM4 core; turbo adds
+# about 14%).
+JS8_ENGINES = ("js8call", "rxd")
+JS8_SUBMODES = ("normal", "fast", "turbo", "slow")
+JS8_DEFAULT_SUBMODES = ["normal", "fast", "slow"]
+JS8_PY = (os.environ.get("RXD_JS8_PY", ""),
+          os.path.join(os.path.dirname(os.path.abspath(__file__)), "js8.py"),
+          "/usr/local/lib/rxd/js8.py")
+
+
+def js8_engine(p):
+    engine = os.environ.get("RXD_JS8_ENGINE") or p.get("js8_engine") or "js8call"
+    if engine not in JS8_ENGINES:
+        raise ValueError("js8_engine must be one of " + ", ".join(JS8_ENGINES))
+    return engine
+
+
+def load_js8():
+    import importlib.util
+    for path in JS8_PY:
+        if path and os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location("js8", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            return mod
+    return None
+
+
+def make_js8(settings, p):
+    """The SlotDecoder for a JS8 profile decoded by rxd, or None."""
+    js8 = load_js8()
+    if js8 is None:
+        log("no js8.py at %s: JS8 won't decode" % ", ".join(x for x in JS8_PY if x))
+        return None
+    subs = p.get("js8_submodes") or JS8_DEFAULT_SUBMODES
+    bad = [x for x in subs if x not in JS8_SUBMODES]
+    if bad:
+        raise ValueError("js8_submodes: unknown %s (have %s)" % (", ".join(bad),
+                                                                ", ".join(JS8_SUBMODES)))
+    return js8.SlotDecoder(settings.snapshot()["dial"], subs, rate_in=AUDIO_RATE)
 
 
 # --------------------------------------------------------------------- WSPR
@@ -1680,6 +1734,11 @@ def main(argv=None):
     rx = Receiver(settings, src, sink)
     if settings.decoder == "wspr":
         rx.wspr = make_wspr(settings)
+    try:
+        if settings.decoder == "js8" and js8_engine(p) == "rxd":
+            rx.js8dec = make_js8(settings, p)
+    except ValueError as e:
+        sys.exit("rxd: " + str(e))
     rx.start()
     servers = []
     if a.rigctl != "off":
@@ -1690,7 +1749,7 @@ def main(argv=None):
         hs = ThreadingHTTPServer(hostport(a.http, 8073), Api)
         hs.daemon_threads = True
         hs.rx = rx
-        hs.js8 = Js8Feed()
+        hs.js8 = Js8Feed(rx.js8dec.directed_path if rx.js8dec is not None else None)
         servers.append(hs)
     for srv in servers:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
