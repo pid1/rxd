@@ -438,10 +438,12 @@ class RadioTest(unittest.TestCase):
         doc = json.loads(self.radio("--json")[0])
         self.assertEqual(doc["active"], "js8")
         rows = {r["name"]: r for r in doc["profiles"]}
-        self.assertEqual(list(rows)[:2], ["ghostnet", "js8"])
+        self.assertEqual(list(rows)[:2], ["ghostnet", "js8-160m"])
         self.assertEqual(rows["js8"], {"name": "js8", "description": "JS8, 40 m",
                                        "freq": 7078000.0, "mode": "USB", "upconvert": True,
-                                       "js8": True, "decoder": "js8", "saved": True})
+                                       "js8": True, "decoder": "js8", "band": "40m",
+                                       "plan": True, "saved": True})
+        self.assertEqual((rows["ghostnet"]["band"], rows["ghostnet"]["plan"]), ("40m", False))
         self.assertEqual((rows["wspr"]["decoder"], rows["wspr"]["js8"], rows["wspr"]["freq"]),
                          ("wspr", False, 7038600.0))
         self.assertIsNone(rows["vhf"]["decoder"])
