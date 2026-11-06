@@ -40,6 +40,7 @@ import signal
 import socket
 import shutil
 import socketserver
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -1575,14 +1576,95 @@ def iso_utc(t):
     return "%sT%s%sZ" % (m[1], m[2], m[3] or ":00") if m else None
 
 
+# The offline callsign database rxd/callsign_db.py builds (FCC licences
+# geocoded to 6-character grids, ZIP centroids, and cty.dat prefixes for
+# everyone else). Read-only here; reopened when the updater replaces it.
+CALLSIGNS_DB = os.path.expanduser(os.environ.get("RXD_CALLSIGNS", "~/.local/share/rxd/callsigns.sqlite"))
+# call suffixes that say how, not where: /P portable, /M mobile, /QRP ...
+CALL_SUFFIXES = {"P", "M", "QRP", "QRPP", "A", "LH", "R", "B", "J", "Y"}
+
+
+class CallBook:
+    """call -> {"grid", "prec": "addr" | "zip" | "country", "region"}, or None."""
+
+    def __init__(self, path=None):
+        self.path = path or CALLSIGNS_DB
+        self.con = self.stamp = None
+        self.memo = {}
+
+    def db(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            st = None
+        stamp = st and (st.st_ino, st.st_mtime_ns)
+        if stamp != self.stamp:
+            if self.con:
+                self.con.close()
+            self.con, self.stamp, self.memo = None, stamp, {}
+            if st:
+                try:
+                    self.con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(self.path),
+                                               uri=True, check_same_thread=False)
+                    self.con.execute("SELECT 1 FROM calls LIMIT 1")
+                except sqlite3.Error as e:
+                    log("callsign database %s unusable: %s" % (self.path, e))
+                    self.con = None
+        return self.con
+
+    def country(self, con, s):
+        keys = ["=" + s] + [s[:n] for n in range(len(s), 0, -1)]
+        rows = dict((k, (g, e)) for k, g, e in con.execute(
+            "SELECT prefix, grid, entity FROM prefixes WHERE prefix IN (%s)" % ",".join("?" * len(keys)),
+            keys))
+        for k in keys:
+            if k in rows:
+                return {"grid": rows[k][0], "prec": "country", "region": rows[k][1]}
+        return None
+
+    def lookup(self, call):
+        con = self.db()
+        call = (call or "").strip().upper()
+        if not con or not call:
+            return None
+        if call in self.memo:
+            return self.memo[call]
+        try:
+            self.memo[call] = r = self.find(con, call)
+        except sqlite3.Error:
+            r = None
+        return r
+
+    def find(self, con, call):
+        parts = [p for p in call.split("/") if p]
+        if not parts or any(p in ("MM", "AM") for p in parts[1:]):
+            return None  # at sea or in the air
+        r = con.execute("SELECT grid, entity FROM prefixes WHERE prefix=?", ("=" + call,)).fetchone()
+        if r:
+            return {"grid": r[0], "prec": "country", "region": r[1]}
+        full = [p for p in parts if CALLSIGN.match(p)]
+        home = max(full, key=len) if full else parts[0]
+        rest = [p for p in parts if p != home and p not in CALL_SUFFIXES]
+        if rest:  # VE3/KA1PID, EA8/K1ABC, KA1PID/4: operating away from home
+            where = rest[0]
+            if where.isdigit():
+                where = home
+            return self.country(con, where)
+        r = con.execute("SELECT grid, prec, region FROM calls WHERE call=?", (home,)).fetchone()
+        if r:
+            return {"grid": r[0], "prec": r[1], "region": r[2]}
+        return self.country(con, home)
+
+
 class StationMap:
     """Heard stations with a grid, merged per mode and call, for /api/stations."""
 
     ALL_TAIL = 262144
 
     def __init__(self, js8=None, wspr=None, all_path=None, grids_path=None, clock=time.time,
-                 me=None):
+                 me=None, book=None):
         self.js8 = js8                # a Js8Feed (or anything with since())
+        self.book = book if book is not None else CallBook()  # the offline callsign database
         self.wspr = wspr              # a callable returning the WsprDecoder or None
         self.all_path = all_path if all_path is not None else \
             os.path.join(os.path.dirname(JS8_LOG), "ALL.TXT")
@@ -1666,16 +1748,23 @@ class StationMap:
         def add(mode, call, grid, t, snr, freq=None, dbm=None):
             if not t or t < cutoff:
                 return
+            src, region = "heard", None
             if not grid:
-                nogrid.add((mode, call))
-                return
+                # never heard with a grid: the callsign database, if it knows
+                found = self.book.lookup(call) if self.book else None
+                if not found:
+                    nogrid.add((mode, call))
+                    return
+                grid, src, region = found["grid"], found["prec"], found.get("region")
             k = (mode, call)
             s = out.get(k)
             if s is None:
                 ll = grid_latlon(grid)
                 s = out[k] = {"call": call, "mode": mode, "grid": grid, "lat": round(ll[0], 4),
-                              "lon": round(ll[1], 4), "km": grid_km(self.me[1], grid),
-                              "snr": snr, "last": t, "last_snr": snr, "freq": freq, "dbm": dbm}
+                              "lon": round(ll[1], 4),
+                              "km": grid_km(self.me[1], grid) if src != "country" else None,
+                              "snr": snr, "last": t, "last_snr": snr, "freq": freq, "dbm": dbm,
+                              "src": src, "region": region}
             if snr is not None and (s["snr"] is None or snr > s["snr"]):
                 s["snr"] = snr
             if t >= s["last"]:
@@ -1684,7 +1773,7 @@ class StationMap:
                     s["freq"] = freq
                 if dbm is not None:
                     s["dbm"] = dbm
-                if grid != s["grid"]:  # moved: plot where it is now
+                if grid != s["grid"] and src == "heard" == s["src"]:  # moved: plot it where it is now
                     ll = grid_latlon(grid)
                     s.update(grid=grid, lat=round(ll[0], 4), lon=round(ll[1], 4),
                              km=grid_km(self.me[1], grid))

@@ -1,0 +1,151 @@
+---
+name: callsign database
+
+# Builds the offline callsign -> grid database rxd's map uses for stations
+# that never send a grid, and publishes it as assets of the rolling release
+# `data-callsigns`. The Pi never builds anything: setup.sh (and so `maint`)
+# runs `callsign_db.py install`, which fetches callsigns.sqlite.gz only when
+# its .sha256 changed.
+#
+# Sources (all fetched here, on the runner): the FCC ULS amateur licences
+# (l_amat.zip, public domain, refreshed by the FCC every Sunday), the Census
+# Gazetteer ZCTA file (public domain) and AD1C's Big CTY cty.dat (MIT). New or
+# changed licence addresses are geocoded by the Census Bureau's batch
+# geocoder; only the 6-character grid is kept. The raw downloads stay in the
+# runner's work directory: they are never committed, cached or uploaded.
+#
+# Incremental: the previous release's geocache.sqlite.gz (address HMAC ->
+# grid, keyed with the CALLSIGN_HASH_KEY secret so it can't be used to test
+# addresses) is carried forward, so a weekly run geocodes only new and
+# changed addresses. The first run geocodes all ~720,000 (about an hour).
+
+on: # yamllint disable-line rule:truthy
+  schedule:
+    # Monday morning UTC, after the FCC's Sunday refresh. GitHub may deliver
+    # this hours late; for a weekly file that doesn't matter.
+    - cron: "41 9 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Rebuild even if no source changed
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: callsigns
+  cancel-in-progress: false
+
+env:
+  TAG: data-callsigns
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # A first build geocodes everything (~1 h); the hosted-runner limit is 6 h.
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.build.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Fetch the previous build
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p prev out work
+          if gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D prev \
+               -p callsigns.sqlite.gz -p geocache.sqlite.gz; then
+            gunzip -k prev/callsigns.sqlite.gz prev/geocache.sqlite.gz
+            # the update reads the previous build's source ETags from it, so
+            # an unchanged week costs three conditional requests and no more
+            cp prev/callsigns.sqlite out/callsigns.sqlite
+            cp prev/geocache.sqlite work/geocache.sqlite
+          else
+            echo "No previous build: building from scratch." | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Build
+        id: build
+        env:
+          RXD_CALLSIGN_KEY: ${{ secrets.CALLSIGN_HASH_KEY }}
+          FORCE: ${{ inputs.force && '--force' || '' }}
+        # The builder is standard-library Python, so the runner's python3 is
+        # all it needs: no uv sync, no dependencies.
+        run: |
+          set -euo pipefail
+          if [ -z "$RXD_CALLSIGN_KEY" ]; then
+            echo "CALLSIGN_HASH_KEY secret is missing; refusing to publish unkeyed address hashes." >&2
+            exit 1
+          fi
+          # shellcheck disable=SC2086
+          python3 rxd/callsign_db.py update --db out/callsigns.sqlite --work work \
+            --summary summary.json $FORCE
+          changed=$(python3 -c 'import json; print(str(json.load(open("summary.json"))["changed"]).lower())')
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          { echo '```'; cat summary.json; echo; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Validate
+        if: steps.build.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          prev=()
+          if [ -f prev/callsigns.sqlite ]; then prev=(--previous prev/callsigns.sqlite); fi
+          python3 rxd/callsign_db.py validate out/callsigns.sqlite "${prev[@]}"
+
+      - name: Package
+        if: steps.build.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          gzip -9nc out/callsigns.sqlite > dist/callsigns.sqlite.gz
+          gzip -9nc work/geocache.sqlite > dist/geocache.sqlite.gz
+          (cd dist && sha256sum callsigns.sqlite.gz > callsigns.sqlite.gz.sha256 \
+                   && sha256sum geocache.sqlite.gz > geocache.sqlite.gz.sha256)
+          ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: steps.build.outputs.changed == 'true'
+        with:
+          name: callsigns
+          path: dist/
+          retention-days: 3
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write # the release assets, and nothing else
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: callsigns
+          path: dist
+
+      - name: Update the data-callsigns release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          sha256sum -c callsigns.sqlite.gz.sha256 geocache.sqlite.gz.sha256
+          if ! gh release view "$TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --latest=false \
+              --title "Callsign database (rolling)" \
+              --notes "Offline callsign -> grid database for rxd's map, rebuilt weekly by .github/workflows/callsigns.yml. Derived from public records: call, grid, precision and state or country only."
+          fi
+          # the database first and its checksum last: a Pi that reads them
+          # mid-update sees a mismatch and keeps the database it has
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber \
+            callsigns.sqlite.gz geocache.sqlite.gz geocache.sqlite.gz.sha256
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber callsigns.sqlite.gz.sha256
+          echo "Published $(cut -c1-12 callsigns.sqlite.gz.sha256)" >> "$GITHUB_STEP_SUMMARY"
