@@ -23,7 +23,7 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
 ```json
 {
   "call": "KA1PID",
-  "grid": "EM13lc",
+  "grid": "EN52lk",
   "sdr": {"serial": "57818712"},
   "upconverter": {"name": "Ham It Up", "hz": 125000000, "below_hz": 30000000, "switch": true},
   "sink": "Built-in Audio",
@@ -40,7 +40,7 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `call` | string | none | The callsign WSPR spots are reported as, and the map's centre station. Upper-cased. |
-| `grid` | string | none | The Maidenhead grid, 4 or 6 characters (`EM13` or `EM13lc`): the map's centre, the sun's position for the band plan, and the WSPR report's locator, when the GPS has no grid (below). |
+| `grid` | string | none | The Maidenhead grid, 4 or 6 characters (`EN52` or `EN52lk`): the map's centre, the sun's position for the band plan, and the WSPR report's locator, when the GPS has no grid (below). |
 | `sdr.serial` | string | `""` | The RTL-SDR's serial number (`rtl_test` lists it). rxd opens that dongle however the USB enumerated, and says so plainly when it's missing. Empty: the first one found. |
 | `upconverter` | object or null | null | An upconverter in front of the dongle, below. null or absent: none, so `"offset": "auto"` never upconverts. |
 | `upconverter.name` | string | `upconverter` | What to call it: "Flip the Ham It Up to BYPASS". |

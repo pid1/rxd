@@ -19,7 +19,7 @@ import rxd  # noqa: E402
 from test_radio import load_radio  # noqa: E402
 
 FULL = {
-    "call": "ka1pid", "grid": "em13LC",
+    "call": "ka1pid", "grid": "en52LK",
     "sdr": {"serial": "57818712"},
     "upconverter": {"name": "Ham It Up", "hz": 125000000, "below_hz": 30000000, "switch": True},
     "sink": "Built-in Audio",
@@ -68,7 +68,7 @@ class Loading(StationEnv):
         self.write(FULL)
         st = station.load()
         self.assertEqual((st.call, st.grid, st.serial, st.sink),
-                         ("KA1PID", "EM13lc", "57818712", "Built-in Audio"))
+                         ("KA1PID", "EN52lk", "57818712", "Built-in Audio"))
         self.assertEqual(st.upconverter, {"name": "Ham It Up", "hz": 125e6,
                                           "below_hz": 30e6, "switch": True})
         self.assertTrue(st.manual_switch)
@@ -139,7 +139,7 @@ class InRxd(StationEnv):
         self.assertEqual(s.snapshot()["upconverter"], 125e6)
         self.assertEqual(s.serial, "57818712")
         self.assertIsNone(s.sink)  # "Built-in Audio" is the default sink
-        self.assertEqual(rxd.station_id(), ("KA1PID", "EM13lc"))
+        self.assertEqual(rxd.station_id(), ("KA1PID", "EN52lk"))
         doc = rxd.station_status()
         self.assertNotIn("missing", doc)
         self.assertEqual(doc["upconverter"]["name"], "Ham It Up")
@@ -149,8 +149,8 @@ class InRxd(StationEnv):
         self.assertEqual((s.snapshot()["upconverter"], s.serial, s.sink), (120e6, "1", "other"))
 
     def test_station_is_read_again_when_it_changes(self):
-        self.write({"call": "KA1PID", "grid": "EM13lc"})
-        self.assertEqual(rxd.station_id(), ("KA1PID", "EM13lc"))
+        self.write({"call": "KA1PID", "grid": "EN52lk"})
+        self.assertEqual(rxd.station_id(), ("KA1PID", "EN52lk"))
         self.write({"call": "W1AW", "grid": "FN31pr"})
         self.assertEqual(rxd.station_id(), ("W1AW", "FN31pr"))
 

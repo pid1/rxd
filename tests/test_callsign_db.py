@@ -43,14 +43,14 @@ def en(usid, call, street, city, state, zipc, po="", name="Pat Q Example", frn="
 
 HD_LINES = [hd("1", "KA1PID"), hd("2", "W1AW"), hd("3", "K1OQX", status="E"),
             hd("4", "WQAB123", service="ZA"), hd("5", "N0BOX", service="HV"), hd("6", "KH6XYZ")]
-EN_LINES = [en("1", "KA1PID", "100 Sample Rd", "Denton", "TX", "762011234"),
+EN_LINES = [en("1", "KA1PID", "100 Sample Rd", "Rockford", "IL", "611011234"),
             en("2", "W1AW", "225 Main St", "Newington", "CT", "06111", name="Hiram Percy Maxim"),
             en("3", "K1OQX", "1 Old Way", "Oldtown", "ME", "04468"),
-            en("4", "WQAB123", "9 Business Pk", "Dallas", "TX", "75201"),
+            en("4", "WQAB123", "9 Business Pk", "Chicago", "IL", "60601"),
             en("5", "N0BOX", "", "Smalltown", "KS", "66002", po="77"),
             en("6", "KH6XYZ", "5 Nowhere Ln", "Hilo", "HI", "99999")]
 ZCTA = ("GEOID|GEOIDFQ|ALAND|AWATER|ALAND_SQMI|AWATER_SQMI|INTPTLAT|INTPTLONG\n"
-        "76201|860Z200US76201|1|0|1|0|33.2290|-97.1300\n"
+        "61101|860Z200US61101|1|0|1|0|42.4400|-89.0400\n"
         "06111|860Z200US06111|1|0|1|0|41.6880|-72.7290\n"
         "66002|860Z200US66002|1|0|1|0|39.5560|-95.1350\n")
 CTY = """United States:            05:  08:  NA:   37.60:    91.87:     5.0:  K:
@@ -67,7 +67,7 @@ Duplicate:                05:  08:  NA:    0.00:     0.00:     0.0:  K:
     K;
 """
 SECRETS = ("Pat", "Example", "Hiram", "Maxim", "Sample Rd", "Main St", "Nowhere", "0001234567",
-           "pat@example", "5551234567", "Denton", "Newington", "Business")
+           "pat@example", "5551234567", "Rockford", "Newington", "Business")
 
 
 def zipped(name, text):
@@ -115,8 +115,8 @@ class Files(BaseHTTPRequestHandler):
 class FakeGeocoder:
     """Places '100 Sample Rd' and '225 Main St'; anything else is No_Match."""
 
-    PLACES = {"100 Sample Rd": (33.1050, -97.0420), "225 Main St": (41.7144, -72.7273),
-              "1 New Rd": (33.2000, -97.2000), "5 Nowhere Ln": None}
+    PLACES = {"100 Sample Rd": (42.4400, -89.0400), "225 Main St": (41.7144, -72.7273),
+              "1 New Rd": (41.9000, -87.7000), "5 Nowhere Ln": None}
 
     def __init__(self):
         self.calls = []
@@ -162,22 +162,22 @@ class Builder(unittest.TestCase):
             con.close()
 
     def test_grid(self):
-        self.assertEqual(cdb.latlon_grid(33.1050, -97.0420), "EM13lc")
-        self.assertEqual(cdb.latlon_grid(33.1050, -97.0420, 4), "EM13")
+        self.assertEqual(cdb.latlon_grid(42.4400, -89.0400), "EN52lk")
+        self.assertEqual(cdb.latlon_grid(42.4400, -89.0400, 4), "EN52")
         self.assertEqual(cdb.latlon_grid(-33.87, 151.21), "QF56od")
         self.assertEqual(cdb.latlon_grid(90, 180), "RR99xx")
         self.assertEqual(cdb.latlon_grid(-90, -180), "AA00aa")
-        for g in ("EM13lc", "FN31pr", "QF56od", "JO62qm"):
+        for g in ("EN52lk", "FN31pr", "QF56od", "JO62qm"):
             self.assertEqual(cdb.latlon_grid(*rxd.grid_latlon(g)), g)
 
     def test_parsers(self):
         active = cdb.parse_hd(HD_LINES)
         self.assertEqual(sorted(active.values()), ["KA1PID", "KH6XYZ", "N0BOX", "W1AW"])
         addrs = cdb.parse_en(EN_LINES, active)
-        self.assertEqual(addrs["KA1PID"], ("100 Sample Rd", "Denton", "TX", "76201"))
+        self.assertEqual(addrs["KA1PID"], ("100 Sample Rd", "Rockford", "IL", "61101"))
         self.assertEqual(addrs["N0BOX"], ("", "Smalltown", "KS", "66002"))
         self.assertEqual(cdb.parse_zcta(ZCTA.splitlines())["06111"], (41.688, -72.729))
-        self.assertEqual(cdb.parse_zcta(ZCTA.replace("|", "\t").splitlines())["76201"], (33.229, -97.13))
+        self.assertEqual(cdb.parse_zcta(ZCTA.replace("|", "\t").splitlines())["61101"], (42.44, -89.04))
         with self.assertRaises(ValueError):
             cdb.parse_zcta(["NOPE|X", "1|2"])
         cty = {k: (g, e) for k, g, e in cdb.parse_cty(CTY)}
@@ -190,7 +190,7 @@ class Builder(unittest.TestCase):
     def test_build_and_privacy(self):
         st = self.update()
         rows = self.rows()
-        self.assertEqual(rows["KA1PID"], ("EM13lc", "addr", "TX"))
+        self.assertEqual(rows["KA1PID"], ("EN52lk", "addr", "IL"))
         self.assertEqual(rows["W1AW"][1], "addr")
         self.assertEqual(rows["N0BOX"], (cdb.latlon_grid(39.556, -95.135), "zip", "KS"))  # PO box
         self.assertNotIn("K1OQX", rows)      # expired
@@ -226,12 +226,12 @@ class Builder(unittest.TestCase):
 
     def test_incremental_geocoding(self):
         self.update()
-        moved = [e if not e.startswith("EN|1|") else en("1", "KA1PID", "1 New Rd", "Denton", "TX", "76201")
+        moved = [e if not e.startswith("EN|1|") else en("1", "KA1PID", "1 New Rd", "Rockford", "IL", "61101")
                  for e in EN_LINES]
         self.srv.files["/l_amat.zip"] = fcc_zip(en_lines=moved)
         self.update()
         self.assertEqual(self.geo.calls, [3, 1])  # only the changed address
-        self.assertEqual(self.rows()["KA1PID"][0], cdb.latlon_grid(33.2, -97.2))
+        self.assertEqual(self.rows()["KA1PID"][0], cdb.latlon_grid(41.9, -87.7))
 
     def test_resumes_and_keeps_the_download_until_done(self):
         st = self.update(geocode_max=1)
@@ -277,20 +277,20 @@ class Builder(unittest.TestCase):
         st = self.update(geocoder=broken)
         self.assertEqual(st["pending"], 3)
         # ZIP-level grids until the geocoder is back
-        self.assertEqual(self.rows()["KA1PID"], (cdb.latlon_grid(33.229, -97.13), "zip", "TX"))
+        self.assertEqual(self.rows()["KA1PID"], (cdb.latlon_grid(42.44, -89.04), "zip", "IL"))
         self.update()  # and the next run finishes the job
         self.assertEqual(self.rows()["KA1PID"][1], "addr")
 
     def test_keyed_hashes(self):
-        a = ("1 Main St", "Town", "TX", "76201")
+        a = ("1 Main St", "Town", "IL", "61101")
         self.assertNotEqual(cdb.addr_hash(*a), cdb.addr_hash(*a, key="secret"))
         self.assertNotEqual(cdb.addr_hash(*a, key="secret"), cdb.addr_hash(*a, key="other"))
-        self.assertEqual(cdb.addr_hash(*a, key="k"), cdb.addr_hash(" 1  MAIN st", "town", "tx", "76201", key="k"))
+        self.assertEqual(cdb.addr_hash(*a, key="k"), cdb.addr_hash(" 1  MAIN st", "town", "il", "61101", key="k"))
 
     def test_geocoder_response_parsing(self):
-        text = ('"a1","100 SAMPLE RD, DENTON, TX, 76201","Match","Exact","100 SAMPLE RD, DENTON, TX, 76201",'
-                '"-97.042,33.105","123","L"\n"a2","X","No_Match"\n"a3","Y","Tie"\n')
-        self.assertEqual(cdb.parse_geocoder(text), {"a1": (33.105, -97.042), "a2": None, "a3": None})
+        text = ('"a1","100 SAMPLE RD, ROCKFORD, IL, 61101","Match","Exact","100 SAMPLE RD, ROCKFORD, IL, 61101",'
+                '"-89.040,42.440","123","L"\n"a2","X","No_Match"\n"a3","Y","Tie"\n')
+        self.assertEqual(cdb.parse_geocoder(text), {"a1": (42.44, -89.04), "a2": None, "a3": None})
 
 
 class Lookup(unittest.TestCase):
@@ -298,7 +298,7 @@ class Lookup(unittest.TestCase):
     def setUpClass(cls):
         cls.dir = tempfile.mkdtemp()
         cls.db = os.path.join(cls.dir, "callsigns.sqlite")
-        cdb.write_db(cls.db, [("KA1PID", "EM13lc", "addr", "TX"), ("W1AW", "FN31pr", "zip", "CT")],
+        cdb.write_db(cls.db, [("KA1PID", "EN52lk", "addr", "IL"), ("W1AW", "FN31pr", "zip", "CT")],
                      cdb.parse_cty(CTY), {"schema": 1})
         cls.book = rxd.CallBook(cls.db)
 
@@ -308,9 +308,9 @@ class Lookup(unittest.TestCase):
 
     def test_calls(self):
         b = self.book
-        self.assertEqual(b.lookup("KA1PID"), {"grid": "EM13lc", "prec": "addr", "region": "TX"})
+        self.assertEqual(b.lookup("KA1PID"), {"grid": "EN52lk", "prec": "addr", "region": "IL"})
         self.assertEqual(b.lookup("ka1pid/p")["prec"], "addr")
-        self.assertEqual(b.lookup("KA1PID/QRP")["grid"], "EM13lc")
+        self.assertEqual(b.lookup("KA1PID/QRP")["grid"], "EN52lk")
         self.assertEqual(b.lookup("W1AW")["prec"], "zip")
         # away from home: the country they're in, not the licence address
         self.assertEqual(b.lookup("VE3/KA1PID"), {"grid": b.lookup("VE3XYZ")["grid"], "prec": "country",
@@ -334,9 +334,9 @@ class Lookup(unittest.TestCase):
 
     def test_reopens_a_replaced_database(self):
         path = os.path.join(self.dir, "swap.sqlite")
-        cdb.write_db(path, [("N0CALL", "EM13", "zip", "TX")], [], {})
+        cdb.write_db(path, [("N0CALL", "EN52", "zip", "IL")], [], {})
         book = rxd.CallBook(path)
-        self.assertEqual(book.lookup("N0CALL")["grid"], "EM13")
+        self.assertEqual(book.lookup("N0CALL")["grid"], "EN52")
         cdb.write_db(path, [("N0CALL", "DM79lx", "addr", "CO")], [], {})
         self.assertEqual(book.lookup("N0CALL")["grid"], "DM79lx")
 
@@ -346,7 +346,7 @@ class Precedence(unittest.TestCase):
         self.dir = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.dir)
         self.db = os.path.join(self.dir, "callsigns.sqlite")
-        cdb.write_db(self.db, [("KA1PID", "EM13lc", "addr", "TX"), ("WD4UQ", "FM18aa", "addr", "VA"),
+        cdb.write_db(self.db, [("KA1PID", "EN52lk", "addr", "IL"), ("WD4UQ", "FM18aa", "addr", "VA"),
                                ("N0ZQX", "EN34aa", "zip", "MN")], cdb.parse_cty(CTY), {"schema": 1})
         self.directed = os.path.join(self.dir, "DIRECTED.TXT")
         with open(os.path.join(self.dir, "ALL.TXT"), "w") as fh:
@@ -365,7 +365,7 @@ class Precedence(unittest.TestCase):
                  "dbm": 37, "freq": 7040100}])
         m = rxd.StationMap(js8=rxd.Js8Feed(self.directed), wspr=lambda: W, grids_path=os.path.join(self.dir, "g.json"),
                            all_path=os.path.join(self.dir, "ALL.TXT"), clock=lambda: NOW,
-                           me=("KA1PID", "EM13lc"), book=rxd.CallBook(self.db))
+                           me=("KA1PID", "EN52lk"), book=rxd.CallBook(self.db))
         doc = m.snapshot()
         by = {s["call"]: s for s in doc["stations"]}
         self.assertEqual((by["WD4UQ"]["grid"], by["WD4UQ"]["src"]), ("EM88", "heard"))  # not FM18aa
@@ -379,12 +379,12 @@ class Precedence(unittest.TestCase):
         # with no database, only heard grids count
         m2 = rxd.StationMap(js8=rxd.Js8Feed(self.directed), wspr=None, grids_path=os.path.join(self.dir, "g.json"),
                             all_path=os.path.join(self.dir, "ALL.TXT"), clock=lambda: NOW,
-                            me=("KA1PID", "EM13lc"), book=rxd.CallBook(os.path.join(self.dir, "none")))
+                            me=("KA1PID", "EN52lk"), book=rxd.CallBook(os.path.join(self.dir, "none")))
         self.assertEqual([s["call"] for s in m2.snapshot()["stations"]], ["WD4UQ"])
 
 
 def good_db(path, n=3, **meta):
-    rows = [("KA1PID", "EM13lc", "addr", "TX"), ("W1AW", "FN31pr", "addr", "CT"),
+    rows = [("KA1PID", "EN52lk", "addr", "IL"), ("W1AW", "FN31pr", "addr", "CT"),
             ("N0BOX", "EM29qn", "zip", "KS")][:n]
     cdb.write_db(path, rows, cdb.parse_cty(CTY), dict({"schema": 1, "calls": len(rows)}, **meta))
 
@@ -410,24 +410,24 @@ class Validate(unittest.TestCase):
         con.commit()
         con.close()
         self.assertIn("schema", self.check()[0])
-        for row in (("KA1PID", "EM13lc", "addr", "100 Sample Rd"), ("Pat Example", "EM13lc", "addr", "TX"),
-                    ("KA1PID", "somewhere", "addr", "TX"), ("KA1PID", "EM13lc", "guess", "TX")):
+        for row in (("KA1PID", "EN52lk", "addr", "100 Sample Rd"), ("Pat Example", "EN52lk", "addr", "IL"),
+                    ("KA1PID", "somewhere", "addr", "IL"), ("KA1PID", "EN52lk", "guess", "IL")):
             cdb.write_db(self.db, [row, ("W1AW", "FN31pr", "addr", "CT")], cdb.parse_cty(CTY), {"schema": 1})
             self.assertTrue(any("bad calls row" in p for p in self.check()), row)
-        cdb.write_db(self.db, [("KA1PID", "EM13lc", "addr", "TX")], cdb.parse_cty(CTY), {"schema": 1, "frn": "x"})
+        cdb.write_db(self.db, [("KA1PID", "EN52lk", "addr", "IL")], cdb.parse_cty(CTY), {"schema": 1, "frn": "x"})
         self.assertTrue(any("meta key" in p for p in self.check()))
         good_db(self.db)
         self.assertTrue(any("calls, outside" in p for p in self.check(min_calls=10)))
         self.assertTrue(any("prefixes" in p for p in self.check(min_prefixes=1000)))
         # spot checks
-        cdb.write_db(self.db, [("KA1PID", "FN42aa", "addr", "MA"), ("W1AW", "FN31pr", "addr", "CT")],
+        cdb.write_db(self.db, [("KA1PID", "EN52lk", "addr", "IL"), ("W1AW", "FN42aa", "addr", "CT")],
                      cdb.parse_cty(CTY), {"schema": 1})
-        self.assertTrue(any("KA1PID is at FN42aa" in p for p in self.check()))
+        self.assertTrue(any("W1AW is at FN42aa" in p for p in self.check()))
         # too few geocoded, unless geocoding is still under way
-        cdb.write_db(self.db, [("KA1PID", "EM13lc", "zip", "TX"), ("W1AW", "FN31pr", "zip", "CT")],
+        cdb.write_db(self.db, [("KA1PID", "EN52lk", "zip", "IL"), ("W1AW", "FN31pr", "zip", "CT")],
                      cdb.parse_cty(CTY), {"schema": 1})
         self.assertTrue(any("geocoded" in p for p in self.check()))
-        cdb.write_db(self.db, [("KA1PID", "EM13lc", "zip", "TX"), ("W1AW", "FN31pr", "zip", "CT")],
+        cdb.write_db(self.db, [("KA1PID", "EN52lk", "zip", "IL"), ("W1AW", "FN31pr", "zip", "CT")],
                      cdb.parse_cty(CTY), {"schema": 1, "geocode_pending": 5})
         self.assertEqual(self.check(), [])
         with open(self.db, "wb") as fh:
@@ -477,7 +477,7 @@ class Install(unittest.TestCase):
 
     def test_installs_then_skips_when_unchanged(self):
         self.assertEqual(self.install(), "installed")
-        self.assertEqual(rxd.CallBook(self.db).lookup("KA1PID")["grid"], "EM13lc")
+        self.assertEqual(rxd.CallBook(self.db).lookup("KA1PID")["grid"], "EN52lk")
         self.requests.clear()
         self.assertEqual(self.install(), "unchanged")
         # one conditional request for the checksum, answered 304; no database download

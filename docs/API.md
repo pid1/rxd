@@ -95,7 +95,7 @@ wrong with the file, or with the saved GPS grid). Where `grid` comes from:
 |---|---|---|
 | `grid` | string or null | The grid in use: WSPRnet's `rgrid`, the map's centre and distances, and the band plan's sun |
 | `grid_source` | string or null | `gps` (a live fix rxd accepted), `gps-saved` (the last one, saved), `station` (the station file's `grid`) or null (none) |
-| `grid_reason` | string | One sentence for the clients to show: "EM13lc from GPS (10 satellites)", "EM13lc from station config: GPS has no fix". When a GPS grid differs from the station file's it ends "; station config says EM12" |
+| `grid_reason` | string | One sentence for the clients to show: "EN52lk from GPS (10 satellites)", "EN52lk from station config: GPS has no fix". When a GPS grid differs from the station file's it ends "; station config says EM12" |
 | `default_grid` | string or null | The station file's `grid` (`$RXD_GRID` wins) |
 | `saved_grid` | string or null | The last GPS grid rxd accepted, kept across restarts |
 | `gps` | object | The GPS, below |

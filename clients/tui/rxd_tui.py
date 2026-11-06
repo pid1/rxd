@@ -649,7 +649,7 @@ def band_plan_words(bp, g):
 
 def station_words(st, g):
     """(text, role) for the station line: its grid and where it comes from,
-    "Station EM13lc from GPS (10 satellites)", or None from an older rxd."""
+    "Station EN52lk from GPS (10 satellites)", or None from an older rxd."""
     s = (st or {}).get("station") or {}
     reason = s.get("grid_reason")
     if not reason:

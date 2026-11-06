@@ -92,7 +92,7 @@ def geodetic_to_ecef(lat, lon, h=0.0):
 
 
 def maidenhead(lat, lon):
-    """(lat, lon) -> the 6-character grid, EM13lc style."""
+    """(lat, lon) -> the 6-character grid, EN52lk style."""
     lon = min(max(lon + 180.0, 0.0), 360.0 - 1e-9)
     lat = min(max(lat + 90.0, 0.0), 180.0 - 1e-9)
     return (chr(65 + int(lon // 20)) + chr(65 + int(lat // 10)) +

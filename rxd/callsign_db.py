@@ -74,7 +74,7 @@ def log(msg):
 
 
 def latlon_grid(lat, lon, n=6):
-    """(lat, lon) -> Maidenhead locator of 4 or 6 characters, e.g. EM13lc."""
+    """(lat, lon) -> Maidenhead locator of 4 or 6 characters, e.g. EN52lk."""
     lon = min(max(lon + 180.0, 0.0), 359.999999)
     lat = min(max(lat + 90.0, 0.0), 179.999999)
     g = chr(65 + int(lon // 20)) + chr(65 + int(lat // 10))
@@ -512,7 +512,7 @@ STATE_RE = re.compile(r"^[A-Z]{2}$")
 PREFIX_RE = re.compile(r"^=?[A-Z0-9/]{1,20}$")
 META_KEYS = re.compile(r"^(schema|calls|calls_addr|calls_zip|calls_unplaced|prefixes|built|"
                        r"geocode_pending|(fcc|zcta|cty)_(etag|modified))$")
-SPOTS = {"KA1PID": "EM13", "W1AW": "FN31"}
+SPOTS = {"W1AW": "FN31"}  # ARRL HQ: public, and not moving
 
 
 def validate(path, previous=None, min_calls=500000, max_calls=3000000, min_prefixes=300,

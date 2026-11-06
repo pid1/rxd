@@ -76,14 +76,14 @@ def feed(dec, audio, t_start, dial=7038600.0, block=4800):
 class Parsing(unittest.TestCase):
     def test_spot_lines(self):
         rows = [rxd.SPOT_LINE.match(r) for r in SPOTS.splitlines()]
-        spots = [rxd.spot_from(m[1], m[2], m[4], m[5], m[6], m[7], m[8], "EM13lc") for m in rows]
+        spots = [rxd.spot_from(m[1], m[2], m[4], m[5], m[6], m[7], m[8], "EN52lk") for m in rows]
         a, b, c = spots
         self.assertEqual((a["call"], a["grid"], a["dbm"], a["snr"], a["freq"], a["time"]),
                          ("KA1PID", "EM12", 23, -10, 7040120, "2026-11-06T12:20:00Z"))
         self.assertEqual((b["call"], b["grid"], b["dbm"], b["drift"]), ("PJ4/K1ABC", None, 37, -1))
         self.assertEqual((c["call"], c["grid"], c["dbm"]), ("PJ4/K1ABC", "FK52ud", 33))
         self.assertIsNone(b["km"])
-        self.assertTrue(0 < a["km"] < 200)  # EM12 is next door to EM13
+        self.assertEqual(a["km"], rxd.grid_km("EN52lk", "EM12"))  # from the station's grid
 
     def test_all_wspr_line(self):
         row = "261106 1048 -22  0.02  10.1402200  KA1PID EM12 23          0  0.42  1  1    0  0   0     1   737"
@@ -92,12 +92,12 @@ class Parsing(unittest.TestCase):
         self.assertEqual((sp["call"], sp["snr"], sp["freq"]), ("KA1PID", -22, 10140220))
 
     def test_grid(self):
-        lat, lon = rxd.grid_latlon("EM13lc")
-        self.assertAlmostEqual(lat, 33.10, places=1)
-        self.assertAlmostEqual(lon, -97.04, places=1)
+        lat, lon = rxd.grid_latlon("EN52lk")
+        self.assertAlmostEqual(lat, 42.44, places=1)
+        self.assertAlmostEqual(lon, -89.04, places=1)
         self.assertIsNone(rxd.grid_latlon("ZZ99"))
-        # FN42 (Boston) to EM13 (Dallas): about 2500 km.
-        self.assertTrue(2300 < rxd.grid_km("FN42", "EM13") < 2700)
+        # FN42 (Boston) to EN52 (northern Illinois): about 1470 km.
+        self.assertTrue(1400 < rxd.grid_km("FN42", "EN52") < 1550)
 
     def test_bad_messages(self):
         for msg in ("", "KA1PID", "KA1PID EM12", "<...> EM12 23 extra"):
@@ -161,7 +161,7 @@ class Decoding(unittest.TestCase):
             fh.write(FAKE_WSPRD)
         os.chmod(self.wsprd, stat.S_IRWXU)
         self.posts = []
-        self.net = rxd.WsprNet("KA1PID", "EM13lc", post=self.fake_post)
+        self.net = rxd.WsprNet("KA1PID", "EN52lk", post=self.fake_post)
         self.reply = (200, "1 spot(s) added")
         self.dec = rxd.WsprDecoder(FakeSettings(), datadir=self.dir, wsprd=self.wsprd,
                                    reporter=self.net, clock=lambda: SLOT)
@@ -197,7 +197,7 @@ class Decoding(unittest.TestCase):
         self.assertEqual(self.posts[0], {
             "function": "wspr", "date": "261106", "time": "1220", "sig": "-10", "dt": "0.1",
             "drift": "0", "tqrg": "7.040120", "tcall": "KA1PID", "tgrid": "EM12", "dbm": "23",
-            "version": rxd.RXD_VERSION, "rcall": "KA1PID", "rgrid": "EM13lc",
+            "version": rxd.RXD_VERSION, "rcall": "KA1PID", "rgrid": "EN52lk",
             "rqrg": "7.038600", "mode": "2"})
         self.assertEqual(self.posts[1]["tgrid"], "")
         self.assertEqual(self.net.status()["sent"], 3)
@@ -270,7 +270,7 @@ class Api(unittest.TestCase):
         cls.settings = rxd.Settings(dict(WSPR), "wspr")
         cls.rx = rxd.Receiver(cls.settings, rxd.SynthSource(7038600 + 125e6 + 1500), rxd.NullSink())
         cls.rx.wspr = rxd.WsprDecoder(cls.settings, datadir=cls.dir, wsprd="/nonexistent",
-                                      reporter=rxd.WsprNet("KA1PID", "EM13lc", post=lambda f: (200, "")))
+                                      reporter=rxd.WsprNet("KA1PID", "EN52lk", post=lambda f: (200, "")))
         cls.rx.start()
         cls.http = rxd.ThreadingHTTPServer(("127.0.0.1", 0), rxd.Api)
         cls.http.rx = cls.rx

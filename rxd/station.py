@@ -8,7 +8,7 @@ the default audio sink. See docs/station.md.
 
     {
       "call": "KA1PID",
-      "grid": "EM13lc",
+      "grid": "EN52lk",
       "sdr": {"serial": "57818712"},
       "upconverter": {"name": "Ham It Up", "hz": 125000000,
                       "below_hz": 30000000, "switch": true},
@@ -82,7 +82,7 @@ class Station:
         if v is None:
             return None
         if not isinstance(v, str) or not GRID.match(v.strip()):
-            self.problems.append("grid must be a Maidenhead locator, like EM13lc")
+            self.problems.append("grid must be a Maidenhead locator, like EN52lk")
             return None
         g = v.strip()
         return g[:4].upper() + g[4:].lower()
