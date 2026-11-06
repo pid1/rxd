@@ -85,7 +85,7 @@ class Installer(Base):
         out = self.install("--no-data")
         name = os.readlink(self.lib("current"))
         self.assertRegex(name, r"^%s-[0-9a-f]{12}$" % rxd.VERSION.replace(".", r"\."))
-        for f in ("rxd.py", "js8.py", "callsign_db.py", "radio.py", "station.py", "rxd_tui.py",
+        for f in ("rxd.py", "js8.py", "callsign_db.py", "radio.py", "station.py", "location.py", "rxd_tui.py",
                   "web/index.html"):
             self.assertTrue(os.path.isfile(self.lib(name, f)), f)
         self.assertTrue(os.access(self.lib(name, "rxd.py"), os.X_OK))

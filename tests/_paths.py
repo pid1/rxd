@@ -25,3 +25,7 @@ STATION = os.path.join(TESTS, "fixtures", "station.json")
 os.environ["RXD_STATION"] = STATION
 for _k in ("RXD_CALL", "RXD_GRID"):
     os.environ.pop(_k, None)
+# No GPS and no saved GPS grid: tests never reach the machine's gpsd or read
+# its ~/.local/state/rxd/location.json. A test that wants them sets its own.
+os.environ["RXD_GPSD"] = "off"
+os.environ["RXD_LOCATION"] = os.path.join(TESTS, "fixtures", "no-location.json")
