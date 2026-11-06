@@ -168,6 +168,15 @@ body[data-view=digital] .jlist{max-height:none;overflow:visible}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
 .astate{margin:8px 0 0;font-weight:700;font-size:19px}
 .note{font-size:14px;color:var(--dim);margin:8px 0 0}
+/* HD Radio on a WFM station: state in words and a symbol, now playing, programs */
+.hdbox{border-top:1px solid var(--line);margin-top:10px;padding-top:10px;display:grid;gap:4px}
+.hdst{font-size:22px;font-weight:750;overflow-wrap:anywhere}
+.hdnow{font-size:19px;font-weight:600;overflow-wrap:anywhere}
+.hdwhy{font-size:16px;color:var(--dim);margin:0;overflow-wrap:anywhere}
+.hdprog{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin:4px 0 0}
+.hdprog .btn{font-size:18px;line-height:1.1;padding:2px 6px}
+.hdprog .btn small{display:block;font-size:14px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hdoff{justify-self:start;font-size:17px;min-height:56px;padding:4px 14px}
 .plist{display:grid;gap:8px;margin-top:6px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
 .prof{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:1px;text-align:left;width:100%;min-height:76px;padding:6px 12px}
 .prof.cur{border:3px solid var(--accent);background:var(--panel);border-radius:10px;font-weight:700}
@@ -278,6 +287,13 @@ body[data-view=listen] #gWhy{display:none}
     <div class="mbar" role="meter" aria-label="Signal level" aria-valuemin="-100" aria-valuemax="0" id="mbar2"><i id="mfill2"></i></div>
     <div id="mnum2" class="mnum">— dBFS</div>
     <div class="mscale"><span>−100</span><span>−75</span><span>−50</span><span>−25</span><span>0</span></div>
+  </div>
+  <div id="hd" class="hdbox" hidden>
+    <div id="hdSt" class="hdst" role="status">—</div>
+    <div id="hdNow" class="hdnow" hidden></div>
+    <p id="hdWhy" class="hdwhy"></p>
+    <div id="hdProg" class="hdprog" role="group" aria-label="HD Radio program" hidden></div>
+    <button type="button" class="btn hdoff" id="hdOn" aria-pressed="true" hidden>HD Radio: On</button>
   </div>
 </section>
 <div class="top" data-v="listen manual" data-live>
@@ -1354,6 +1370,7 @@ sqEl.oninput = () => { const v = +sqEl.value; store("squelch", String(v)); setTe
 track(sqEl, "squelch");
 function renderQual() {
   if (!st || view !== "listen") return;
+  renderHd();
   const p = activeProf();
   setText($("nName"), p ? pdesc(p) : st.profile || "—");
   setText($("nFreq"), fmtMHz(st.freq));
@@ -1384,6 +1401,68 @@ function renderQual() {
     else setText($("sqS"), "■ Closed (quiet)", "val dimc");
   }
 }
+
+// ---------------------------------------------------------------- Listen view: HD Radio
+// The state in words and a symbol (never colour alone), what's playing, the
+// programs when there are subchannels, and the profile's HD switch.
+function hdWords(h) {
+  const prog = "HD" + ((h.program || 0) + 1);
+  if (h.state === "off") return [h.reason === "HD Radio: nrsc5 not installed" ? "○ Analog · HD Radio: nrsc5 not installed"
+    : "○ Analog · HD off", "dimc"];
+  if ((h.program || 0) > 0) {
+    if (h.state === "digital") return ["◆ " + prog + " · digital", "ok"];
+    return ["■ " + prog + " · no HD now, silent", "warn"];
+  }
+  if (h.state === "digital") return ["◆ HD1 · digital", "ok"];
+  if (h.state === "acquiring") return ["◇ Analog · HD acquiring", "warn"];
+  if (h.state === "analog fallback") return ["◇ Analog · HD lost, coming back", "warn"];
+  return ["○ Analog · no HD", "dimc"];
+}
+function renderHd() {
+  const h = st && st.hd, box = $("hd");
+  box.hidden = !h || st.mode !== "WFM";
+  if (box.hidden) return;
+  const [w, cls] = hdWords(h);
+  setText($("hdSt"), w, "hdst " + cls);
+  const off = h.state === "off";
+  // what's playing: title and artist, else the station's name; only once HD has said
+  const now = [h.title, h.artist].filter(Boolean).join(" — ") || h.station || "";
+  $("hdNow").hidden = !now || off;
+  setText($("hdNow"), now ? (h.station && now !== h.station ? "♪ " + now + " · " + h.station : "♪ " + now) : "");
+  setText($("hdWhy"), h.reason || "");
+  // programs: only when the station has more than one
+  const progs = (h.programs || []).slice();
+  if ((h.program || 0) > 0 && !progs.some(p => p.program === h.program))
+    progs.push({program: h.program, name: "HD" + (h.program + 1), type: null});
+  const pick = $("hdProg");
+  pick.hidden = off || progs.length < 2;
+  const key = progs.map(p => p.program + ":" + (p.type || "")).join(",");
+  if (pick.dataset.key !== key) {
+    pick.dataset.key = key; pick.innerHTML = "";
+    for (const p of progs) {
+      const b = document.createElement("button");
+      b.type = "button"; b.className = "btn"; b.dataset.p = p.program;
+      b.append(p.name);
+      const sm = document.createElement("small");
+      sm.textContent = p.program === 0 ? "Main" + (p.type ? " · " + p.type : "") : (p.type || "Digital only");
+      b.appendChild(sm);
+      b.onclick = () => { tune({hd_program: p.program}, 0); if (st && st.hd) st.hd.program = p.program; renderHd(); };
+      pick.appendChild(b);
+    }
+  }
+  for (const b of pick.children) b.setAttribute("aria-pressed", String(+b.dataset.p === (h.program || 0)));
+  // the profile's switch: shown whenever HD could run here
+  const can = h.reason !== "HD Radio: nrsc5 not installed" && h.station_enabled !== false && "enabled" in h;
+  const on = $("hdOn");
+  on.hidden = !can;
+  setText(on, h.enabled ? "HD Radio: On" : "HD Radio: Off");
+  on.setAttribute("aria-pressed", String(!!h.enabled));
+}
+$("hdOn").onclick = () => {
+  if (!st || !st.hd) return;
+  const v = !st.hd.enabled;
+  tune({hd_enabled: v}, 0); st.hd.enabled = v; renderHd();
+};
 
 // ---------------------------------------------------------------- uConsole speaker mute
 function muted() { return load("spkprev") !== null; }
