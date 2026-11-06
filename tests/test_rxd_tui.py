@@ -1450,6 +1450,58 @@ class Drawing(unittest.TestCase):
         self.assertNotIn("Squelch", text)
         self.assertIn("No audio player", text)                    # audio=None
 
+    def hd_app(self, **hd):
+        st = state_for("fm-105.3")
+        st["hd"] = dict({"state": "digital", "reason": "Playing HD Radio.", "program": 0,
+                         "programs": [{"program": 0, "name": "HD1", "type": None},
+                                      {"program": 1, "name": "HD2", "type": "Jazz"},
+                                      {"program": 2, "name": "HD3", "type": "News"}],
+                         "station": "Demo FM", "title": "Demo Song", "artist": "Demo Band",
+                         "enabled": True}, **hd)
+        return t.App(FakePoller(st, spectrum_for(st, 1)), U)
+
+    def test_listen_wfm_hd(self):
+        app = self.hd_app()
+        text = frame(app).text()
+        lines = text.split("\n")
+        self.assertIn("HD ◆ HD1 · digital", text)
+        self.assertIn("♪ Demo Song — Demo Band · Demo FM", text)
+        self.assertIn("[HD1]  HD2 Jazz   HD3 News", text)
+        self.assertIn("h H HD", lines[-1])
+        self.assertTrue(all(len(x) <= 80 for x in lines))
+        # h steps through the programs, round again; H turns HD off
+        app.key(ord("h"))
+        self.assertEqual(app.p.sent[-1], {"hd_program": 1})
+        app.p.status["hd"]["program"] = 2
+        app.key(ord("h"))
+        self.assertEqual(app.p.sent[-1], {"hd_program": 0})
+        app.key(ord("H"))
+        self.assertEqual(app.p.sent[-1], {"hd_enabled": False})
+
+    def test_listen_wfm_hd_states_in_words(self):
+        for hd, want in ((dict(state="acquiring", title=None, artist=None), "◇ Analog · HD acquiring"),
+                         (dict(state="analog fallback"), "◇ Analog · HD lost, coming back"),
+                         (dict(state="no signal", programs=[], station=None, title=None,
+                               artist=None), "○ Analog · no HD"),
+                         (dict(state="acquiring", program=1), "■ HD2 · no HD now, silent"),
+                         (dict(state="digital", program=2), "◆ HD3 · digital"),
+                         (dict(state="off", reason="HD Radio: nrsc5 not installed", programs=[]),
+                          "○ Analog · HD Radio: nrsc5 not installed")):
+            text = frame(self.hd_app(**hd)).text()
+            self.assertIn(want, text, hd)
+        # no symbols but words in ASCII
+        A = t.Glyphs(True)
+        self.assertEqual(t.hd_words(dict(mode="WFM", hd={"state": "digital", "program": 0}), A),
+                         ("> HD1 / digital", "ok"))
+        # not WFM: nothing at all
+        self.assertIsNone(t.hd_words(dict(mode="FM", hd={"state": "off"}), U))
+        st = state_for("fm-105.3")
+        st.pop("hd", None)
+        text = frame(t.App(FakePoller(st, spectrum_for(st, 1)), U)).text()   # an rxd before HD
+        self.assertNotIn("Analog ·", text)
+        self.assertNotIn("HD1", text)
+        self.assertIsNone(t.next_hd_program(dict(mode="WFM", hd={"state": "digital", "programs": []})))
+
     def test_manual_80x24_has_everything(self):
         app = app_on("40m", audio=FakeAudio())
         text = frame(app).text()

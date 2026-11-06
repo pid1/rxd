@@ -339,6 +339,71 @@ def squelch_words(st, g):
     return "%s  %s Open (signal)" % (lvl, g.rx), "ok"
 
 
+# ---- HD Radio, on a WFM station (status "hd", docs/API.md)
+
+def hd_of(st):
+    """The status's hd block on a WFM station, or None."""
+    h = (st or {}).get("hd")
+    return h if isinstance(h, dict) and (st or {}).get("mode") == "WFM" else None
+
+
+def hd_words(st, g):
+    """(text, role) for HD Radio: the state in words and a symbol, never colour alone."""
+    h = hd_of(st)
+    if h is None:
+        return None
+    prog = "HD%d" % ((h.get("program") or 0) + 1)
+    state = h.get("state")
+    if state == "off":
+        if h.get("reason") == "HD Radio: nrsc5 not installed":
+            return g.text("○ Analog · HD Radio: nrsc5 not installed"), "dim"
+        return g.text("○ Analog · HD off"), "dim"
+    if (h.get("program") or 0) > 0:
+        if state == "digital":
+            return g.text("◆ %s · digital" % prog), "ok"
+        return g.text("■ %s · no HD now, silent" % prog), "warn"
+    return {"digital": (g.text("◆ HD1 · digital"), "ok"),
+            "acquiring": (g.text("◇ Analog · HD acquiring"), "warn"),
+            "analog fallback": (g.text("◇ Analog · HD lost, coming back"), "warn")}.get(
+                state, (g.text("○ Analog · no HD"), "dim"))
+
+
+def hd_now(st, g):
+    """What HD says is playing: "Title — Artist · Station", or None."""
+    h = hd_of(st)
+    if h is None or h.get("state") == "off":
+        return None
+    now = " — ".join(x for x in (h.get("title"), h.get("artist")) if x) or h.get("station")
+    if not now:
+        return None
+    if h.get("station") and now != h["station"]:
+        now += " · " + h["station"]
+    return g.text("♪ " + now)
+
+
+def hd_programs(st):
+    """[(program, label)] when the station has subchannels to pick from, else []."""
+    h = hd_of(st)
+    if h is None or h.get("state") == "off":
+        return []
+    progs = [(p["program"], p["name"] + (" " + p["type"] if p.get("type") else ""))
+             for p in h.get("programs") or [] if isinstance(p.get("program"), int)]
+    cur = h.get("program") or 0
+    if cur and cur not in [n for n, _ in progs]:
+        progs.append((cur, "HD%d" % (cur + 1)))
+    return sorted(progs) if len(progs) > 1 else []
+
+
+def next_hd_program(st):
+    """Listen's h: the next program after the current one, round again; None if none."""
+    progs = [n for n, _ in hd_programs(st)]
+    if not progs:
+        return None
+    cur = (hd_of(st) or {}).get("program") or 0
+    later = [n for n in progs if n > cur]
+    return later[0] if later else progs[0]
+
+
 # ---- gain: auto RF gain and audio clean-up
 
 # Manual's keys for each stage of rxd's audio clean-up: (key, field, words)
@@ -857,7 +922,7 @@ class Glyphs:
             return s
         for a, b in (("·", "/"), ("…", "..."), ("●", "*"), ("▲", "!"), ("✕", "x"),
                      ("■", "#"), ("◆", ">"), ("▸", ">"), ("↑↓", "Up/Dn"), ("—", "-"),
-                     ("✓", "OK")):
+                     ("✓", "OK"), ("◇", "<>"), ("○", "o"), ("♪", "~")):
             s = s.replace(a, b)
         return s
 
@@ -1060,6 +1125,8 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
                  ("A", "auto audio"), ("b", "bandwidth")]
         if mode == "FM":
             items.append(("s , .", "squelch"))
+        if mode == "WFM":
+            items.append(("h H", "HD"))
         items += [("l", "listen")] + ([("[ ]", "volume")] if listening else []) + \
             [("- +", "speaker"), ("M", "mute"), ("1 2 3", "view")]
     else:
@@ -2367,6 +2434,8 @@ class App:
                     self.send(squelch=send)
                 if msg:
                     self.say(msg)
+        elif ch in (ord("h"), ord("H")):
+            self.hd_key(ch, st)
         elif ch in (ord("-"), ord("_"), ord("+"), ord("=")):
             self.speaker_key(ch, st)
         elif ch == ord("M"):
@@ -2375,6 +2444,23 @@ class App:
             self.local_volume_key(ch)
         else:
             self.other_key(ch)
+
+    def hd_key(self, ch, st):
+        """Listen's h: the next HD program; H: HD Radio on or off for this station."""
+        h = hd_of(st)
+        if h is None:
+            return self.say("HD Radio is for FM broadcast (WFM) stations")
+        if ch == ord("H"):
+            if h.get("reason") == "HD Radio: nrsc5 not installed":
+                return self.say("HD Radio: nrsc5 not installed", "err")
+            on = not h.get("enabled", True)
+            self.send(hd_enabled=on)
+            return self.say("HD Radio on for this station" if on else "HD Radio off: analog only")
+        n = next_hd_program(st)
+        if n is None:
+            return self.say(self.g.text(h.get("reason") or "No HD programs to pick from"))
+        self.send(hd_program=n)
+        self.say("HD%d%s" % (n + 1, "" if n == 0 else ": digital only, silent without HD"))
 
     def manual_key(self, ch, s):
         st = s["status"]
@@ -2855,6 +2941,31 @@ class App:
                 scr.put(y, 1, "Audio", "label")
                 scr.put(y, 7, clip(audio_words(st), w - 8, g), "value")
                 y += 1
+            hdw = hd_words(st, g)
+            if hdw is not None:
+                scr.put(y, 1, "HD", "label")
+                scr.put(y, 4, clip(hdw[0], w - 5, g), "dim" if stale else hdw[1])
+                y += 1
+                now = hd_now(st, g)
+                why = (hd_of(st) or {}).get("reason")
+                if now:
+                    scr.put(y, 4, clip(now, w - 5, g), "value")
+                    y += 1
+                elif why and h >= 24:
+                    scr.put(y, 4, clip(g.text(why), w - 5, g), "dim")
+                    y += 1
+                progs = hd_programs(st)
+                if progs:
+                    cur = (hd_of(st) or {}).get("program") or 0
+                    x = 4
+                    scr.put(y, 1, "h", "label")
+                    for n, label in progs:
+                        text = ("[%s]" if n == cur else " %s ") % label
+                        if x + len(text) > w - 1:
+                            break
+                        scr.put(y, x, text, "tabon" if n == cur else "value")
+                        x += len(text) + 1
+                    y += 1
             y = self.draw_audio_row(scr, y)
             y += 1
         # the station picker
@@ -3048,6 +3159,8 @@ class App:
                 "b         bandwidth: Narrow, Normal, Wide",
                 "s         squelch: off, auto, at a level (NFM only)",
                 ", .       squelch level down / up, 2 dB a press",
+                "h         HD Radio: the next program (HD1, HD2 ...)",
+                "H         HD Radio on / off for this station (WFM)",
                 "- +       uConsole speaker volume down / up",
                 "M         mute the uConsole speaker / restore it",
                 "l         play the audio on this machine / stop",
