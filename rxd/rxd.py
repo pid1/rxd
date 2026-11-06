@@ -17,6 +17,9 @@ PipeWire/PulseAudio sink. Two control ports, both on 127.0.0.1 by default:
         read and set the frequency and mode
   8073  HTTP JSON: GET /api/status, POST /api/tune {"freq": 7078000,
         "mode": "USB", "bandwidth": 2800, "gain_db": 3.7, "volume": 0.2}
+        ("gain_db" turns automatic gain off; "gain_auto": true turns it on;
+        "audio_auto", "audio_nr", "audio_filter", "audio_norm", "audio_limit"
+        and "audio_squelch" switch the listening clean-up)
 
 A WSPR profile ("decoder": "wspr") also decodes WSPR with wsprd and reports
 the spots to WSPRnet; GET /api/wspr lists them.
@@ -131,6 +134,10 @@ class Settings:
             # A saved gain_db wins; otherwise the index (SDR++'s convention)
             # is looked up in the dongle's gain table once it is open.
             self.gain_db = float(rtl["gain_db"]) if rtl.get("gain_db") is not None else None
+            # Automatic RF gain (AutoGain), on unless the profile says false;
+            # gain_db is then only where it starts.
+            self.gain_auto = rtl.get("gain_auto", True) is not False
+            self.audio = audio_settings(p.get("audio"))
             self.ppm = int(rtl.get("ppm", 0))
             self.bias_t = bool(rtl.get("biasT", False))
             self.sink = SINKS.get(p.get("sink"), p.get("sink"))
@@ -151,7 +158,8 @@ class Settings:
                         upconvert_below=self.upconvert_below,
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
                         volume=self.volume, gain_db=self.gain_db, squelch=self.squelch,
-                        wspr_report=self.wspr_report, version=self.version)
+                        wspr_report=self.wspr_report, gain_auto=self.gain_auto,
+                        audio=dict(self.audio), version=self.version)
 
     def upconverter(self):
         """The offset in effect for the current dial (call with the lock held)."""
@@ -162,8 +170,11 @@ class Settings:
         return 0.0
 
     def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
-               volume=None, squelch=Ellipsis, wspr_report=None):
+               volume=None, squelch=Ellipsis, wspr_report=None, gain_auto=None, **audio):
         with self.lock:
+            if gain_auto is not None and not isinstance(gain_auto, bool):
+                raise ValueError("gain_auto must be true or false")
+            new_audio = audio_update(self.audio, audio)
             if wspr_report is not None:
                 if not isinstance(wspr_report, bool):
                     raise ValueError("wspr_report must be true or false")
@@ -184,6 +195,11 @@ class Settings:
                 self.bandwidth = float(bandwidth)
             if gain_db is not None:
                 self.gain_db = float(gain_db)
+                if gain_auto is None:  # a gain set by hand turns the automatic off
+                    self.gain_auto = False
+            if gain_auto is not None:
+                self.gain_auto = gain_auto
+            self.audio = new_audio
             if volume is not None:
                 volume = float(volume)
                 if not 0 <= volume <= 4:
@@ -196,6 +212,13 @@ class Settings:
                         raise ValueError("squelch must be in dBFS, -150 to 0, or null")
                 self.squelch = squelch
             self.version += 1
+
+    def set_auto_gain(self, db):
+        """AutoGain's choice, kept unless gain_db was set by hand meanwhile."""
+        with self.lock:
+            if self.gain_auto:
+                self.gain_db = float(db)
+            return self.gain_auto
 
 
 # ------------------------------------------------------------------ sources
@@ -591,6 +614,431 @@ class Chain:
         return audio.astype(np.float32)
 
 
+# ------------------------------------------------------- automatic RF gain
+
+def db10(p):
+    return float(10 * np.log10(p + 1e-12))
+
+
+class AutoGain:
+    """Picks the dongle's gain step from the raw IQ, a block at a time.
+
+    The aim is the best signal-to-noise without overload. With an 8-bit ADC
+    that means: enough gain that the band's noise floor (from the spectrum
+    rxd already makes) sits well above the ADC's own quantisation noise, so
+    the antenna sets the floor and not the ADC, and no more, since more gain
+    only spends headroom. Overload shows as clipped samples (bytes 0 or 255)
+    or an RMS near full scale; on the uConsole's R820T a crowded band
+    compresses (the RMS stops rising with gain) before much clips.
+
+    Measured 2026-11-06 on the box, 820 kHz AM through the Ham It Up: the
+    carrier's SNR was best (47 dB) at 3.7-7.7 dB of gain, where the floor is
+    7-11 dB over the ADC's, and fell to 34 dB at 30+ dB as the band compressed.
+
+    After a start or a retune it steps once a second until it settles, then
+    at most once every SLOW seconds. Under a WSPR or JS8 profile it then moves
+    only in the gap between slots, so a decode never sees a step, unless the
+    signal overloads or is far too low.
+    """
+
+    ADC_FLOOR_DB = -50.0   # 8-bit quantisation noise on make_spectrum's scale
+    MARGIN_LO, MARGIN_HI, MARGIN_FAR = 6.0, 13.0, 2.0  # floor over the ADC's, dB
+    RMS_HI, RMS_UP, RMS_URGENT = -10.0, -15.0, -5.0    # dBFS
+    CLIP_HI, CLIP_UP, CLIP_URGENT = 1e-4, 1e-6, 1e-3   # fraction of I/Q values
+    URGENT_DROP = 6.0      # dB: an overload steps down at least this far
+    FAST, SLOW = 1.0, 5.0  # seconds between steps while settling / after
+    SETTLE_FOR = 30.0      # seconds of fast steps at most
+    # Decoder -> (slot period, gap start, gap end), seconds into the period.
+    # WSPR records 114 s from the even minute; a JS8 Normal frame ends 13.1 s
+    # into its 15 s slot.
+    SLOTS = {"wspr": (120.0, 114.5, 119.5), "js8": (15.0, 13.3, 14.8)}
+
+    def __init__(self, gains, decoder=None):
+        self.gains = sorted(set(float(g) for g in gains))
+        self.decoder = decoder
+        self.key = None          # what it settled for: (mode, tuner MHz)
+        self.spec_seq = None     # the last spectrum it took a floor from
+        self.steps = 0
+        self.state = "settling"
+        self.reason = None
+        self.last = {}
+        self.cpu = 0.0
+        self.reset(0.0)
+
+    def reset(self, now):
+        """Start settling again (a start, a retune or auto turned back on)."""
+        self.t_dec = self.t_short = self.t_start = now
+        self.acc = [0, 0, 0.0, []]   # clipped values, samples, sum |x|^2, floors
+        self.short = [0, 0, 0.0]
+        self.skip = 0
+        self.settling = True
+        self.holds = 0
+        self.state = "settling"
+
+    @staticmethod
+    def measure(x):
+        """(clipped I/Q values, samples, sum of |x|^2) for a block from the dongle."""
+        v = x.view(np.float32)
+        # cu8 bytes 0 and 255 are -1.0 and +1.0; 1 and 254 are 0.992.
+        return int(np.count_nonzero(np.abs(v) > 0.995)), len(x), float(np.dot(v, v))
+
+    @staticmethod
+    def floor_of(bins):
+        """The band's noise floor: the 20th percentile of the spectrum, without
+        the outer tenths (the dongle's filter rolls off) or the DC spike."""
+        b = np.asarray(bins, np.float32)
+        n = len(b)
+        if n < 40:
+            return None
+        e, mid = n // 10, n // 2
+        return float(np.percentile(np.concatenate([b[e:mid - 6], b[mid + 6:n - e]]), 20))
+
+    def index(self, gain):
+        g = self.gains
+        return int(np.argmin([abs(x - (gain or 0.0)) for x in g]))
+
+    def in_gap(self, wall):
+        period, a, b = self.SLOTS[self.decoder]
+        return a <= wall % period < b
+
+    def decide(self, clip, rms, margin, i):
+        """(-1, 0 or +1, why) for one window of measurements at gain step i."""
+        g = self.gains
+        down = None
+        if clip > self.CLIP_HI:
+            down = "clipping"
+        elif rms > self.RMS_HI:
+            down = "near full scale"
+        elif margin is not None and margin > self.MARGIN_HI:
+            down = "more gain than the noise needs"
+        if down:
+            return (-1, down) if i > 0 else (0, down + ", at the lowest gain")
+        if margin is not None and margin < self.MARGIN_LO:
+            if i + 1 >= len(g):
+                return 0, "noise near the ADC's, at the highest gain"
+            if clip > self.CLIP_UP or rms + (g[i + 1] - g[i]) > self.RMS_UP:
+                return 0, "noise near the ADC's, but no headroom for more"
+            return 1, "noise near the ADC's"
+        return 0, "good"
+
+    def target(self, i, d, urgent=False):
+        g = self.gains
+        if d < 0 and urgent:
+            lower = [j for j in range(i) if g[j] <= g[i] - self.URGENT_DROP]
+            return lower[-1] if lower else 0
+        return max(0, min(len(g) - 1, i + d))
+
+    def jump(self, i, d, rms, margin):
+        """While settling: the step nearest the middle of the target, at least
+        one step in direction d."""
+        g = self.gains
+        mid = (self.MARGIN_LO + self.MARGIN_HI) / 2
+        if d < 0:
+            move = max(rms - self.RMS_UP, (margin - mid) if margin is not None else 0.0)
+            want = g[i] - 0.75 * move  # the floor seldom falls dB for dB
+            j = min(range(i), key=lambda k: abs(g[k] - want)) if i else 0
+        else:
+            move = min(mid - margin, self.RMS_UP - rms)
+            want = g[i] + 0.75 * move
+            j = min(range(i + 1, len(g)), key=lambda k: abs(g[k] - want)) \
+                if i + 1 < len(g) else i
+        return j
+
+    def observe(self, x, gain, now, wall, floor=None):
+        """One block of IQ in (with a new noise floor, if there is one); the
+        gain to step to, or None to stay where it is."""
+        if not self.gains:
+            return None
+        if self.skip > 0:      # blocks read before the last step
+            self.skip -= 1
+            return None
+        c, n, pw = self.measure(x)
+        for a in (self.acc, self.short):
+            a[0] += c
+            a[1] += n
+            a[2] += pw
+        if floor is not None:
+            self.acc[3].append(floor)
+        i = self.index(gain)
+        if now - self.t_short >= self.FAST and self.short[1]:
+            sc, sn, sp = self.short
+            self.short = [0, 0, 0.0]
+            self.t_short = now
+            clip, rms = sc / (2.0 * sn), db10(sp / sn)
+            fl = self.acc[3][-3:]
+            margin = float(np.median(fl)) - self.ADC_FLOOR_DB if fl else None
+            if (clip > self.CLIP_URGENT or rms > self.RMS_URGENT) and i > 0:
+                return self.step(i, self.target(i, -1, urgent=True), now, "overload")
+            if not self.settling and margin is not None and margin < self.MARGIN_FAR:
+                d, why = self.decide(clip, rms, margin, i)
+                if d > 0:
+                    return self.step(i, i + 1, now, "noise far too near the ADC's")
+        if now - self.t_dec < (self.FAST if self.settling else self.SLOW):
+            return None
+        if not self.settling and self.decoder in self.SLOTS and not self.in_gap(wall):
+            self.state = "holding for the gap between slots"
+            return None
+        cl, n, pw, fl = self.acc
+        if not n:
+            return None
+        clip, rms = cl / (2.0 * n), db10(pw / n)
+        floor_db = float(np.median(fl)) if fl else None
+        margin = floor_db - self.ADC_FLOOR_DB if floor_db is not None else None
+        self.last = {"clip": clip, "rms_dbfs": round(rms, 1),
+                     "floor_db": None if floor_db is None else round(floor_db, 1),
+                     "margin_db": None if margin is None else round(margin, 1)}
+        self.acc = [0, 0, 0.0, []]
+        self.t_dec = now
+        d, why = self.decide(clip, rms, margin, i)
+        self.reason = why
+        if d:
+            self.holds = 0
+            return self.step(i, self.jump(i, d, rms, margin) if self.settling else i + d,
+                             now, why)
+        self.holds += 1
+        if self.settling and (self.holds >= 2 or now - self.t_start > self.SETTLE_FOR):
+            self.settling = False
+        self.state = "settling" if self.settling else "holding"
+        return None
+
+    def step(self, i, j, now, why):
+        self.reason = why
+        self.acc = [0, 0, 0.0, []]
+        self.short = [0, 0, 0.0]
+        self.t_dec = self.t_short = now
+        self.holds = 0
+        if j == i:
+            return None
+        self.steps += 1
+        self.state = "settling" if self.settling else "stepped"
+        return self.gains[j]
+
+    def status(self):
+        return dict(self.last, state=self.state, reason=self.reason, steps=self.steps,
+                    cpu=round(self.cpu, 4))
+
+
+# ------------------------------------------------------- listening audio
+
+# audio_* in /api/tune and the profile's "audio": {...}. nr is None for "by
+# mode": on for voice (AM, FM, USB, LSB), off for WFM, whose music the
+# noise estimate would eat into on long notes.
+AUDIO_KEYS = ("auto", "nr", "filter", "norm", "limit", "squelch")
+
+
+def audio_settings(p):
+    a = {k: True for k in AUDIO_KEYS}
+    a["nr"] = None
+    return audio_update(a, {"audio_" + k: v for k, v in (p or {}).items()})
+
+
+def audio_update(cur, fields):
+    out = dict(cur)
+    for name, v in fields.items():
+        k = name[len("audio_"):] if name.startswith("audio_") else None
+        if k not in AUDIO_KEYS:
+            raise ValueError("unknown audio setting %s" % name)
+        if not (isinstance(v, bool) or (k == "nr" and v is None)):
+            raise ValueError("%s must be true or false%s" % (name, " or null" if k == "nr" else ""))
+        out[k] = v
+    return out
+
+
+class NoiseReducer:
+    """Spectral subtraction on 48 kHz audio: 512-point frames, half overlap.
+
+    The noise is each bin's smoothed power at its quietest, let rise
+    RISE_DB_S a second so it follows a changing band; a bin keeps
+    1 - OVER * noise / power of itself, but never less than FLOOR. About
+    11 ms of delay.
+    """
+
+    N, H = 512, 256
+    RISE_DB_S = 3.0        # a held note 40 dB over the noise lasts ~13 s untouched
+    OVER = 4.0             # the quietest of a smoothed power reads low: make up
+    FLOOR = 0.18           # -15 dB
+    SMOOTH = 0.2
+
+    def __init__(self):
+        n = np.arange(self.N)
+        self.win = np.sqrt(0.5 - 0.5 * np.cos(2 * np.pi * n / self.N)).astype(np.float32)
+        self.buf = np.zeros(self.H, np.float32)       # input not yet framed
+        self.fifo = np.zeros(self.H, np.float32)      # output not yet given out
+        self.tail = np.zeros(self.H, np.float32)      # overlap from the last frame
+        self.rise = 10 ** (self.RISE_DB_S * self.H / AUDIO_RATE / 10)
+        self.s = None          # smoothed power per bin
+        self.noise = None
+
+    def __call__(self, a):
+        N, H = self.N, self.H
+        data = np.concatenate([self.buf, a.astype(np.float32)])
+        m = (len(data) - H) // H
+        if m > 0:
+            fr = np.lib.stride_tricks.sliding_window_view(data, N)[::H][:m]
+            X = np.fft.rfft(fr * self.win, axis=1)
+            P = (X.real ** 2 + X.imag ** 2).astype(np.float64)
+            if self.s is None:  # start from the typical bin, so a tone isn't "noise"
+                self.s = P[0].copy()
+                self.noise = np.minimum(P[0], np.median(P[0]))
+            S, _ = sps.lfilter([self.SMOOTH], [1, self.SMOOTH - 1], P, axis=0,
+                               zi=(1 - self.SMOOTH) * self.s[None, :])
+            # noise_k = min(noise_{k-1} * rise, S_k), all frames at once
+            r = self.rise ** np.arange(1, m + 1)[:, None]
+            runs = np.minimum.accumulate(np.vstack([self.noise[None, :], S / r]), axis=0)[1:]
+            Nk = runs * r
+            self.s, self.noise = S[-1], Nk[-1]
+            G = np.maximum(1 - self.OVER * Nk / (S + 1e-20), self.FLOOR)
+            y = np.fft.irfft(X * G, n=N, axis=1).astype(np.float32) * self.win
+            out = (np.vstack([self.tail[None, :], y[:-1, H:]]) + y[:, :H]).ravel()
+            self.tail = y[-1, H:].copy()
+            self.buf = data[m * H:]
+            self.fifo = np.concatenate([self.fifo, out])
+        else:
+            self.buf = data
+        n = len(a)
+        res, self.fifo = self.fifo[:n], self.fifo[n:]
+        if len(res) < n:   # can't happen with the H samples banked first
+            res = np.concatenate([res, np.zeros(n - len(res), np.float32)])
+        return res
+
+
+def soft_limit(a, knee=0.6, ceil=0.97):
+    """Unchanged below knee; above it, a tanh curve up to ceil."""
+    m = np.abs(a) > knee
+    if not m.any():
+        return a
+    y = a.copy()
+    v = np.abs(a[m])
+    y[m] = np.sign(a[m]) * (knee + (ceil - knee) * np.tanh((v - knee) / (ceil - knee)))
+    return y
+
+
+class AudioFx:
+    """Clean-up for listening: never on the audio a decoder gets.
+
+    In order: an automatic noise squelch (NFM), a hum and DC filter (on NFM a
+    300-3500 Hz voice band, so sub-audible tones and the discriminator's hiss
+    go too), the noise reducer, a loudness normaliser so quiet and loud
+    stations come out alike, and a soft limiter.
+    """
+
+    # mode -> (high-pass Hz, its order, low-pass Hz or None)
+    FILTERS = {"USB": (100.0, 2, None), "LSB": (100.0, 2, None), "AM": (100.0, 4, None),
+               "FM": (300.0, 6, 3500.0), "WFM": (30.0, 2, None)}
+    TARGET_DB = -20.0                  # RMS the normaliser aims at, dBFS
+    GAIN_MIN_DB, GAIN_MAX_DB = -20.0, 24.0
+    NORM_GATE_DB = -60.0               # quieter than this doesn't move it
+    SQ_BAND = (8000.0, 16000.0)        # NFM noise squelch measures here
+    SQ_OPEN_DB, SQ_CLOSE_DB = 6.0, 3.0  # quieter than pure noise by, to open/close
+    SQ_HANG = 3                        # blocks it stays open after the signal goes
+
+    def __init__(self, mode, bandwidth):
+        self.mode, self.bandwidth = mode, bandwidth
+        hp, order, lp = self.FILTERS[mode]
+        sos = sps.butter(order, hp, "highpass", fs=AUDIO_RATE, output="sos")
+        if lp:
+            sos = np.vstack([sos, sps.butter(6, lp, "lowpass", fs=AUDIO_RATE, output="sos")])
+        self.sos = sos
+        self.zi = np.zeros((sos.shape[0], 2))
+        self.nr = NoiseReducer()
+        self.level = None      # the normaliser's loudness estimate, dBFS
+        self.gain = 1.0
+        self.sq_open, self.sq_hang = True, 0
+        self.sq_ref = self.noise_ref(bandwidth) if mode == "FM" else None
+        self.sq_quiet = None   # dB quieter than pure noise, last block
+        self.active = []
+        self.cpu = 0.0
+
+    @classmethod
+    def hf_power(cls, a):
+        if len(a) < 64:
+            return None
+        X = np.fft.rfft(a)
+        f = np.fft.rfftfreq(len(a), 1.0 / AUDIO_RATE)
+        sel = (f >= cls.SQ_BAND[0]) & (f < cls.SQ_BAND[1])
+        return float(np.mean(X.real[sel] ** 2 + X.imag[sel] ** 2)) / len(a)
+
+    @classmethod
+    def noise_ref(cls, bandwidth):
+        """What the NFM discriminator gives for noise alone, in SQ_BAND: it
+        depends only on the channel filter, not on the noise's level."""
+        rng = np.random.default_rng(5)
+        ch = Chain("FM", bandwidth, 0, 0)
+        x = (rng.standard_normal(72000) + 1j * rng.standard_normal(72000)).astype(np.complex64)
+        a = ch(x * 0.01, 50000.0)
+        return cls.hf_power(a[len(a) // 3:])
+
+    def nr_on(self, opt):
+        return opt["nr"] if opt["nr"] is not None else self.mode != "WFM"
+
+    def squelch(self, a):
+        p = self.hf_power(a)
+        if p is None or not self.sq_ref:
+            return
+        self.sq_quiet = db10(self.sq_ref) - db10(p)
+        if self.sq_quiet >= (self.SQ_CLOSE_DB if self.sq_open else self.SQ_OPEN_DB):
+            self.sq_open, self.sq_hang = True, self.SQ_HANG
+        elif self.sq_hang > 0:
+            self.sq_hang -= 1
+        else:
+            self.sq_open = False
+
+    def normalise(self, a, adapt):
+        lv = db10(float(np.mean(a * a))) if len(a) else -120.0
+        if adapt and lv > self.NORM_GATE_DB:
+            if self.level is None:
+                self.level = lv
+            self.level += (lv - self.level) * (0.35 if lv > self.level else 0.03)
+        g_db = 0.0 if self.level is None else \
+            min(max(self.TARGET_DB - self.level, self.GAIN_MIN_DB), self.GAIN_MAX_DB)
+        g = 10 ** (g_db / 20)
+        ramp = np.linspace(self.gain, g, len(a), endpoint=False, dtype=np.float32) \
+            if len(a) else 1.0
+        self.gain = g
+        return a * ramp
+
+    def __call__(self, a, opt, manual_squelch=False):
+        """Audio for the speaker and the phone. opt is Settings.audio."""
+        t0 = time.thread_time()
+        act = []
+        if not opt["auto"]:
+            self.sq_open = True
+            self.active = act
+            return a
+        if self.mode == "FM" and opt["squelch"] and not manual_squelch:
+            self.squelch(a)
+            act.append("squelch")
+        else:
+            self.sq_open = True
+        if opt["filter"]:
+            a, self.zi = sps.sosfilt(self.sos, a, zi=self.zi)
+            a = a.astype(np.float32)
+            act.append("filter")
+        if self.nr_on(opt):
+            a = self.nr(a)
+            act.append("nr")
+        if not self.sq_open:
+            a = np.zeros_like(a)
+        if opt["norm"]:
+            a = self.normalise(a, adapt=self.sq_open)
+            act.append("norm")
+        if opt["limit"]:
+            a = soft_limit(a)
+            act.append("limit")
+        self.active = act
+        dt = time.thread_time() - t0
+        self.cpu += (dt / (len(a) / AUDIO_RATE) - self.cpu) * 0.05 if len(a) else 0
+        return a.astype(np.float32)
+
+    def status(self, opt):
+        return {"auto": opt["auto"], "nr": bool(self.nr_on(opt)), "nr_setting": opt["nr"],
+                "filter": opt["filter"], "norm": opt["norm"], "limit": opt["limit"],
+                "squelch": opt["squelch"], "active": list(self.active),
+                "squelch_open": self.sq_open if "squelch" in self.active else None,
+                "norm_gain_db": round(db10(self.gain ** 2), 1) if "norm" in self.active else None,
+                "cpu": round(self.cpu, 4)}
+
+
 # -------------------------------------------------------------------- engine
 
 class Receiver:
@@ -618,6 +1066,9 @@ class Receiver:
         self.listen_lock = threading.Lock()
         self.resamplers = {}         # rate -> FirDecimator from 48 kHz
         self.wspr = None             # a WsprDecoder, for a WSPR profile
+        self.autogain = None         # an AutoGain, once the dongle's gains are known
+        self.fx = None               # AudioFx for what's listened to
+        self.clock, self.wallclock = time.monotonic, time.time  # tests run on their own
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -633,6 +1084,8 @@ class Receiver:
             if self.s.gain_db is None:
                 self.s.gain_db = self.gain_db_for(self.s.gain_index)
         self.src.set_gain(self.s.gain_db)
+        gains = self.src.gains()
+        self.autogain = AutoGain(gains, self.s.decoder) if gains else None
         self.retune(self.s.snapshot(), force=True)
         self.version = self.s.snapshot()["version"]
         threading.Thread(target=self.reader, name="reader", daemon=True).start()
@@ -706,20 +1159,56 @@ class Receiver:
                     continue  # the block in hand was at the old rate
             t0 = time.thread_time()
             audio = self.chain(x, self.offset)
+            self.auto_gain(x, snap)
             if self.wspr is not None:  # before squelch and volume
                 self.wspr.push(audio, snap["dial"])
-            audio = self.gate(audio, snap["squelch"])
+            # Listening clean-up; a decoder's sink (JS8Call's cable) stays clean.
+            heard = self.listening(audio, snap)
+            audio = self.gate(audio if self.s.decoder else heard, snap["squelch"])
             pcm = np.clip(audio * snap["volume"] * 32767, -32768, 32767).astype("<i2")
             self.sink.write(pcm)
             if self.listeners:
-                self.stream(audio)
+                self.stream(heard if self.s.decoder else audio)
             dt = time.thread_time() - t0
             self.cpu += (dt / (len(x) / self.chain.rate) - self.cpu) * 0.05
             self.blocks += 1
-            now = time.monotonic()
+            now = self.clock()
             if now - self.spectrum_at >= self.SPECTRUM_EVERY:
                 self.spectrum_at = now
                 self.spectrum = self.make_spectrum(x, snap)
+
+    def auto_gain(self, x, snap):
+        """Feed AutoGain a block and make the step it asks for."""
+        ag = self.autogain
+        if ag is None:
+            return
+        if not snap["gain_auto"]:
+            ag.key, ag.state = None, "off"
+            return
+        t0 = time.thread_time()
+        now = self.clock()
+        key = (self.chain.mode, round((self.src.center or 0.0) / 1e6))
+        if key != ag.key:  # started, retuned by a MHz or more, or turned back on
+            ag.key = key
+            ag.reset(now)
+        ag.decoder = self.s.decoder
+        floor, sp = None, self.spectrum
+        if sp is not None and sp.get("seq") != ag.spec_seq:
+            ag.spec_seq = sp.get("seq")
+            floor = ag.floor_of(sp["bins"])
+        new = ag.observe(x, snap["gain_db"], now, self.wallclock(), floor)
+        if new is not None and self.s.set_auto_gain(new):
+            self.src.set_gain(new)
+            ag.skip = self.q.qsize() + 2   # blocks already read at the old gain
+            log("auto gain %.1f dB (%s)" % (new, ag.reason))
+        ag.cpu += ((time.thread_time() - t0) / (len(x) / self.chain.rate) - ag.cpu) * 0.05
+
+    def listening(self, audio, snap):
+        """The audio for the speaker and the phone, cleaned up by AudioFx."""
+        if self.fx is None or (self.fx.mode, self.fx.bandwidth) != (self.chain.mode,
+                                                                   self.chain.bandwidth):
+            self.fx = AudioFx(self.chain.mode, self.chain.bandwidth)
+        return self.fx(audio, snap["audio"], manual_squelch=snap["squelch"] is not None)
 
     SPECTRUM_EVERY = 0.2   # seconds: about 5 a second for the clients
     SPECTRUM_BINS = 512
@@ -806,7 +1295,13 @@ class Receiver:
                 "vfo_hz": snap["dial"] - snap["cal"], "cal_hz": snap["cal"],
                 "mode": snap["mode"], "bandwidth": snap["bandwidth"],
                 "gain_db": snap["gain_db"], "volume": snap["volume"],
-                "squelch": snap["squelch"], "squelch_open": self.squelch_open,
+                "squelch": snap["squelch"],
+                "squelch_open": self.squelch_open and (self.fx is None or self.fx.sq_open),
+                "gain_auto": snap["gain_auto"],
+                "gain_loop": self.autogain.status() if self.autogain is not None else
+                {"state": "unavailable", "reason": "this source has no gain control"},
+                "audio": self.fx.status(snap["audio"]) if self.fx is not None else
+                dict(snap["audio"], active=[]),
                 "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
                 "upconvert_below_hz": snap["upconvert_below"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
@@ -1589,7 +2084,7 @@ class Api(BaseHTTPRequestHandler):
             if not isinstance(doc, dict):
                 raise ValueError("body must be a JSON object")
             unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume", "squelch",
-                                  "wspr_report"}
+                                  "wspr_report", "gain_auto"} - {"audio_" + k for k in AUDIO_KEYS}
             if unknown:
                 raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
             self.server.rx.s.update(**doc)
