@@ -84,17 +84,37 @@ What rxd is doing. Clients poll it, about twice a second.
 | `band_plan` | object or null | The band plan's status (see `GET /api/v1/bands`); null when it isn't running |
 | `listeners` | int | Audio streams open |
 
-**`station`** comes from the station file ([station.md](station.md)):
-`call` and `grid` (null when not set), `missing` (what to set, only when either
-is null), `file` (the file read, or null for none), `upconverter` (null, or
-`{"name", "hz", "below_hz", "switch"}`; `switch` true means a person must
+**`station`** comes from the station file ([station.md](station.md)) and the
+GPS: `call` and `grid` (null when not set), `missing` (what to set, only when
+either is null), `file` (the file read, or null for none), `upconverter` (null,
+or `{"name", "hz", "below_hz", "switch"}`; `switch` true means a person must
 flip it, so clients show which way it should be) and `problems` (what was
-wrong with the file).
+wrong with the file, or with the saved GPS grid). Where `grid` comes from:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `grid` | string or null | The grid in use: WSPRnet's `rgrid`, the map's centre and distances, and the band plan's sun |
+| `grid_source` | string or null | `gps` (a live fix rxd accepted), `gps-saved` (the last one, saved), `station` (the station file's `grid`) or null (none) |
+| `grid_reason` | string | One sentence for the clients to show: "EM13lc from GPS (10 satellites)", "EM13lc from station config: GPS has no fix". When a GPS grid differs from the station file's it ends "; station config says EM12" |
+| `default_grid` | string or null | The station file's `grid` (`$RXD_GRID` wins) |
+| `saved_grid` | string or null | The last GPS grid rxd accepted, kept across restarts |
+| `gps` | object | The GPS, below |
+
+**`station.gps`**: `state` (`fix`, `no fix`, `rejected`, `off` or
+`unavailable`), `reason` (a plain sentence: "GPS position rejected: the
+receiver's NMEA reports a placeholder position; using its binary fix
+instead"), `satellites` (used, or null), `accuracy_m` (whole metres, or null),
+`source` (`ubx`, the receiver's binary fix, or `tpv`, gpsd's NMEA-derived one,
+or null) and `gpsd` (HOST:PORT, or null when off). `fix` with no `gps`
+`grid_source` means the fix is new: it's used once it holds one grid square
+for 3 minutes. No precise position is ever in the status: only grids.
 
 **`wspr`**: `state` (`waiting`, `recording` or `decoding`), `slot` and
 `decoding` (ISO times), `last` (`{"slot", "spots"}`), `error`, and `report`:
 `enabled`, `call`, `grid`, `sent`, `pending`, `online`, `error`, or `reason`
-when it can't report.
+when it can't report. `grid` is the station's grid at the moment, which a GPS
+fix can change while rxd runs; each spot is reported with the grid it was
+heard at.
 
 **`js8_decoder`**: `engine` (`rxd`), `version`, `submodes`, `state`, `slot`,
 `last`, `error`, `skipped`, `cpu_pct`, `jsc` (the JSC word table is
