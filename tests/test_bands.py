@@ -20,6 +20,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import rxd  # noqa: E402
 from test_radio import load_radio  # noqa: E402
 
@@ -90,7 +91,7 @@ def read(path):
 
 
 class Radio:
-    """The real `radio` from setup.sh, with HOME in a temp dir."""
+    """The real `radio` (rxd/radio.py), with HOME in a temp dir."""
 
     _mod = None
     _home = None
@@ -281,7 +282,7 @@ class Conditions(unittest.TestCase):
                 fh.write(HAMQSL_SAMPLE)
             code = ("import sys; sys.path.insert(0, %r); import rxd; "
                     "print(rxd.parse_hamqsl(rxd.http_get('file://' + %r))['sfi'])"
-                    % (os.path.dirname(os.path.abspath(__file__)), path))
+                    % (_paths.RXD, path))
             out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                                  timeout=60)
             self.assertEqual(out.stdout.strip(), "124", out.stderr)

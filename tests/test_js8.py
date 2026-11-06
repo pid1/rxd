@@ -19,6 +19,7 @@ import unittest
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import js8  # noqa: E402
 
 
@@ -319,7 +320,6 @@ class Messages(unittest.TestCase):
 
     def test_feed_line_shape(self):
         # What rxd's Js8Feed reads back out of the DIRECTED.TXT line.
-        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
         import rxd
         msg = js8.Assembler().feed(0, [{"frame": f, "i3": i3, "freq": 1234.4, "snr": -12,
                                         "submode": "A"} for f, i3 in

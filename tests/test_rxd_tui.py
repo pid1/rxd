@@ -26,6 +26,7 @@ from array import array
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import rxd_tui as t  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -535,7 +536,7 @@ class Pty:
         e.update(env or {})
         self.proc = subprocess.Popen(
             ["/bin/sh", "-c", self.SCRIPT, "sh", self.dir, sys.executable,
-             os.path.join(HERE, "rxd_tui.py"), "--url", url] + list(args),
+             os.path.join(_paths.TUI, "rxd_tui.py"), "--url", url] + list(args),
             stdin=slave, stdout=slave, stderr=slave, env=e,
             start_new_session=True, preexec_fn=lambda: fcntl.ioctl(0, termios.TIOCSCTTY, 0))
         self.slave = slave

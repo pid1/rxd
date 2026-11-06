@@ -19,6 +19,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import rxd  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -330,7 +331,7 @@ class Projection(unittest.TestCase):
         node = shutil.which("node")
         if not node:
             self.skipTest("node isn't installed")
-        with open(os.path.join(HERE, "web", "index.html"), encoding="utf-8") as fh:
+        with open(_paths.WEB, encoding="utf-8") as fh:
             m = re.search(r"// map:projection begin\n(.*?)// map:projection end", fh.read(), re.S)
         self.assertIsNotNone(m, "the projection block is missing from index.html")
         out = subprocess.run([node, "-e", m[1] + "\nconsole.log(JSON.stringify(" + expr + "));"],

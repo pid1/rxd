@@ -18,6 +18,7 @@ import urllib.request
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import rxd  # noqa: E402
 
 WSPR = {"description": "WSPR, 40 m", "frequency": 7038600.0, "offset": "auto",

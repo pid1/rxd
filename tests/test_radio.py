@@ -1,12 +1,11 @@
-"""Tests for the `radio` command, which setup.sh installs from a heredoc.
+"""Tests for the `radio` command (rxd/radio.py).
 
-The script is cut out of setup.sh and loaded as a module with HOME in a temp
-dir. systemctl and journalctl are fake shell scripts on PATH that log their
+The script is loaded as a module with HOME in a temp dir. systemctl and journalctl are fake shell scripts on PATH that log their
 arguments and keep the "running" unit in a state file; a small HTTP server
 plays rxd's /api/status for whichever unit that file names. i3 and the
 clock check are stubbed on the module.
 
-    python3 -m unittest discover rxd
+    python3 -m unittest discover tests
 """
 import contextlib
 import importlib.util
@@ -20,7 +19,10 @@ import threading
 import unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-SETUP = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "setup.sh")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402  rxd/ and clients/tui/ on sys.path
+
+RADIO_PY = os.path.join(_paths.RXD, "radio.py")
 
 FAKE_SYSTEMCTL = r"""#!/bin/sh
 # fake systemctl --user: the running unit lives in $FAKE/up
@@ -52,13 +54,7 @@ echo "Nov 05 10:00:00 uconsole systemd[1]: rxd@vhf.service: Failed with result '
 
 
 def load_radio(home):
-    with open(SETUP, encoding="utf-8") as fh:
-        text = fh.read()
-    start = text.index("<<'RADIO'\n") + len("<<'RADIO'\n")
-    end = text.index("\nRADIO\n", start)
-    path = os.path.join(home, "radio.py")
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text[start:end] + "\n")
+    path = RADIO_PY
     old = os.environ.get("HOME")
     os.environ["HOME"] = home  # the module reads it at import
     try:

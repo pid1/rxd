@@ -60,6 +60,9 @@ import numpy as np  # noqa: E402
 from scipy import signal as sps  # noqa: E402
 
 STATE = os.path.expanduser("~/.config/rx/radio")
+# Where this file really is: bin/rxd is a link to it, and js8.py and the
+# browser UI are installed beside it.
+HERE = os.path.dirname(os.path.realpath(__file__))
 AUDIO_RATE = 48000
 # A profile's "offset": "auto" (the default) upconverts below
 # upconvert_below_hz, since the R820T tunes no lower than about 24 MHz and
@@ -1522,7 +1525,7 @@ class Js8Feed:
 JS8_SUBMODES = ("normal", "fast", "turbo", "slow")
 JS8_DEFAULT_SUBMODES = ["normal", "fast", "slow"]
 JS8_PY = (os.environ.get("RXD_JS8_PY", ""),
-          os.path.join(os.path.dirname(os.path.abspath(__file__)), "js8.py"),
+          os.path.join(HERE, "js8.py"),
           "/usr/local/lib/rxd/js8.py")
 
 
@@ -3233,10 +3236,11 @@ def serve_stations(h):
     return h.send(200, doc)
 
 
-# The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
-# a checkout. Read on every request so a reinstall needs no restart.
-WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
-             os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html"))
+# The browser UI: $RXD_WEB, where install.py puts it (beside this file, which
+# bin/rxd links to), or clients/web/ in a checkout. Read on every request so a
+# reinstall needs no restart.
+WEB_PATHS = (os.environ.get("RXD_WEB", ""), os.path.join(HERE, "web", "index.html"),
+             os.path.join(os.path.dirname(HERE), "clients", "web", "index.html"))
 
 
 def web_page():

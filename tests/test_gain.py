@@ -13,6 +13,7 @@ import urllib.request
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _paths  # noqa: E402,F401  rxd/ and clients/tui/ on sys.path
 import rxd  # noqa: E402
 
 # The uConsole dongle's R820T gain table, as rxd reports it.
