@@ -29,3 +29,8 @@ for _k in ("RXD_CALL", "RXD_GRID"):
 # its ~/.local/state/rxd/location.json. A test that wants them sets its own.
 os.environ["RXD_GPSD"] = "off"
 os.environ["RXD_LOCATION"] = os.path.join(TESTS, "fixtures", "no-location.json")
+# The upconverter switch's confirmed position (station.py): none, unless a test
+# confirms one in a file of its own. The boot is a fixed one, so a position a
+# test confirms holds until the test says the machine started again.
+os.environ["RXD_SWITCH"] = os.path.join(TESTS, "fixtures", "no-switch.json")
+os.environ["RXD_BOOT_ID"] = os.path.join(TESTS, "fixtures", "boot_id")

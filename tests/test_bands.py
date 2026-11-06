@@ -384,7 +384,25 @@ class FakeRx:
         self.src = None
 
 
-class Planner(unittest.TestCase):
+class SwitchFile:
+    """A test's own upconverter switch file ($RXD_SWITCH), restored after."""
+
+    def use_switch(self, position=None):
+        self.switch_file = os.path.join(self.dir, "switch.json")
+        old = os.environ.get("RXD_SWITCH")
+        os.environ["RXD_SWITCH"] = self.switch_file
+        self.addCleanup(os.environ.__setitem__, "RXD_SWITCH", old)
+        self.confirm(position)
+
+    def confirm(self, position):
+        if position is None:
+            with contextlib.suppress(FileNotFoundError):
+                os.remove(self.switch_file)
+        else:
+            rxd.station_conf.confirm_switch(position, self.switch_file, now=self.t[0])
+
+
+class Planner(SwitchFile, unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp()
         self.conf = os.path.join(self.dir, "bands-conf.json")
@@ -393,6 +411,7 @@ class Planner(unittest.TestCase):
         self.t = [DAY]
         self.online = True
         self.fetches = 0
+        self.use_switch("upconvert")   # the Ham It Up, confirmed on UPCONVERT
 
     def tearDown(self):
         shutil.rmtree(self.dir, ignore_errors=True)
@@ -575,26 +594,118 @@ class Planner(unittest.TestCase):
         self.assertEqual((rows["wspr-6m"]["eligible"], rows["wspr-6m"]["why_not"]),
                          (False, "needs the Ham It Up on BYPASS"))
         self.assertEqual(rows["wspr-20m"]["why_not"], "not enabled")
-        # 6 m is never picked on this side
+        # 6 m is never picked on this side, and cross_side no longer changes that
         bp.tick()
         self.assertNotIn("wspr-6m", self.switched)
         bp.configure({"cross_side": True})
-        self.assertIn("wspr-6m", [r["name"] for r in bp.candidates(self.t[0])[0]])
+        self.assertNotIn("wspr-6m", [r["name"] for r in bp.candidates(self.t[0])[0]])
+        self.assertEqual(bp.status()["side_limit"], "Only UPCONVERT bands: 40 m")
 
     def test_bypass_side_uses_only_6m_and_2m(self):
+        self.confirm("bypass")
         bp = self.planner("vhf")
         self.assertEqual(bp.status()["side"], "BYPASS")
         self.assertEqual([r["band"] for r in bp.candidates(self.t[0])[0]], ["6m", "2m"])
         bp.tick()
         self.assertEqual(len(self.switched), 1)
         self.assertIn(self.switched[0], ("wspr-6m", "wspr-2m"))
+        self.assertEqual(bp.status()["side_limit"], "Only BYPASS bands: 6 m, 2 m")
 
     def test_no_bands_on_this_side(self):
+        self.confirm("bypass")
         bp = self.planner("vhf", conf={"bands": ["40m", "20m"]})
         bp.tick()
         self.assertEqual(self.switched, [])
         self.assertEqual(bp.status()["reason"],
                          "Auto: no WSPR bands enabled on the Ham It Up's BYPASS side")
+
+    def test_paused_until_the_switch_is_confirmed(self):
+        self.confirm(None)              # just started up: nobody has said
+        bp = self.planner("wspr")
+        bp.tick()
+        st = bp.status()
+        self.assertEqual(self.switched, [])
+        self.assertEqual((st["phase"], st["side"], st["side_limit"]), ("paused", None, None))
+        self.assertEqual(st["reason"], "Paused: confirm the Ham It Up's switch")
+        self.assertEqual(bp.candidates(self.t[0])[0], [])
+        rows = {r["name"]: r for r in bp.describe()["profiles"]}
+        self.assertEqual(rows["wspr-20m"]["why_not"], "the Ham It Up's switch isn't confirmed")
+        # a scan asked for does nothing either
+        bp.configure({"scan": True})
+        bp.tick()
+        self.assertEqual((self.switched, bp.status()["phase"]), ([], "paused"))
+        # confirmed on UPCONVERT: it chooses at once, on that side
+        self.confirm("upconvert")
+        self.t[0] += 5
+        bp.tick()
+        self.assertEqual(self.switched, ["wspr-20m"])
+        self.assertEqual(bp.status()["phase"], "hold")
+        self.assertTrue(bp.status()["side_limit"].startswith("Only UPCONVERT bands: 2190 m to 10 m"))
+
+    def test_keeps_to_the_confirmed_side(self):
+        # rxd came back on 40 m, but the person says the switch is on BYPASS
+        self.confirm("bypass")
+        bp = self.planner("wspr")
+        bp.tick()
+        self.assertEqual(len(self.switched), 1)
+        self.assertIn(self.switched[0], ("wspr-6m", "wspr-2m"))
+        self.assertEqual(bp.status()["side"], "BYPASS")
+        # flipped and confirmed back: UPCONVERT bands only again
+        bp = self.planner(self.switched[0])
+        self.confirm("upconvert")
+        self.t[0] += 60
+        bp.tick()
+        self.assertEqual(self.switched[-1], "wspr-20m")
+
+    def test_nothing_learned_unless_the_switch_is_right(self):
+        self.online = False
+        for position, name, plan in ((None, "wspr", "auto"), (None, "wspr", "manual"),
+                                     ("bypass", "wspr", "manual"),
+                                     ("bypass", "wspr", "auto")):
+            self.confirm(position)
+            bp = self.planner(name, conf={"plan": plan, "bands": ["40m", "6m"]})
+            bp.tick()
+            self.slots(bp, 12)
+            self.assertEqual(bp.history.bands, {}, (position, plan))
+        # confirmed on the side the profile needs: it learns
+        self.confirm("upconvert")
+        bp = self.planner("wspr", conf={"plan": "manual"})
+        bp.tick()
+        self.slots(bp, 12)
+        self.assertEqual(bp.history.bands["wspr"]["17"][0]["count"], 24)
+
+    def test_js8_learns_nothing_while_unknown(self):
+        self.confirm(None)
+        js8 = FakeJs8()
+        bp = self.planner("js8", conf={"mode": "js8", "plan": "manual"}, js8=js8)
+        bp.tick()
+        for _ in range(7):
+            self.t[0] += 60
+            js8.heard(7078000.0, "W1AW", "K1ABC")
+            bp.tick()
+        self.assertEqual(bp.history.bands, {})
+        # confirmed: what's heard from now on counts, not what was heard before
+        self.confirm("upconvert")
+        for _ in range(2):
+            self.t[0] += 60
+            js8.heard(7078000.0, "W1AW")
+            bp.tick()
+        self.assertEqual(bp.history.bands["js8"]["17"][0]["count"], 2)
+
+    def test_no_switch_no_limit(self):
+        st = os.path.join(self.dir, "station.json")
+        with open(st, "w") as fh:
+            json.dump({"upconverter": {"name": "Ham It Up", "switch": False}}, fh)
+        old = os.environ["RXD_STATION"]
+        os.environ["RXD_STATION"] = st
+        self.addCleanup(os.environ.__setitem__, "RXD_STATION", old)
+        self.confirm(None)
+        bp = self.planner("wspr", conf={"bands": ["40m", "6m"]})
+        self.assertEqual([r["band"] for r in bp.candidates(self.t[0])[0]], ["40m", "6m"])
+        bp.tick()
+        st = bp.status()
+        self.assertNotEqual(st["phase"], "paused")
+        self.assertEqual((st["side"], st["side_limit"]), ("UPCONVERT", None))
 
     def test_switched_by_hand_goes_manual(self):
         bp = self.planner("wspr")
@@ -642,11 +753,13 @@ class Planner(unittest.TestCase):
         self.assertEqual(read(self.conf)["dwell_min"], 8)
 
 
-class SwitchingThroughRadio(unittest.TestCase):
+class SwitchingThroughRadio(SwitchFile, unittest.TestCase):
     """The planner's switch goes through spawn_switch to `radio NAME`."""
 
     def test_fake_radio(self):
         with tempfile.TemporaryDirectory() as d:
+            self.dir, self.t = d, [DAY]
+            self.use_switch("upconvert")
             log = os.path.join(d, "radio.log")
             fake = os.path.join(d, "radio")
             rows = Radio.json()
@@ -680,7 +793,7 @@ class SwitchingThroughRadio(unittest.TestCase):
                 rxd._profiles["doc"] = None
 
 
-class Api(unittest.TestCase):
+class Api(SwitchFile, unittest.TestCase):
     def api(self, srv, method, path, doc=None):
         req = urllib.request.Request(
             "http://%s:%d%s" % (*srv.server_address, path), method=method,
@@ -694,6 +807,8 @@ class Api(unittest.TestCase):
 
     def test_get_and_post(self):
         with tempfile.TemporaryDirectory() as d:
+            self.dir, self.t = d, [DAY]
+            self.use_switch("upconvert")
             rows = Radio.json()
             rx = FakeRx("wspr")
             cond = rxd.Conditions(os.path.join(d, "c.json"),

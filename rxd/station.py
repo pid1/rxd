@@ -25,6 +25,8 @@ when it has a fix.
 import json
 import os
 import re
+import threading
+import time
 
 PROFILE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
@@ -210,6 +212,80 @@ class Station:
             up = {"name": self.upconverter["name"], "hz": self.upconverter["hz"],
                   "below_hz": self.upconverter["below_hz"], "switch": self.upconverter["switch"]}
         return {"file": self.source, "upconverter": up, "problems": list(self.problems)}
+
+
+# ------------------------------------------------- the upconverter's switch
+# An upconverter with "switch": true has an UPCONVERT/BYPASS switch only a
+# person can flip, which rxd can't see. So a person says which way it is, and
+# rxd and radio keep that here with when it was said, and the boot it was said
+# in: after a reboot or a power-up nobody knows (it may have been flipped while
+# the machine was off), so a position from another boot reads as "unknown".
+# A plain rxd restart or a profile switch keeps it. See docs/station.md.
+
+SWITCH_PATH = "~/.local/state/rxd/switch.json"
+BOOT_ID_PATH = "/proc/sys/kernel/random/boot_id"
+POSITIONS = ("upconvert", "bypass")
+
+
+def switch_path():
+    return os.path.expanduser(os.environ.get("RXD_SWITCH") or SWITCH_PATH)
+
+
+def boot_id():
+    """This boot's ID (Linux's boot_id, or the file $RXD_BOOT_ID names), or
+    None where there's none: then a confirmed position lasts until changed."""
+    try:
+        with open(os.environ.get("RXD_BOOT_ID") or BOOT_ID_PATH, encoding="ascii") as fh:
+            return fh.read().strip() or None
+    except (OSError, ValueError):
+        return None
+
+
+def side(upconverting):
+    """The switch position a profile needs: "upconvert" or "bypass"."""
+    return "upconvert" if upconverting else "bypass"
+
+
+def side_word(position):
+    """"UPCONVERT", "BYPASS", or "not confirmed", as the clients say it."""
+    return position.upper() if position in POSITIONS else "not confirmed"
+
+
+def read_switch(path=None):
+    """{"position": "upconvert", "bypass" or "unknown", "confirmed_at": epoch
+    seconds or None, "why": why it's unknown, or None}."""
+    path = path or switch_path()
+    unknown = {"position": "unknown", "confirmed_at": None}
+    try:
+        with open(path, encoding="utf-8") as fh:
+            doc = json.load(fh)
+    except FileNotFoundError:
+        return dict(unknown, why="not confirmed yet")
+    except (OSError, ValueError) as e:
+        return dict(unknown, why="can't read %s: %s" % (path, e))
+    if not isinstance(doc, dict) or doc.get("position") not in POSITIONS or \
+            isinstance(doc.get("confirmed_at"), bool) or \
+            not isinstance(doc.get("confirmed_at"), (int, float)):
+        return dict(unknown, why="%s isn't a confirmed position" % path)
+    if doc.get("boot_id") != boot_id():
+        return dict(unknown, why="the machine has started up since it was confirmed")
+    return {"position": doc["position"], "confirmed_at": float(doc["confirmed_at"]), "why": None}
+
+
+def confirm_switch(position, path=None, now=None):
+    """Keep position as the switch's, confirmed now, for this boot. ValueError
+    for a position that isn't one; OSError when it can't be saved."""
+    if position not in POSITIONS:
+        raise ValueError('the switch is "upconvert" or "bypass"')
+    path = path or switch_path()
+    doc = {"position": position, "confirmed_at": round(time.time() if now is None else now, 3),
+           "boot_id": boot_id()}
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = "%s.%d.%d.tmp" % (path, os.getpid(), threading.get_ident())
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh)
+    os.replace(tmp, path)
+    return read_switch(path)
 
 
 def load(file=None):

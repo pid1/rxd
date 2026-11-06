@@ -1411,6 +1411,7 @@ class Receiver:
                      else snap["mode"] != "WFM"),
                 "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
                 "upconvert_below_hz": snap["upconvert_below"],
+                "upconverter": upconverter_status(snap["upconverter"] > 0),
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
                 "tuner_hz": self.src.center, "offset_hz": self.offset,
                 "sample_rate": self.chain.rate if self.chain else None,
@@ -1675,6 +1676,34 @@ def grid_km(a, b):
 
 def upconverter_name():
     return station().upconverter_name or "upconverter"
+
+
+def switch_position():
+    """The upconverter switch's confirmed position: "upconvert", "bypass" or
+    "unknown" when the station's upconverter has a switch only a person can
+    flip; None when it has none (station.json), so there's nothing to confirm."""
+    if not station().manual_switch:
+        return None
+    return station_conf.read_switch()["position"]
+
+
+def upconverter_status(up):
+    """The status's "upconverter", up being whether the profile now goes
+    through it: null with none; else {"name", "switch", "needs" (the side the
+    tuning needs), "position", "confirmed_at", "why" (why it's unknown), "ok"
+    (it's confirmed on the side needed, or there's no switch)}."""
+    st = station()
+    if not st.upconverter:
+        return None
+    needs = station_conf.side(up)
+    doc = {"name": st.upconverter_name, "switch": st.manual_switch, "needs": needs,
+           "position": None, "confirmed_at": None, "why": None, "ok": True}
+    if st.manual_switch:
+        sw = station_conf.read_switch()
+        doc.update(position=sw["position"], why=sw["why"], ok=sw["position"] == needs,
+                   confirmed_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(sw["confirmed_at"]))
+                   if sw["confirmed_at"] is not None else None)
+    return doc
 
 
 def station_missing():
@@ -2436,7 +2465,7 @@ class BandPlanner:
 
     def __init__(self, rx, js8=None, conf_path=None, data_dir=None, profiles=None,
                  switch=None, conditions=None, clock=time.time, latlon=Ellipsis,
-                 synced=None, js8_alive=None):
+                 synced=None, js8_alive=None, position=None):
         self.rx = rx
         self.js8 = js8
         self.conf_path = conf_path or BANDS_CONF
@@ -2450,6 +2479,8 @@ class BandPlanner:
         self._latlon = latlon   # Ellipsis: the station's grid centre, read live
         self.synced = synced or (lambda: clock_status().get("synced") is not False)
         self.js8_alive = js8_alive or (lambda: js8_decoding(rx))
+        # the upconverter switch's confirmed position (None: no switch to mind)
+        self.position = position or switch_position
         self.lock = threading.Lock()
         self.wake = threading.Event()
         self.conf = self.load_conf()
@@ -2560,11 +2591,6 @@ class BandPlanner:
             self.rows_at = now
         return self.rows or []
 
-    def free_side(self):
-        """True when Auto may pick a band on the other side of the upconverter:
-        cross_side is on, or no person has to flip a switch to get there."""
-        return self.conf["cross_side"] or not station().manual_switch
-
     def side_up(self):
         """True if the upconverter is (as far as rxd knows) on UPCONVERT: the
         side the running profile needs, which is how its switch was last set."""
@@ -2582,20 +2608,52 @@ class BandPlanner:
         return [r for r in self.profile_rows(now)
                 if r.get("plan") and r.get("decoder") == mode and r.get("band")]
 
+    @staticmethod
+    def why_not(r, en, pos):
+        """Why Auto may not pick row r (None: it may). en: the bands enabled;
+        pos: the switch's confirmed position, or None when there's no switch.
+        A band on the other side of a switch only a person can flip is never
+        Auto's: rxd can't flip it, and listening there hears nothing."""
+        if r["band"] not in en:
+            return "not enabled"
+        if pos == "unknown":
+            return "the %s's switch isn't confirmed" % upconverter_name()
+        if pos is not None and station_conf.side(r.get("upconvert")) != pos:
+            return "needs the %s on %s" % (upconverter_name(),
+                                           station_conf.side_word(station_conf.side(r.get("upconvert"))))
+        return None
+
     def candidates(self, now):
         """(the profiles Auto may pick from, {band: why not} for the others)."""
-        up = self.side_up()
-        en = self.enabled(up)
+        en = self.enabled(self.side_up())
+        pos = self.position()
         out, why = [], {}
         for r in self.plan_rows(now):
-            if r["band"] not in en:
-                why[r["band"]] = "not enabled"
-            elif bool(r.get("upconvert")) != up and not self.free_side():
-                why[r["band"]] = "needs the %s on %s" % (
-                    upconverter_name(), "UPCONVERT" if r.get("upconvert") else "BYPASS")
+            w = self.why_not(r, en, pos)
+            if w:
+                why[r["band"]] = w
             else:
                 out.append(r)
         return out, why
+
+    def learning(self):
+        """Whether what's heard now says anything about the band: not while the
+        switch's position is unknown, nor when the tuning needs the other side
+        from the one confirmed (then nothing is heard, whatever the band)."""
+        pos = self.position()
+        return pos is None or pos == station_conf.side(self.side_up())
+
+    def side_limit(self, now, pos):
+        """"Only BYPASS bands: 6 m, 2 m", when a switch keeps Auto to one side."""
+        if pos not in station_conf.POSITIONS:
+            return None
+        cands = [r["band"] for r in self.candidates(now)[0]]
+        bands = [b for b in BAND_ORDER if b in cands]
+        if not bands:
+            return None
+        words = [band_label(b) for b in bands]
+        return "Only %s bands: %s" % (station_conf.side_word(pos), ", ".join(words) if len(words) <= 4
+                                      else "%s to %s" % (words[0], words[-1]))
 
     def current_row(self, now):
         name = self.rx.s.name
@@ -2618,6 +2676,7 @@ class BandPlanner:
             del v["levels"][:-240]
         if not self.synced():
             return  # with the clock off nothing decodes; that says nothing of the band
+        learn = self.learning()
         w = self.rx.wspr
         if row.get("decoder") == "wspr" and w is not None:
             last = w.last
@@ -2625,6 +2684,8 @@ class BandPlanner:
                 v["wspr_last"] = last
                 got = w.since(v["wspr_seq"])
                 v["wspr_seq"] = got["seq"]
+                if not learn:
+                    return  # the switch unknown, or the wrong way: nothing to learn
                 calls = {x.get("call") for x in got["lines"] if x.get("call")}
                 try:
                     import calendar
@@ -2646,7 +2707,7 @@ class BandPlanner:
             minutes = (now - v["js8_at"]) / 60.0
             got = self.js8.since(v["js8_seq"])
             v["js8_seq"], v["js8_at"] = got["seq"], now
-            if not self.js8_alive():
+            if not self.js8_alive() or not learn:
                 return
             dial = snap["dial"]
             lines = [x for x in got["lines"]
@@ -2787,6 +2848,12 @@ class BandPlanner:
     def decide(self, now):
         st = self.state
         cur = self.rx.s.name
+        pos = self.position()
+        if st.get("position") != pos:
+            # confirmed (or flipped, or forgotten at a start-up): choose afresh
+            st.update(position=pos, phase=None, scan=None, scan_i=None, next_eval=None)
+            if (st.get("reason") or "").startswith("Paused"):
+                st["reason"] = None
         if self.conf["plan"] != "auto":
             st["phase"] = "manual"
             if not (st.get("reason") or "").startswith("Manual"):
@@ -2795,10 +2862,17 @@ class BandPlanner:
         if st.get("phase") == "manual":
             st["phase"] = None
             st["reason"] = None
+        if pos == "unknown":
+            # nobody has said which way the switch is: no scanning, no hopping
+            st.update(phase="paused", reason="Paused: confirm the %s's switch" % upconverter_name())
+            return
+        if st.get("phase") == "paused":
+            st.update(phase=None, reason=None)
         cands, _ = self.candidates(now)
         if not cands:
             st.update(phase="idle", reason="Auto: no %s bands enabled on the %s's %s side" % (
                 "WSPR" if self.conf["mode"] == "wspr" else "JS8", upconverter_name(),
+                station_conf.side_word(pos) if pos else
                 "UPCONVERT" if self.side_up() else "BYPASS") if not self.rows_error else
                 "Auto: can't list profiles (%s)" % self.rows_error)
             return
@@ -2889,8 +2963,7 @@ class BandPlanner:
                 self.conf["plan"] = "auto"
             self.save_conf()
             st = self.state
-            changed = any(old.get(k) != self.conf.get(k) for k in
-                          ("plan", "mode", "bands", "cross_side"))
+            changed = any(old.get(k) != self.conf.get(k) for k in ("plan", "mode", "bands"))
             if doc.get("scan"):
                 cands, _ = self.candidates(now)
                 if cands:
@@ -2922,6 +2995,7 @@ class BandPlanner:
         st = self.state
         cond = self.cond.current(now)
         up = self.side_up()
+        pos = self.position()
         row = self.current_row(now)
         scan = None
         if st.get("phase") == "scan" and st.get("scan"):
@@ -2942,7 +3016,12 @@ class BandPlanner:
                 "switching_to": st.get("requested"),
                 "bands": self.enabled(up), "default_bands": self.conf.get("bands") is None,
                 "dwell_min": self.conf["dwell_min"], "every_min": self.conf["every_min"],
-                "cross_side": self.conf["cross_side"], "side": "UPCONVERT" if up else "BYPASS",
+                "cross_side": self.conf["cross_side"],
+                # the side Auto keeps to: the switch's confirmed position (null
+                # until it's confirmed), or with no switch the tuning's side
+                "side": (station_conf.side_word(pos) if pos in station_conf.POSITIONS else None)
+                if pos else "UPCONVERT" if up else "BYPASS",
+                "side_limit": self.side_limit(now, pos) if self.conf["plan"] == "auto" else None,
                 "sun": {"part": part, "words": PART_WORDS[part], "sunrise": rise, "sunset": sset,
                         "located": bool(self.latlon)},
                 "conditions": None if not cond else {
@@ -2966,18 +3045,14 @@ class BandPlanner:
             cond = self.cond.current(now)
             up = self.side_up()
             en = self.enabled(up)
+            pos = self.position()
             rows = []
             for mode in PLAN_MODES:
                 prs = self.plan_rows(now, mode)
                 sc = self.score_all(prs, now, cond)
                 for r in sorted(prs, key=lambda r: BAND_ORDER.index(r["band"])
                                 if r["band"] in BAND_ORDER else 99):
-                    why = None
-                    if r["band"] not in en:
-                        why = "not enabled"
-                    elif bool(r.get("upconvert")) != up and not self.free_side():
-                        why = "needs the %s on %s" % (
-                            upconverter_name(), "UPCONVERT" if r.get("upconvert") else "BYPASS")
+                    why = self.why_not(r, en, pos)
                     s = sc[r["name"]]
                     rows.append({"name": r["name"], "mode": mode, "band": r["band"],
                                  "freq": r.get("freq"), "upconvert": bool(r.get("upconvert")),
@@ -3509,6 +3584,8 @@ class Api(BaseHTTPRequestHandler):
             return self.no_version()
         if path == "/api/profile":
             return self.switch()
+        if path == "/api/switch":
+            return self.switch_confirm()
         if path == "/api/bands":
             return self.bands_post()
         if path != "/api/tune":
@@ -3527,20 +3604,54 @@ class Api(BaseHTTPRequestHandler):
             return self.send(400, {"error": str(e)})
         self.send(200, self.server.rx.status())
 
+    def body(self):
+        n = int(self.headers.get("Content-Length", 0))
+        return json.loads(self.rfile.read(n) or b"{}")
+
     def switch(self):
         try:
-            n = int(self.headers.get("Content-Length", 0))
-            doc = json.loads(self.rfile.read(n) or b"{}")
+            doc = self.body()
             name = doc.get("name") if isinstance(doc, dict) else None
             if not isinstance(name, str):
                 raise ValueError('body must be {"name": PROFILE}')
-            names = [p["name"] for p in list_profiles()["profiles"]]
-            if name not in names:
-                raise ValueError("no profile '%s' (have: %s)" % (name, ", ".join(names)))
+            unknown = set(doc) - {"name", "switch"}
+            if unknown:
+                raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
+            rows = list_profiles()["profiles"]
+            row = next((p for p in rows if p["name"] == name), None)
+            if row is None:
+                raise ValueError("no profile '%s' (have: %s)" % (
+                    name, ", ".join(p["name"] for p in rows)))
+            confirm = doc.get("switch")
+            if confirm is not None and confirm not in station_conf.POSITIONS:
+                raise ValueError('switch must be "upconvert" or "bypass"')
         except (ValueError, TypeError) as e:
             return self.send(400, {"error": str(e)})
         except (OSError, subprocess.SubprocessError) as e:
             return self.send(503, {"error": "can't list profiles: %s" % e})
+        # A profile on the other side of a switch only a person can flip: the
+        # person flips it and says so ("switch"), or rxd doesn't switch, since
+        # it would hear nothing there.
+        pos, needs = switch_position(), station_conf.side(row.get("upconvert"))
+        if pos is not None and name != self.server.rx.s.name:
+            if confirm is None and pos != needs:
+                return self.send(409, {
+                    "error": "%s needs the %s on %s, and it's %s. Flip the switch, then send "
+                             '"switch": "%s" to confirm it.' % (
+                                 name, upconverter_name(), station_conf.side_word(needs),
+                                 "on " + station_conf.side_word(pos) if pos != "unknown"
+                                 else "not confirmed", needs),
+                    "needs": needs, "position": pos})
+            if confirm is not None and confirm != needs:
+                return self.send(400, {"error": 'switch must be "%s": %s needs the %s on %s' % (
+                    needs, name, upconverter_name(), station_conf.side_word(needs))})
+            if confirm is not None:
+                try:
+                    station_conf.confirm_switch(confirm)
+                except OSError as e:
+                    return self.send(503, {"error": "can't keep the switch's position: %s" % e})
+                log("the %s's switch confirmed on %s, for %s" % (
+                    upconverter_name(), station_conf.side_word(confirm), name))
         try:
             spawn_switch(name)
         except OSError as e:
@@ -3549,6 +3660,31 @@ class Api(BaseHTTPRequestHandler):
         if self.server.rx.bands is not None:
             self.server.rx.bands.manual_pick(name)
         self.send(202, {"switching": name})
+
+    def switch_confirm(self):
+        """POST /api/switch {"position": "upconvert" | "bypass"}: a person says
+        which way the upconverter's switch is."""
+        try:
+            doc = self.body()
+            if not isinstance(doc, dict) or set(doc) != {"position"}:
+                raise ValueError('body must be {"position": "upconvert" or "bypass"}')
+            if doc["position"] not in station_conf.POSITIONS:
+                raise ValueError('position must be "upconvert" or "bypass"')
+        except (ValueError, TypeError) as e:
+            return self.send(400, {"error": str(e)})
+        if switch_position() is None:
+            return self.send(409, {"error": "this station's upconverter has no switch to confirm"
+                                            if station().upconverter else
+                                            "this station has no upconverter (station.json)"})
+        try:
+            station_conf.confirm_switch(doc["position"])
+        except OSError as e:
+            return self.send(503, {"error": "can't keep the switch's position: %s" % e})
+        log("the %s's switch confirmed on %s" % (upconverter_name(),
+                                                  station_conf.side_word(doc["position"])))
+        if self.server.rx.bands is not None:
+            self.server.rx.bands.wake.set()
+        self.send(200, self.server.rx.status())
 
     # the band plan (BandPlanner)
     def bands_get(self):
