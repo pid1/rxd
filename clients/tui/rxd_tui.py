@@ -1,17 +1,28 @@
 #!/usr/bin/env python3
 """rxd-tui: a terminal client for rxd, the RTL-SDR receiver daemon.
 
-It talks only to rxd's HTTP API (GET /api/status, GET /api/spectrum and
-POST /api/tune), by default at http://127.0.0.1:8073.
+It talks only to rxd's HTTP API, by default at http://127.0.0.1:8073, and
+has three views, like rxd's browser UI. The view follows the receiver's
+profile; 1, 2 and 3 pick one.
 
-Keys:
-  Left/Right  tune down/up by the step     Up/Down  larger/smaller step
-  f           type a frequency             m        next mode
-  [ ]         narrower/wider bandwidth     g G      gain down/up
-  - +         volume down/up               ?        help      q  quit
+  1 JS8     JS8Call's decodes, the clock, and a picker for the JS8
+            frequencies (Ghostnet or regular JS8Call). Nothing to tune.
+  2 Listen  a picker of broadcast FM, VHF/UHF and AM stations, with gain,
+            bandwidth, squelch (NFM) and the uConsole speaker's volume.
+  3 Manual  the full instrument: tuning, spectrum and waterfall.
 
-A typed frequency is MHz when it is under 2000 (7.078, 146.52), kHz under
-100000 (14074) and Hz above that (7078000); a unit (k, M, Hz) overrides this.
+Picking a station or frequency switches rxd's profile; rxd restarts, which
+takes a few seconds. Leaving a JS8 profile asks first, since it closes
+JS8Call.
+
+l plays the receiver's audio on this machine, through the first of pw-cat,
+paplay, aplay, ffplay or sox's play on PATH (or --player), so the TUI works
+as a remote listening station. [ ] set its volume here; M mutes the
+uConsole's own speaker meanwhile. --listen starts with it on.
+
+? shows each view's keys. A typed frequency (f, in Manual) is MHz when it is
+under 2000 (7.078, 146.52), kHz under 100000 (14074) and Hz above that;
+a unit (k, M, Hz) overrides this.
 
 Status is shown with a symbol and a word as well as colour, and NO_COLOR is
 honoured. --ascii draws without Unicode block characters.
@@ -24,18 +35,24 @@ import locale
 import math
 import os
 import re
+import shlex
+import shutil
+import socket
+import subprocess
 import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
+from array import array
 
 DEFAULT_URL = "http://127.0.0.1:8073"
 STEPS = (10, 100, 1000, 5000, 12500, 100000, 1000000)  # same set as the web UI
 DEFAULT_STEP = 1000
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
-# Bandwidth presets for [ and ]. rxd's SSB filter runs from 200 Hz to 200 Hz
-# plus the bandwidth, so 2800 is SDR++'s 3000 Hz filter.
+# Bandwidth presets for [ and ] in Manual. rxd's SSB filter runs from 200 Hz
+# to 200 Hz plus the bandwidth, so 2800 is SDR++'s 3000 Hz filter.
 BANDWIDTHS = {"USB": (500, 1000, 1800, 2400, 2800), "LSB": (500, 1000, 1800, 2400, 2800),
               "AM": (3000, 5000, 6000, 8000, 10000), "FM": (6250, 10000, 12500, 25000),
               "WFM": (100000, 150000, 200000)}
@@ -44,13 +61,32 @@ VOLUME_MAX = 4.0                       # rxd accepts 0 to 4
 GAIN_FALLBACK_MAX = 50.0               # 1 dB steps when rxd reports no gain table
 LEVEL_LO, LEVEL_HI = -110.0, -10.0     # signal bar span, dBFS
 
+# The views, and which profiles belong to which (as in the browser UI).
+VIEWS = (("js8", "JS8"), ("listen", "Listen"), ("manual", "Manual"))
+LISTEN_MODES = ("WFM", "FM", "AM")
+GROUPS = (("WFM", "Broadcast FM"), ("FM", "VHF · UHF"), ("AM", "AM"))
+# Listen's b cycles these: Narrow, Normal, Wide.
+LISTEN_BW = {"WFM": (100e3, 150e3, 200e3), "FM": (8e3, 12.5e3, 16e3), "AM": (6e3, 10e3, 15e3)}
+BW_NAMES = ("Narrow", "Normal", "Wide")
+SQUELCH_DEFAULT, SQUELCH_STEP = -60.0, 2.0       # dBFS
+SQUELCH_MIN, SQUELCH_MAX = -120.0, 0.0
+LOCAL_VOL_STEP, LOCAL_VOL_MAX = 10, 200          # percent, for audio played here
+PLAYERS = ("pw-cat", "paplay", "aplay", "ffplay", "play")
+
 STATUS_EVERY = 0.5      # seconds: about 2 a second
-SPECTRUM_EVERY = 0.25   # about 4 a second
+SPECTRUM_EVERY = 0.25   # about 4 a second, in Manual only
 RETRY_EVERY = 1.0       # while rxd is unreachable
 NO_SPECTRUM_EVERY = 5.0  # while rxd has no /api/spectrum
+JS8_EVERY = 2.5         # the decode feed, on a JS8 profile
+PROFILES_RETRY = 10.0   # after /api/profiles failed
 TIMEOUT = 0.8           # per request
+SLOW_TIMEOUT = 20.0     # /api/profiles and the switch run `radio --json`
 DROPPING_HOLD = 3.0     # "DROPPING" stays up this long after the count last rose
+SWITCH_TIMEOUT = 25.0   # a profile switch that hasn't finished by then failed
 WATERFALL_MAX = 64
+JS8_KEEP = 500
+AUDIO_STALL = 3.0       # seconds without audio before the stream is reopened
+AUDIO_FRESH = 1.5       # audio this recent counts as playing
 
 
 # ------------------------------------------------------------ pure logic
@@ -150,6 +186,312 @@ def format_hz(hz):
     return "%d Hz" % round(hz)
 
 
+def short_mhz(hz):
+    """105300000 -> '105.3 MHz'; 7078000 -> '7.078 MHz'."""
+    return ("%.6f" % (float(hz) / 1e6)).rstrip("0").rstrip(".") + " MHz"
+
+
+def station_freq(hz, mode):
+    """The number and unit a station is known by: 105.3 MHz, or 1030 kHz on AM."""
+    hz = float(hz)
+    if mode == "AM" and hz < 30e6:
+        return ("%.3f" % (hz / 1e3)).rstrip("0").rstrip("."), "kHz"
+    return ("%.6f" % (hz / 1e6)).rstrip("0").rstrip("."), "MHz"
+
+
+def percent(volume):
+    return "%d %%" % round(float(volume) * 100)
+
+
+def clip(text, width, g):
+    """text cut to width, with an ellipsis if anything was cut."""
+    if width <= 0:
+        return ""
+    if len(text) <= width:
+        return text
+    e = g.ellipsis if width > len(g.ellipsis) else ""
+    return text[:width - len(e)] + e
+
+
+# ---- profiles and views
+
+def mode_label(mode):
+    """rxd's FM is narrow FM; the browser UI calls it NFM too."""
+    return "NFM" if mode == "FM" else (mode or "---")
+
+
+def profile_kind(p):
+    """Which view a profile belongs to: js8, listen or manual."""
+    if p.get("js8"):
+        return "js8"
+    return "listen" if p.get("mode") in LISTEN_MODES else "manual"
+
+
+def status_kind(st):
+    """The same for a status, when the profile list isn't available."""
+    if not st or not st.get("mode"):
+        return None
+    if st.get("js8"):
+        return "js8"
+    return "listen" if st["mode"] in LISTEN_MODES else "manual"
+
+
+def group_stations(profiles):
+    """Listen's picker: [(group title, [profiles])], in the browser UI's order."""
+    ls = [p for p in profiles if profile_kind(p) == "listen"]
+    out = []
+    for mode, title in GROUPS:
+        members = [p for p in ls if p.get("mode") == mode]
+        if members:
+            out.append((title, members))
+    return out
+
+
+def picker_list(view, profiles):
+    """The profiles a view's picker offers, in order."""
+    if view == "js8":
+        return [p for p in profiles if p.get("js8")]
+    if view == "listen":
+        return [p for _, members in group_stations(profiles) for p in members]
+    return []
+
+
+def cycle_bandwidth(mode, bw):
+    """Listen's b: the next of Narrow, Normal and Wide, round again after Wide.
+    Off a preset, the next wider one. None for a mode without presets."""
+    presets = LISTEN_BW.get(mode)
+    if not presets:
+        return None
+    bw = float(bw or 0)
+    for i, p in enumerate(presets):
+        if abs(p - bw) < 1:
+            return presets[(i + 1) % len(presets)]
+    wider = [p for p in presets if p > bw]
+    return wider[0] if wider else presets[0]
+
+
+def bandwidth_name(mode, bw):
+    for name, p in zip(BW_NAMES, LISTEN_BW.get(mode, ())):
+        if bw is not None and abs(p - float(bw)) < 1:
+            return name
+    return "Custom"
+
+
+NOSEND = object()
+
+
+def squelch_key(key, squelch, level):
+    """Listen's squelch keys: s toggles, , lowers and . raises the level.
+
+    Returns (what to send as squelch, or NOSEND; the level to remember;
+    a message, or "")."""
+    if key == "s":
+        if squelch is None:
+            return level, level, ""
+        return None, float(squelch), ""
+    if squelch is None:
+        return NOSEND, level, "Squelch is off: s turns it on"
+    d = SQUELCH_STEP if key == "." else -SQUELCH_STEP
+    new = clamp(float(squelch) + d, SQUELCH_MIN, SQUELCH_MAX)
+    if new == squelch:
+        return NOSEND, new, "Squelch at its %s: %d dBFS" % (
+            "highest" if d > 0 else "lowest", new)
+    return new, new, ""
+
+
+def squelch_words(st, g):
+    """(text, role) for the squelch: Off, or the level and whether it's open."""
+    sq = st.get("squelch")
+    if sq is None:
+        return "Off, always open", "value"
+    lvl = "%d dBFS" % round(sq)
+    if st.get("squelch_open") is False:
+        return "%s  %s Closed (quiet)" % (lvl, g.stop), "label"
+    return "%s  %s Open (signal)" % (lvl, g.rx), "ok"
+
+
+def clock_words(clock, g):
+    """(text, role) for the clock, which JS8 needs within about a second."""
+    c = clock if isinstance(clock, dict) else {}
+    if c.get("synced") is True:
+        src = c.get("source")
+        return "%s Clock synced%s" % (g.rx, " (%s)" % src if src else ""), "ok"
+    if c.get("synced") is False:
+        off = c.get("offset_s")
+        extra = " (%.1f s off)" % abs(off) if isinstance(off, (int, float)) else ""
+        return "%s Clock not synced: JS8 won't decode%s" % (g.bad, extra), "bad"
+    return "%s Clock unknown" % g.unknown, "warn"
+
+
+def hiu_word(up):
+    return "UPCONVERT" if up else "BYPASS"
+
+
+def flip_needed(p, st):
+    """Whether switching to profile p means flipping the Ham It Up's switch."""
+    if "upconverter_hz" not in st or st.get("upconverter_hz") is None:
+        return False
+    return bool(p.get("upconvert")) != (st["upconverter_hz"] > 0)
+
+
+# ---- JS8 decodes
+
+def js8_mine(line, call):
+    """Whether a decode is to (or mentions) the owner's callsign."""
+    if line.get("mycall") is True:
+        return True
+    c = (call or "").upper()
+    if not c:
+        return False
+    if (line.get("to") or "").upper() == c:
+        return True
+    text = str(line.get("text") or "").upper()
+    sender = str(line.get("from") or "").upper()
+    if sender and text.startswith(sender + ":"):
+        text = text[len(sender) + 1:]  # the sender's own name isn't a mention
+    return c in re.split(r"[^A-Z0-9/]+", text)
+
+
+def js8_key(line):
+    return " ".join([str(line.get("from") or ""), str(line.get("to") or ""),
+                     str(line.get("text") or "")]).upper()
+
+
+def js8_filter(lines, text):
+    """The lines whose callsigns or text contain text (any case)."""
+    f = (text or "").strip().upper()
+    return [x for x in lines if f in js8_key(x)] if f else list(lines)
+
+
+def js8_time(t):
+    m = re.search(r"\d\d:\d\d:\d\d", str(t or ""))
+    return m.group(0) if m else str(t or "--:--:--")[:8]
+
+
+JS8_HEADER = "UTC      SNR  From      Message"
+
+
+def format_js8(line, call, width, g):
+    """(text, mine) for one decode: time, SNR, sender, a mark if it's to us, text."""
+    fr = str(line.get("from") or "?")
+    text = str(line.get("text") or "")
+    if text.upper().startswith(fr.upper() + ":"):
+        text = text[len(fr) + 1:].strip()
+    snr = line.get("snr")
+    snr_t = "%+3d" % snr if isinstance(snr, int) else "  ?"
+    mine = js8_mine(line, call)
+    s = "%s %s  %-9s %s%s" % (js8_time(line.get("time")), snr_t, fr,
+                              (g.mine + " ") if mine else "", text)
+    return clip(s, width, g), mine
+
+
+def stations_heard(lines):
+    return len({x.get("from") for x in lines if x.get("from")})
+
+
+# ---- audio here
+
+def rate_for(mode):
+    """The stream rate: 24 kHz carries broadcast FM's audio, 12 kHz is plenty for voice."""
+    return 24000 if mode == "WFM" else 12000
+
+
+def find_player(which=shutil.which):
+    """(name, path) of the first raw-PCM player on PATH, or None."""
+    for name in PLAYERS:
+        path = which(name)
+        if path:
+            return name, path
+    return None
+
+
+def ffplay_channels(help_text):
+    """ffmpeg 7 dropped the raw demuxers' -ac for -ch_layout; older ones lack it."""
+    return ["-ch_layout", "mono"] if "ch_layout" in help_text else ["-ac", "1"]
+
+
+def probe_ffplay(path):
+    try:
+        out = subprocess.run([path, "-hide_banner", "-h", "demuxer=s16le"],
+                             capture_output=True, text=True, timeout=5,
+                             stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return ["-ac", "1"]
+    return ffplay_channels(out.stdout + out.stderr)
+
+
+def player_command(name, path, rate, channels=None):
+    """The argv that plays raw s16le mono at rate from stdin."""
+    r = str(int(rate))
+    if name == "pw-cat":
+        return [path, "--playback", "--raw", "--format", "s16", "--rate", r, "--channels", "1", "-"]
+    if name == "paplay":
+        return [path, "--raw", "--format=s16le", "--rate=" + r, "--channels=1"]
+    if name == "aplay":
+        return [path, "-q", "-t", "raw", "-f", "S16_LE", "-r", r, "-c", "1"]
+    if name == "ffplay":
+        return [path, "-nodisp", "-loglevel", "quiet", "-f", "s16le", "-ar", r] + \
+            list(channels or ["-ac", "1"]) + ["-"]
+    if name == "play":
+        return [path, "-q", "-t", "raw", "-e", "signed", "-b", "16", "-c", "1", "-r", r, "-"]
+    raise ValueError("no such player: %s" % name)
+
+
+def custom_command(cmd, rate):
+    """--player's command, with {rate} replaced by the sample rate."""
+    return [a.replace("{rate}", str(int(rate))) for a in shlex.split(cmd)]
+
+
+def no_player_hint(platform=sys.platform):
+    if platform == "darwin":
+        return "No audio player found. Install one: brew install ffmpeg (or sox), or use --player"
+    return "No audio player found. Install pipewire-bin, alsa-utils, ffmpeg or sox"
+
+
+class Player:
+    """How to start the local player: a name for the status and an argv per rate."""
+
+    def __init__(self, name, build):
+        self.name = name
+        self.build = build
+
+    @classmethod
+    def found(cls, name, path):
+        chans = []
+
+        def build(rate):
+            if name == "ffplay" and not chans:
+                chans.extend(probe_ffplay(path))
+            return player_command(name, path, rate, chans)
+        return cls(name, build)
+
+    @classmethod
+    def custom(cls, cmd):
+        argv = shlex.split(cmd)
+        if not argv:
+            raise ValueError("--player needs a command")
+        return cls(os.path.basename(argv[0]), lambda rate: custom_command(cmd, rate))
+
+
+def scale_pcm(data, gain):
+    """s16le samples times gain, clamped to 16 bits. data must be whole samples."""
+    if gain == 1.0:
+        return data
+    if gain <= 0:
+        return bytes(len(data))
+    a = array("h")
+    a.frombytes(data)
+    if sys.byteorder == "big":
+        a.byteswap()
+    out = array("h", [-32768 if v < -32768 else 32767 if v > 32767 else v
+                      for v in (int(s * gain) for s in a)])
+    if sys.byteorder == "big":
+        out.byteswap()
+    return out.tobytes()
+
+
+# ---- glyphs and drawing helpers
+
 class Glyphs:
     """Characters for Unicode terminals, or plain ASCII."""
 
@@ -161,7 +503,9 @@ class Glyphs:
             self.level = ("#", "-", "")
             self.dial, self.band, self.left, self.right = "^", "=", "<", ">"
             self.rx, self.drop, self.bad, self.stop, self.wait = "*", "!", "x", "#", "~"
-            self.keys = {"left": "<-", "right": "->", "up": "Up", "down": "Dn", "sep": "/"}
+            self.unknown, self.mine, self.cursor, self.dot = "?", ">", ">", "/"
+            self.keys = {"left": "<-", "right": "->", "up": "Up", "down": "Dn", "sep": "/",
+                         "updown": "Up/Dn"}
             self.ellipsis = "..."
         else:
             self.bars = " ▁▂▃▄▅▆▇█"
@@ -169,8 +513,19 @@ class Glyphs:
             self.level = ("█", "░", " ▏▎▍▌▋▊▉")
             self.dial, self.band, self.left, self.right = "▲", "━", "◀", "▶"
             self.rx, self.drop, self.bad, self.stop, self.wait = "●", "▲", "✕", "■", "…"
-            self.keys = {"left": "←", "right": "→", "up": "↑", "down": "↓", "sep": ""}
+            self.unknown, self.mine, self.cursor, self.dot = "?", "◆", "▸", "·"
+            self.keys = {"left": "←", "right": "→", "up": "↑", "down": "↓", "sep": "",
+                         "updown": "↑↓"}
             self.ellipsis = "…"
+
+    def text(self, s):
+        """Text written with Unicode punctuation, made ASCII when it must be."""
+        if not self.ascii:
+            return s
+        for a, b in (("·", "/"), ("…", "..."), ("●", "*"), ("▲", "!"), ("✕", "x"),
+                     ("■", "#"), ("◆", ">"), ("▸", ">"), ("↑↓", "Up/Dn"), ("—", "-")):
+            s = s.replace(a, b)
+        return s
 
 
 def resample(bins, start, stop, width, view_start=None, view_stop=None):
@@ -329,8 +684,10 @@ def big_text(text, scale, g):
     return ["".join(half[(p[2 * r], p[2 * r + 1])] for p in pix) for r in range(3)]
 
 
-def badge(reachable, status, dropping, g):
+def badge(reachable, status, dropping, g, switching=None):
     """(symbol, word, role) for the receiver's state. Never colour alone."""
+    if switching:
+        return g.stop, "SWITCHING", "warn"
     if reachable is None:
         return g.wait, "CONNECTING", "warn"
     if not reachable:
@@ -344,28 +701,59 @@ def badge(reachable, status, dropping, g):
     return g.rx, "RX", "ok"
 
 
-def help_items(g):
+SHORT_LABELS = {"bandwidth": "bw", "volume": "vol", "speaker": "spkr", "station": "pick",
+                "switch": "pick", "squelch": "sq", "listen": "listen", "filter": "filter"}
+
+
+def help_items(g, view="manual", mode=None, listening=False):
+    """[(keys, label)] for a view's bottom line; ? and q always come last."""
     k = g.keys
-    return [(k["left"] + k["sep"] + k["right"], "tune"), (k["up"] + k["sep"] + k["down"], "step"),
-            ("f", "freq"), ("m", "mode"), ("[ ]", "bandwidth"), ("g G", "gain"),
-            ("- +", "volume"), ("?", "help"), ("q", "quit")]
+    ud = k["updown"]
+    if view == "js8":
+        items = [(ud + " Enter", "switch"), ("PgUp PgDn", "scroll"), ("/", "filter"),
+                 ("1 2 3", "view")]
+        if listening:
+            items.insert(3, ("l", "stop audio"))
+    elif view == "listen":
+        items = [(ud + " Enter", "station"), ("g G", "gain"), ("b", "bandwidth")]
+        if mode == "FM":
+            items.append(("s , .", "squelch"))
+        items += [("l", "listen")] + ([("[ ]", "volume")] if listening else []) + \
+            [("- +", "speaker"), ("M", "mute"), ("1 2 3", "view")]
+    else:
+        items = [(k["left"] + k["sep"] + k["right"], "tune"), (k["up"] + k["sep"] + k["down"], "step"),
+                 ("f", "freq"), ("m", "mode"), ("l", "listen"), ("[ ]", "bandwidth"),
+                 ("g G", "gain"), ("- +", "volume"), ("1 2 3", "view")]
+    return items + [("?", "help"), ("q", "quit")]
 
 
-def help_line(width, g):
-    """[(text, role)] for the bottom line: full labels if they fit, then shorter."""
-    items = help_items(g)
-    short = {"bandwidth": "bw", "volume": "vol", "freq": "freq"}
-    for labels, gap in (("full", "  "), ("short", "  "), ("short", " ")):
+def help_line(width, g, items=None):
+    """[(text, role)] for the bottom line: full labels if they fit, then shorter,
+    then fewer items; ? help and q quit always stay."""
+    items = list(items or help_items(g))
+
+    def build(its, short, gap):
         parts = []
-        for key, label in items:
-            if labels == "short":
-                label = short.get(label, label)
+        for key, label in its:
+            if short:
+                label = SHORT_LABELS.get(label, label)
             if parts:
                 parts.append((gap, "help"))
             parts += [(key, "key"), (" " + label, "help")]
-        if sum(len(t) for t, _ in parts) <= width:
+        return parts
+
+    def size(parts):
+        return sum(len(t) for t, _ in parts)
+    for short, gap in ((False, "  "), (True, "  "), (True, " ")):
+        parts = build(items, short, gap)
+        if size(parts) <= width:
             return parts
-    return parts  # the caller clips; '?' still opens the full list
+    while len(items) > 3:
+        items.pop(-4)  # the view keys, ? and q always stay
+        parts = build(items, True, " ")
+        if size(parts) <= width:
+            return parts
+    return parts  # the caller clips
 
 
 def use_color(environ=os.environ):
@@ -387,12 +775,12 @@ class Link:
         self.url = url.rstrip("/")
         self.timeout = timeout
 
-    def request(self, path, body=None):
+    def request(self, path, body=None, timeout=None):
         data = None if body is None else json.dumps(body).encode()
         req = urllib.request.Request(self.url + path, data=data,
                                      headers={"Content-Type": "application/json"} if data else {})
         try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as r:
+            with urllib.request.urlopen(req, timeout=timeout or self.timeout) as r:
                 return r.status, json.loads(r.read() or b"{}")
         except urllib.error.HTTPError as e:
             try:
@@ -403,11 +791,11 @@ class Link:
         except ValueError as e:  # a reply that isn't JSON
             raise OSError("bad reply from rxd: %s" % e)
 
-    def get(self, path):
-        return self.request(path)
+    def get(self, path, timeout=None):
+        return self.request(path, timeout=timeout)
 
-    def post(self, path, body):
-        return self.request(path, body)
+    def post(self, path, body, timeout=None):
+        return self.request(path, body, timeout=timeout)
 
 
 def reason(exc):
@@ -421,15 +809,19 @@ def reason(exc):
     return text.strip() or r.__class__.__name__
 
 
-class Poller(threading.Thread):
-    """Polls status and spectrum and sends tunes, off the curses thread."""
+class Poller:
+    """Talks to rxd off the curses thread.
+
+    One thread polls status (and the spectrum, in Manual) and sends tunes;
+    another does the slow things: the profile list, profile switches and
+    the JS8 decode feed."""
 
     def __init__(self, link, clock=time.monotonic):
-        super().__init__(name="rxd-poller", daemon=True)
         self.link = link
         self.clock = clock
         self.lock = threading.Lock()
         self.wake = threading.Event()
+        self.side_wake = threading.Event()
         self.changed = threading.Event()
         self.halt = threading.Event()
         self.reachable = None      # None until the first answer or failure
@@ -437,12 +829,32 @@ class Poller(threading.Thread):
         self.status = {}
         self.spectrum = None
         self.spec_state = "waiting"  # waiting, ok or missing (no /api/spectrum)
+        self.want_spectrum = True
         self.history = collections.deque(maxlen=WATERFALL_MAX)
         self.dropping_until = 0.0
         self.pending = {}
         self.acks = []             # (sent, error or None), drained by the UI
+        self.profiles = None       # rxd's {"active", "profiles"}
+        self.profiles_state = "loading"  # loading, ok, missing (old rxd) or error
+        self.profiles_error = ""
+        self.want_profiles = True
+        self.profiles_asked_for = None
+        self.profiles_retry_at = 0.0
+        self.switch_req = None
+        self.switch_acks = []      # (name, error or None)
+        self.js8_lines = collections.deque(maxlen=JS8_KEEP)
+        self.js8_seq = 0
+        self.js8_for = None        # the profile the lines are from
+        self.js8_state = "waiting"  # waiting, ok, missing or error
+        self.threads = []
 
     # called from the UI thread
+    def start(self):
+        for name, fn in (("rxd-poller", self.run), ("rxd-side", self.side)):
+            th = threading.Thread(target=fn, name=name, daemon=True)
+            th.start()
+            self.threads.append(th)
+
     def tune(self, **fields):
         with self.lock:
             self.pending.update(fields)
@@ -453,14 +865,31 @@ class Poller(threading.Thread):
             acks, self.acks = self.acks, []
         return acks
 
+    def switch(self, name):
+        with self.lock:
+            self.switch_req = name
+        self.side_wake.set()
+
+    def take_switch_acks(self):
+        with self.lock:
+            acks, self.switch_acks = self.switch_acks, []
+        return acks
+
+    def reload_profiles(self):
+        with self.lock:
+            self.want_profiles = True
+            self.profiles_retry_at = 0.0
+        self.side_wake.set()
+
     def dropping(self):
         return self.clock() < self.dropping_until
 
     def stop(self):
         self.halt.set()
         self.wake.set()
+        self.side_wake.set()
 
-    # the thread
+    # the status thread
     def run(self):
         next_status = next_spec = 0.0
         while not self.halt.is_set():
@@ -475,7 +904,9 @@ class Poller(threading.Thread):
             if now >= next_status:
                 ok = self._status()
                 next_status = now + (STATUS_EVERY if ok else RETRY_EVERY)
-            if now >= next_spec:
+            if not self.want_spectrum:
+                next_spec = next_status
+            elif now >= next_spec:
                 if self.reachable:
                     self._spectrum()
                     next_spec = now + (NO_SPECTRUM_EVERY if self.spec_state == "missing"
@@ -551,11 +982,375 @@ class Poller(threading.Thread):
             self._status()
         self.changed.set()
 
+    # the side thread: profiles, switches and JS8
+    def side(self):
+        next_js8 = 0.0
+        while not self.halt.is_set():
+            self.side_wake.clear()
+            with self.lock:
+                name, self.switch_req = self.switch_req, None
+                st, reachable = dict(self.status), self.reachable
+            if name:
+                self._switch(name)
+                continue
+            if reachable and self._profiles_due(st):
+                self._load_profiles(st)
+                continue
+            now = self.clock()
+            if reachable and st.get("js8"):
+                if st.get("profile") != self.js8_for:
+                    self._js8_reset(st.get("profile"))
+                    next_js8 = 0.0
+                if now >= next_js8:
+                    self._js8()
+                    next_js8 = self.clock() + JS8_EVERY
+            elif reachable and self.js8_for is not None:
+                self._js8_reset(None)
+            self.side_wake.wait(clamp(next_js8 - self.clock(), 0.05, 0.5)
+                                if st.get("js8") else 0.5)
+
+    def _profiles_due(self, st):
+        with self.lock:
+            if self.clock() < self.profiles_retry_at:
+                return False
+            if self.want_profiles:
+                return True
+            # rxd moved to another profile (switched by `radio` or the web UI)
+            act = self.profiles.get("active") if self.profiles else None
+            name = st.get("profile")
+            return bool(self.profiles and name and name != act and name != self.profiles_asked_for)
+
+    def _load_profiles(self, st):
+        with self.lock:
+            self.profiles_asked_for = st.get("profile")
+        try:
+            code, doc = self.link.get("/api/profiles", timeout=SLOW_TIMEOUT)
+        except OSError as e:
+            with self.lock:
+                self.profiles_error = "can't reach rxd (%s)" % reason(e)
+                self.profiles_retry_at = self.clock() + RETRY_EVERY
+            return
+        with self.lock:
+            self.want_profiles = False
+            if code == 200 and isinstance(doc.get("profiles"), list):
+                self.profiles, self.profiles_state, self.profiles_error = doc, "ok", ""
+            elif code == 404:
+                self.profiles, self.profiles_state = None, "missing"
+            else:
+                self.profiles_state = "error" if self.profiles is None else "ok"
+                self.profiles_error = doc.get("error") or "HTTP %d" % code
+                self.want_profiles = True
+                self.profiles_retry_at = self.clock() + PROFILES_RETRY
+        self.changed.set()
+
+    def _switch(self, name):
+        try:
+            code, doc = self.link.post("/api/profile", {"name": name}, timeout=SLOW_TIMEOUT)
+            err = None if code in (200, 202) else \
+                "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
+        except OSError as e:
+            err = "Not switched: can't reach rxd (%s)" % reason(e)
+        with self.lock:
+            self.switch_acks.append((name, err))
+        self.changed.set()
+
+    def _js8_reset(self, profile):
+        with self.lock:
+            self.js8_lines.clear()
+            self.js8_seq = 0
+            self.js8_for = profile
+            self.js8_state = "waiting"
+        self.changed.set()
+
+    def _js8(self):
+        try:
+            code, doc = self.link.get("/api/js8?after=%d" % self.js8_seq, timeout=3.0)
+        except OSError:
+            return  # the status thread reports rxd's absence
+        with self.lock:
+            if code == 200 and isinstance(doc.get("lines"), list):
+                seq = doc.get("seq") if isinstance(doc.get("seq"), int) else self.js8_seq
+                if seq < self.js8_seq:  # rxd restarted and numbers from 1 again
+                    self.js8_lines.clear()
+                    self.js8_seq = 0
+                    self.side_wake.set()
+                    return
+                new = sorted((x for x in doc["lines"] if isinstance(x, dict)
+                              and (x.get("seq") or 0) > self.js8_seq),
+                             key=lambda x: x.get("seq") or 0)
+                self.js8_lines.extend(new)
+                self.js8_seq = max(self.js8_seq, seq)
+                self.js8_state = "ok"
+            elif code == 404:
+                self.js8_state = "missing"
+            else:
+                self.js8_state = "error: " + (doc.get("error") or "HTTP %d" % code)
+        self.changed.set()
+
+
+# ------------------------------------------------------------ audio here
+
+class Refused(Exception):
+    """rxd answered the audio request with an error: retry slowly."""
+
+
+class AudioPlayer:
+    """rxd's /api/audio piped into a local player, in a background thread.
+
+    It reconnects when the stream drops (as it does across a profile switch),
+    restarts the player when the rate changes with the mode, scales the
+    samples for the volume here, and kills the player when it stops."""
+
+    def __init__(self, url, player, changed=None, clock=time.monotonic):
+        u = urllib.parse.urlsplit(url)
+        self.scheme = u.scheme
+        self.host = u.hostname or "127.0.0.1"
+        self.port = u.port or 80
+        self.base = u.path.rstrip("/")
+        self.player = player
+        self.changed = changed or threading.Event()
+        self.clock = clock
+        self.lock = threading.Lock()
+        self.on = False
+        self.rate = 12000
+        self.gain = 1.0
+        self.state = "off"     # off, connecting, playing, reconnecting, error
+        self.error = ""
+        self.play_rate = None
+        self.last_data = 0.0
+        self.bytes = 0
+        self.proc = None
+        self.sock = None
+        self.halt = None
+        self.thread = None
+
+    # called from the UI thread
+    def start(self, rate):
+        if self.on:
+            return
+        self.rate = rate
+        self.on = True
+        self.halt = threading.Event()
+        self._set("connecting")
+        self.thread = threading.Thread(target=self.run, args=(self.halt,), name="rxd-audio",
+                                       daemon=True)
+        self.thread.start()
+
+    def stop(self, wait=2.0):
+        if not self.on:
+            return
+        self.on = False
+        self.halt.set()
+        self._close_sock()
+        self._kill(self.proc)
+        if self.thread:
+            self.thread.join(wait)
+        self._set("off")
+
+    def set_rate(self, rate):
+        self.rate = rate
+
+    def words(self, g):
+        """(symbol, text, role) for the audio's state."""
+        with self.lock:
+            state, err, rate, last = self.state, self.error, self.play_rate, self.last_data
+        if not self.on:
+            if err:
+                return g.bad, "Audio stopped: " + err, "bad"
+            return g.stop, "Not listening here", "dim"
+        if state == "error":
+            return g.bad, "Audio: %s Retrying." % err, "bad"
+        if state == "playing" and self.clock() - last < AUDIO_FRESH:
+            return g.rx, "Listening on this machine (%s, %s kHz)" % (
+                self.player.name, ("%.1f" % (rate / 1000)).rstrip("0").rstrip(".")), "ok"
+        if state == "connecting":
+            return g.drop, "Connecting audio", "warn"
+        return g.drop, "Reconnecting", "warn"
+
+    # the thread
+    def _set(self, state, error=""):
+        with self.lock:
+            changed = (state, error) != (self.state, self.error)
+            self.state, self.error = state, error
+        if changed:
+            self.changed.set()
+
+    def _close_sock(self):
+        s, self.sock = self.sock, None
+        if s:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            s.close()
+
+    @staticmethod
+    def _kill(proc):
+        if not proc:
+            return
+        try:
+            if proc.stdin:
+                proc.stdin.close()
+        except OSError:
+            pass
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(1.0)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(1.0)
+
+    def connect(self, rate):
+        """A socket positioned at the PCM, and the stream's rate. Raises Refused or OSError."""
+        if self.scheme not in ("http", ""):
+            raise Refused("audio needs an http:// rxd URL.")
+        s = socket.create_connection((self.host, self.port), timeout=3.0)
+        try:
+            s.sendall(("GET %s/api/audio?rate=%d HTTP/1.0\r\nHost: %s\r\n\r\n"
+                       % (self.base, rate, self.host)).encode())
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                data = s.recv(4096)
+                if not data:
+                    raise OSError("rxd closed the audio stream")
+                buf += data
+                if len(buf) > 65536:
+                    raise OSError("bad audio reply from rxd")
+            head, _, rest = buf.partition(b"\r\n\r\n")
+            lines = head.decode("latin-1").split("\r\n")
+            m = re.match(r"HTTP/\d\.\d (\d+)", lines[0])
+            if not m:
+                raise OSError("bad audio reply from rxd")
+            code = int(m.group(1))
+            headers = dict((k.strip().lower(), v.strip()) for k, _, v in
+                           (x.partition(":") for x in lines[1:]))
+            if code != 200:
+                body = rest
+                try:
+                    while len(body) < 65536:
+                        data = s.recv(4096)
+                        if not data:
+                            break
+                        body += data
+                except OSError:
+                    pass
+                try:
+                    err = json.loads(body or b"{}").get("error")
+                except (ValueError, AttributeError):
+                    err = None
+                if code == 404:
+                    raise Refused("this rxd has no audio stream.")
+                raise Refused("rxd refused: %s." % (err or "HTTP %d" % code))
+            try:
+                got = int(headers.get("x-audio-rate", rate))
+            except ValueError:
+                got = rate
+            return s, got, rest
+        except BaseException:
+            s.close()
+            raise
+
+    def run(self, halt):
+        proc, proc_rate, retries = None, None, 0
+        try:
+            while not halt.is_set():
+                rate = self.rate
+                try:
+                    s, got, first = self.connect(rate)
+                except Refused as e:
+                    self._set("error", str(e))
+                    halt.wait(5.0)
+                    continue
+                except OSError:
+                    retries += 1
+                    self._set("reconnecting" if self.bytes or retries > 1 else "connecting")
+                    halt.wait(min(0.5 * retries, 3.0))
+                    continue
+                self.sock = s
+                if halt.is_set():
+                    break
+                if proc is None or proc_rate != got or proc.poll() is not None:
+                    self._kill(proc)
+                    proc = None
+                    try:
+                        argv = self.player.build(got)
+                        proc = subprocess.Popen(argv, stdin=subprocess.PIPE, bufsize=0,
+                                                stdout=subprocess.DEVNULL,
+                                                stderr=subprocess.DEVNULL,
+                                                start_new_session=True)
+                    except (OSError, ValueError) as e:
+                        self._close_sock()
+                        self._set("error", "can't start %s (%s)." % (self.player.name, e))
+                        halt.wait(5.0)
+                        continue
+                    self.proc, proc_rate = proc, got
+                with self.lock:
+                    self.play_rate = got
+                ended = self.pump(s, proc, first, rate, halt)
+                self._close_sock()
+                if ended == "player":
+                    self._kill(proc)
+                    proc = None
+                    self._set("error", "%s stopped." % self.player.name)
+                    halt.wait(2.0)
+                elif ended == "rate":
+                    retries = 0
+                elif not halt.is_set():
+                    retries += 1
+                    self._set("reconnecting")
+                    halt.wait(min(0.5 * retries, 3.0))
+        finally:
+            self._close_sock()
+            self._kill(proc)
+            self.proc = None
+
+    def pump(self, s, proc, first, rate, halt):
+        """Copy PCM to the player until something ends it; says what did."""
+        s.settimeout(0.5)
+        carry = b""
+        last = self.clock()
+        data = first
+        while not halt.is_set():
+            if self.rate != rate:
+                return "rate"
+            if data:
+                data = carry + data
+                n = len(data) & ~1
+                carry, data = data[n:], data[:n]
+                try:
+                    proc.stdin.write(scale_pcm(data, self.gain))
+                except (BrokenPipeError, OSError, ValueError):
+                    return "player"
+                now = self.clock()
+                last = now
+                self.bytes += n
+                with self.lock:
+                    self.last_data = now
+                    was = self.state
+                    self.state, self.error = "playing", ""
+                if was != "playing":
+                    self.changed.set()
+            elif self.clock() - last > AUDIO_STALL:
+                return "stall"
+            if proc.poll() is not None:
+                return "player"
+            try:
+                data = s.recv(8192)
+            except socket.timeout:
+                data = b""
+                continue
+            except OSError:
+                return "closed"
+            if not data:
+                return "closed"
+        return "halt"
+
 
 # ------------------------------------------------------------------ drawing
 
 class Canvas:
-    """A plain-text screen, for tests and --snapshot."""
+    """A plain-text screen, for tests."""
 
     def __init__(self, h, w):
         self.h, self.w = h, w
@@ -573,10 +1368,13 @@ class Canvas:
     def text(self):
         return "\n".join("".join(r).rstrip() for r in self.cells)
 
+    def role_at(self, y, x):
+        return self.roles[y][x]
+
 
 class CursesScreen:
-    ROLES = ("bar", "big", "dim", "label", "value", "ok", "warn", "bad", "spec", "wf",
-             "marker", "key", "help", "msg", "err", "upconv")
+    ROLES = ("bar", "tabon", "big", "dim", "label", "value", "ok", "warn", "bad", "spec", "wf",
+             "marker", "key", "help", "msg", "err", "upconv", "sel", "mine", "head")
 
     def __init__(self, win, color):
         self.win = win
@@ -586,14 +1384,15 @@ class CursesScreen:
     @staticmethod
     def make_attrs(color):
         b, r, d = curses.A_BOLD, curses.A_REVERSE, getattr(curses, "A_DIM", 0)
-        a = {"bar": r, "big": b, "dim": d, "label": 0, "value": b, "ok": b, "warn": b,
-             "bad": b | r, "spec": 0, "wf": 0, "marker": b, "key": r, "help": 0,
-             "msg": 0, "err": b, "upconv": b}
+        a = {"bar": r, "tabon": b, "big": b, "dim": d, "label": 0, "value": b, "ok": b,
+             "warn": b, "bad": b | r, "spec": 0, "wf": 0, "marker": b, "key": r, "help": 0,
+             "msg": 0, "err": b, "upconv": b, "sel": r, "mine": b | r, "head": b}
         if color:
             pairs = {"ok": curses.COLOR_GREEN, "warn": curses.COLOR_YELLOW,
                      "bad": curses.COLOR_RED, "err": curses.COLOR_RED,
                      "spec": curses.COLOR_CYAN, "marker": curses.COLOR_YELLOW,
-                     "big": curses.COLOR_WHITE, "upconv": curses.COLOR_YELLOW}
+                     "big": curses.COLOR_WHITE, "upconv": curses.COLOR_YELLOW,
+                     "mine": curses.COLOR_CYAN}
             for n, (role, fg) in enumerate(sorted(pairs.items()), start=1):
                 try:
                     curses.init_pair(n, fg, -1)
@@ -613,28 +1412,69 @@ class CursesScreen:
 
 
 class App:
-    def __init__(self, poller, glyphs, url=DEFAULT_URL):
+    def __init__(self, poller, glyphs, url=DEFAULT_URL, audio=None, player_hint="",
+                 clock=time.monotonic, listen=False):
         self.p = poller
         self.g = glyphs
         self.url = url
+        self.audio = audio          # an AudioPlayer, or None when no player was found
+        self.player_hint = player_hint or no_player_hint()
+        self.clock = clock
         self.step = DEFAULT_STEP
         self.overrides = {}     # values sent but not yet confirmed by rxd
         self.message = ""       # the result of the last action
         self.message_role = "msg"
-        self.entry = None       # the frequency being typed, or None
+        self.entry = None       # text being typed, or None
+        self.entry_kind = None  # "freq" or "filter"
         self.show_help = False
+        self.confirm = None     # the profile a y/n question is about
         self.lo = self.hi = None  # smoothed spectrum range
         self.wf_cache = {}      # waterfall rows already resampled to the screen
+        # views
+        self.view = None        # js8, listen or manual; None until rxd says
+        self.view_for = None    # the profile the view was chosen for
+        self.pinned = False     # Manual, chosen by the user, stays
+        self.cursor = 0
+        self.cursor_key = None
+        self.switching = None   # {"name", "desc", "prev_up", "want_up", "since"}
+        self.sq_level = SQUELCH_DEFAULT
+        self.mute_prev = None   # the uConsole volume M will restore
+        self.local_vol = 100    # percent, for audio played here
+        self.js8_filter = ""
+        self.js8_scroll = 0     # lines back from the newest
+        self.js8_seen = None    # (profile, matching lines) at the last draw
+        self.js8_page = 10      # decode rows on screen, for PgUp and PgDn
+        self.want_listen = listen  # --listen: start once rxd says which mode
 
     # ---- state
-    def view(self):
+    def snap(self):
         with self.p.lock:
-            st = dict(self.p.status)
-            spec = self.p.spectrum
-            hist = list(self.p.history)
-            reachable, why, spec_state = self.p.reachable, self.p.why, self.p.spec_state
-        st.update(self.overrides)
-        return st, spec, hist, reachable, why, spec_state
+            s = dict(status=dict(self.p.status), spectrum=self.p.spectrum,
+                     history=list(self.p.history), reachable=self.p.reachable, why=self.p.why,
+                     spec_state=self.p.spec_state, profiles=self.p.profiles,
+                     profiles_state=self.p.profiles_state,
+                     profiles_error=getattr(self.p, "profiles_error", ""),
+                     js8=list(self.p.js8_lines), js8_state=self.p.js8_state)
+        s["status"].update(self.overrides)
+        return s
+
+    def profile_list(self, s):
+        return (s["profiles"] or {}).get("profiles") or []
+
+    def active_name(self, s):
+        return s["status"].get("profile") or (s["profiles"] or {}).get("active")
+
+    def active_profile(self, s):
+        n = self.active_name(s)
+        return next((p for p in self.profile_list(s) if p.get("name") == n), None)
+
+    def kind(self, s):
+        p = self.active_profile(s)
+        return profile_kind(p) if p else status_kind(s["status"])
+
+    def mismatch(self, s):
+        k = self.kind(s)
+        return self.view in ("js8", "listen") and k is not None and k != self.view
 
     def drain(self):
         for sent, err in self.p.take_acks():
@@ -643,6 +1483,63 @@ class App:
                     del self.overrides[k]
             if err:
                 self.say(err, "err")
+        for name, err in self.p.take_switch_acks():
+            if err and self.switching and self.switching["name"] == name:
+                self.switching = None
+                self.say(err, "err")
+
+    def update(self):
+        """Everything that follows from rxd's state: views, switches, the audio rate."""
+        self.drain()
+        s = self.snap()
+        st = s["status"]
+        self.p.want_spectrum = self.view == "manual"
+        sw = self.switching
+        if sw:
+            if s["reachable"] and st.get("profile") == sw["name"]:
+                self.finish_switch(st)
+            elif self.clock() - sw["since"] > SWITCH_TIMEOUT:
+                self.switching = None
+                self.say("%s The switch to %s did not finish. %s" % (
+                    self.g.bad, sw["name"],
+                    "rxd is still on %s." % st.get("profile") if s["reachable"]
+                    else "rxd has not come back after %d seconds." % SWITCH_TIMEOUT), "err")
+                self.p.reload_profiles()
+        if s["profiles_state"] == "missing":
+            self.view = "manual"  # an rxd that can't switch profiles: the instrument only
+        elif self.pinned:
+            self.view = "manual"
+            self.view_for = self.active_name(s)
+        else:
+            n, k = self.active_name(s), self.kind(s)
+            if n and k and n != self.view_for:
+                self.view_for, self.view = n, k
+                self.js8_scroll = 0
+        if self.mute_prev is not None and st.get("volume") and not self.switching \
+                and "volume" not in self.overrides and s["reachable"]:
+            self.mute_prev = None  # the speaker was turned up elsewhere
+        if self.audio and self.want_listen and st.get("mode"):
+            self.want_listen = False
+            self.audio.start(rate_for(st["mode"]))
+        if self.audio and self.audio.on and st.get("mode"):
+            self.audio.set_rate(rate_for(st["mode"]))
+        if self.audio:
+            self.audio.gain = self.local_vol / 100.0
+        return s
+
+    def finish_switch(self, st):
+        sw, self.switching = self.switching, None
+        up = (st.get("upconverter_hz") or 0) > 0
+        if up != sw["prev_up"]:
+            self.say("%s Flip the Ham It Up to %s for %s; the wrong way is silent."
+                     % (self.g.drop, hiu_word(up), sw["desc"]), "warn")
+        else:
+            self.say("%s Now on %s" % (self.g.rx, sw["desc"]), "ok")
+        if sw.get("muted") is not None and st.get("volume"):
+            self.mute_prev = st["volume"]
+            self.send(volume=0.0)
+        self.js8_scroll = 0
+        self.p.reload_profiles()
 
     def say(self, text, role="msg"):
         self.message, self.message_role = text, role
@@ -651,20 +1548,235 @@ class App:
         self.overrides.update(fields)
         self.p.tune(**fields)
 
+    def close(self):
+        """On quit: stop the audio here, and give the uConsole speaker back if M muted it."""
+        if self.audio:
+            self.audio.stop()
+        if self.mute_prev is not None and getattr(self.p, "link", None):
+            try:
+                self.p.link.post("/api/tune", {"volume": self.mute_prev})
+            except OSError:
+                pass
+            self.mute_prev = None
+
     # ---- keys; returns False to quit
     def key(self, ch):
+        s = self.update()
         if self.show_help:
             self.show_help = False
             return True
+        if self.confirm is not None:
+            p, self.confirm = self.confirm, None
+            if ch in (ord("y"), ord("Y")):
+                self.do_switch(p, s)
+            else:
+                self.say("Stayed on %s" % self.active_name(s))
+            return True
         if self.entry is not None:
             return self.entry_key(ch)
-        st = self.view()[0]
         if ch in (ord("q"), ord("Q")):
             return False
         self.say("")
         if ch == ord("?"):
             self.show_help = True
-        elif ch in (curses.KEY_LEFT, curses.KEY_RIGHT):
+        elif ch in (ord("1"), ord("2"), ord("3")):
+            self.pick_view(VIEWS[ch - ord("1")][0], s)
+        elif ch == ord("l"):
+            self.toggle_audio(s)
+        elif self.view == "js8":
+            self.js8_key(ch, s)
+        elif self.view == "listen":
+            self.listen_key(ch, s)
+        elif self.view == "manual":
+            self.manual_key(ch, s)
+        elif s["reachable"] is not True:
+            self.say("Waiting for rxd; 3 opens Manual meanwhile")
+        return True
+
+    def pick_view(self, v, s):
+        if v != "manual" and s["profiles_state"] == "missing":
+            self.say("This rxd can't switch profiles (no /api/profiles), so it's Manual only",
+                     "err")
+            return
+        self.view, self.pinned = v, v == "manual"
+        self.view_for = self.active_name(s)
+        self.cursor_key = None
+        self.js8_scroll = 0
+
+    def picker(self, s):
+        """(the current view's picker list, the cursor, kept on the list)."""
+        items = picker_list(self.view, self.profile_list(s))
+        key = (self.view, self.active_name(s), tuple(p.get("name") for p in items))
+        if key != self.cursor_key:
+            self.cursor_key = key
+            names = [p.get("name") for p in items]
+            self.cursor = names.index(key[1]) if key[1] in names else 0
+        self.cursor = clamp(self.cursor, 0, max(len(items) - 1, 0))
+        return items
+
+    def picker_key(self, ch, s):
+        """↑/↓ and Enter in a picker. True if the key was the picker's."""
+        if ch not in (curses.KEY_UP, curses.KEY_DOWN, 10, 13, curses.KEY_ENTER):
+            return False
+        items = self.picker(s)
+        if not items:
+            self.say(self.picker_empty(s), "err")
+            return True
+        if ch == curses.KEY_UP:
+            self.cursor = max(0, self.cursor - 1)
+        elif ch == curses.KEY_DOWN:
+            self.cursor = min(len(items) - 1, self.cursor + 1)
+        else:
+            self.select(items[self.cursor], s)
+        return True
+
+    def picker_empty(self, s):
+        if s["profiles_state"] == "error" and not s["profiles"]:
+            return "%s Can't list profiles: %s" % (self.g.bad, s["profiles_error"])
+        if not s["profiles"]:
+            return "Loading profiles from rxd" + self.g.ellipsis
+        return "No %s profiles are saved." % ("JS8" if self.view == "js8" else "station")
+
+    def select(self, p, s):
+        st = s["status"]
+        if self.switching:
+            self.say("Already switching to %s" % self.switching["name"])
+        elif p.get("name") == self.active_name(s):
+            self.say("Already on %s" % p.get("name"))
+        elif not s["reachable"]:
+            self.say("Not switched: can't reach rxd", "err")
+        else:
+            cur = self.active_profile(s)
+            if st.get("js8") or (cur and cur.get("js8")):
+                self.confirm = p
+            else:
+                self.do_switch(p, s)
+
+    def do_switch(self, p, s):
+        st = s["status"]
+        self.switching = {"name": p["name"], "desc": p.get("description") or p["name"],
+                          "prev_up": (st.get("upconverter_hz") or 0) > 0,
+                          "want_up": bool(p.get("upconvert")), "since": self.clock(),
+                          "muted": self.mute_prev}
+        self.say("")
+        self.p.switch(p["name"])
+
+    def toggle_audio(self, s):
+        if self.audio is None:
+            self.say("%s %s" % (self.g.bad, self.player_hint), "err")
+        elif self.audio.on:
+            self.audio.stop()
+            self.say("%s Stopped listening here" % self.g.stop)
+        elif self.view == "js8":
+            self.say("No audio in JS8: it goes to JS8Call. 2 or 3 to listen.")
+        else:
+            self.audio.start(rate_for(s["status"].get("mode")))
+
+    def local_volume_key(self, ch):
+        d = LOCAL_VOL_STEP if ch in (ord("]"), ord("}")) else -LOCAL_VOL_STEP
+        v = clamp(self.local_vol + d, 0, LOCAL_VOL_MAX)
+        if v == self.local_vol:
+            self.say("Volume here at its %s: %d %%" % ("maximum" if d > 0 else "minimum", v))
+        self.local_vol = v
+        if self.audio:
+            self.audio.gain = v / 100.0
+        if not (self.audio and self.audio.on):
+            self.say("Volume here %d %%, for when l plays the audio" % v)
+
+    def mute_key(self, s):
+        st = s["status"]
+        if self.view == "js8":
+            self.say("Not in JS8: the receiver's audio feeds JS8Call")
+        elif st.get("volume") is None:
+            self.not_yet()
+        elif self.mute_prev is not None:
+            v, self.mute_prev = self.mute_prev, None
+            self.send(volume=v)
+        elif st["volume"] <= 0:
+            self.say("The uConsole speaker is already at 0 %; + turns it up")
+        else:
+            self.mute_prev = st["volume"]
+            self.send(volume=0.0)
+
+    def speaker_key(self, ch, st):
+        if st.get("volume") is None:
+            return self.not_yet()
+        d = 1 if ch in (ord("+"), ord("=")) else -1
+        base = self.mute_prev if (self.mute_prev is not None and d > 0) else st["volume"]
+        v = next_volume(base, d)
+        self.mute_prev = None
+        if v == st["volume"]:
+            self.say("Speaker at its %s: %s" % ("maximum" if d > 0 else "minimum", percent(v)))
+        else:
+            self.send(volume=v)
+
+    def gain_key(self, ch, st):
+        if not st:
+            return self.not_yet()
+        d = 1 if ch == ord("G") else -1
+        g = next_gain(st.get("gains"), st.get("gain_db"), d)
+        if g == st.get("gain_db"):
+            self.say("Gain at its %s: %.1f dB" % ("maximum" if d > 0 else "minimum", g))
+        else:
+            self.send(gain_db=g)
+
+    def js8_key(self, ch, s):
+        if self.picker_key(ch, s):
+            return
+        if ch in (curses.KEY_PPAGE, curses.KEY_NPAGE):
+            page = max(1, self.js8_page - 1)
+            self.js8_scroll = max(0, self.js8_scroll + (page if ch == curses.KEY_PPAGE else -page))
+        elif ch == ord("/"):
+            self.entry, self.entry_kind = self.js8_filter, "filter"
+        elif ch == 27:
+            if self.js8_filter:
+                self.js8_filter, self.js8_scroll = "", 0
+        elif ch == ord("M"):
+            self.mute_key(s)
+        else:
+            self.other_key(ch)
+
+    def listen_key(self, ch, s):
+        st = s["status"]
+        if self.picker_key(ch, s):
+            return
+        controls = (ord("g"), ord("G"), ord("b"), ord("s"), ord(","), ord("."))
+        if ch in controls and self.mismatch(s):
+            self.say("Receiver is on %s; pick a station first (%s Enter)" % (
+                st.get("profile"), self.g.keys["updown"]))
+        elif ch in (ord("g"), ord("G")):
+            self.gain_key(ch, st)
+        elif ch == ord("b"):
+            if st.get("mode") is None:
+                return self.not_yet()
+            bw = cycle_bandwidth(st["mode"], st.get("bandwidth"))
+            if bw is None:
+                self.say("No bandwidth presets for %s" % st["mode"])
+            else:
+                self.send(bandwidth=bw)
+        elif ch in (ord("s"), ord(","), ord(".")):
+            if st.get("mode") != "FM":
+                self.say("Squelch is for NFM only; this is %s" % mode_label(st.get("mode")))
+            elif "squelch" not in st:
+                self.say("This rxd has no squelch", "err")
+            else:
+                send, self.sq_level, msg = squelch_key(chr(ch), st.get("squelch"), self.sq_level)
+                if send is not NOSEND:
+                    self.send(squelch=send)
+                if msg:
+                    self.say(msg)
+        elif ch in (ord("-"), ord("_"), ord("+"), ord("=")):
+            self.speaker_key(ch, st)
+        elif ch == ord("M"):
+            self.mute_key(s)
+        elif ch in (ord("["), ord("]")):
+            self.local_volume_key(ch)
+        else:
+            self.other_key(ch)
+
+    def manual_key(self, ch, s):
+        st = s["status"]
+        if ch in (curses.KEY_LEFT, curses.KEY_RIGHT):
             if st.get("freq") is None:
                 return self.not_yet()
             d = 1 if ch == curses.KEY_RIGHT else -1
@@ -676,7 +1788,7 @@ class App:
         elif ch in (curses.KEY_UP, curses.KEY_DOWN):
             self.step = next_step(self.step, 1 if ch == curses.KEY_UP else -1)
         elif ch == ord("f"):
-            self.entry = ""
+            self.entry, self.entry_kind = "", "freq"
         elif ch == ord("m"):
             if st.get("mode") is None:
                 return self.not_yet()
@@ -692,25 +1804,21 @@ class App:
                     "widest" if d > 0 else "narrowest", st["mode"], format_hz(bw)))
             else:
                 self.send(bandwidth=bw)
+        elif ch in (ord("{"), ord("}")):
+            self.local_volume_key(ch)
         elif ch in (ord("g"), ord("G")):
-            if not st:
-                return self.not_yet()
-            d = 1 if ch == ord("G") else -1
-            g = next_gain(st.get("gains"), st.get("gain_db"), d)
-            if g == st.get("gain_db"):
-                self.say("Gain at its %s: %.1f dB" % ("maximum" if d > 0 else "minimum", g))
-            else:
-                self.send(gain_db=g)
+            self.gain_key(ch, st)
         elif ch in (ord("-"), ord("_"), ord("+"), ord("=")):
-            if st.get("volume") is None:
-                return self.not_yet()
-            d = 1 if ch in (ord("+"), ord("=")) else -1
-            v = next_volume(st["volume"], d)
-            if v == st["volume"]:
-                self.say("Volume at its %s: %.2f" % ("maximum" if d > 0 else "minimum", v))
-            else:
-                self.send(volume=v)
-        return True
+            self.speaker_key(ch, st)
+        elif ch == ord("M"):
+            self.mute_key(s)
+        else:
+            self.other_key(ch)
+
+    def other_key(self, ch):
+        if 32 < ch < 127:
+            self.say("%s isn't a key in %s; ? lists them" % (
+                chr(ch), dict(VIEWS)[self.view]))
 
     def not_yet(self):
         self.say("Not sent: no status from rxd yet", "err")
@@ -721,7 +1829,9 @@ class App:
             self.entry = None
         elif ch in (10, 13, curses.KEY_ENTER):
             text, self.entry = self.entry, None
-            if text.strip():
+            if self.entry_kind == "filter":
+                self.js8_filter, self.js8_scroll = text.strip().upper(), 0
+            elif text.strip():
                 try:
                     self.send(freq=parse_freq(text))
                 except ValueError as e:
@@ -736,25 +1846,356 @@ class App:
 
     # ---- drawing
     def draw(self, scr):
-        self.drain()
-        st, spec, hist, reachable, why, spec_state = self.view()
+        s = self.update()
         g, h, w = self.g, scr.h, scr.w
         if h < 10 or w < 30:
             scr.put(0, 0, "rxd-tui: too small", "err")
             scr.put(1, 0, "Needs 30x10; q quits")
             return
-        stale = not reachable
-        sym, word, role = badge(reachable, st, self.p.dropping(), g)
+        st = s["status"]
+        self.draw_bar(scr, s)
+        bottom = h - 2           # message line; help on h - 1
+        if self.view == "js8":
+            self.draw_js8(scr, s, 1, bottom)
+        elif self.view == "listen":
+            self.draw_listen(scr, s, 1, bottom)
+        elif self.view == "manual":
+            self.draw_manual(scr, s, bottom)
+        elif s["reachable"]:
+            scr.put(h // 2, 2, "Loading profiles from rxd" + g.ellipsis, "dim")
 
-        # top bar
+        self.draw_message(scr, s, bottom)
+        x = 1
+        listening = bool(self.audio and self.audio.on)
+        items = help_items(g, self.view or "manual", st.get("mode"), listening)
+        for text, r in help_line(w - 2, g, items):
+            scr.put(h - 1, x, text, r)
+            x += len(text)
+        if self.show_help:
+            self.draw_box(scr, self.help_lines())
+        elif self.confirm is not None:
+            self.draw_box(scr, self.confirm_lines(s))
+
+    def draw_bar(self, scr, s):
+        g, w = self.g, scr.w
+        st = s["status"]
+        sym, word, role = badge(s["reachable"], st, self.p.dropping(), g, self.switching)
+        b = " %s %s " % (sym, word)
         scr.put(0, 0, " " * w, "bar")
-        title = " rxd  " + (st.get("profile") or "")
+        tabs = []
+        for n, (v, name) in enumerate(VIEWS, start=1):
+            on = v == self.view
+            tabs.append((" %d %s%s " % (n, (g.rx + " ") if on else "", name), on))
+        tabw = sum(len(t) for t, _ in tabs)
+        title = " rxd  " + (self.active_name(s) or "")
         if self.url.rstrip("/") != DEFAULT_URL:
             title += "  @ " + self.url.split("//", 1)[-1]
-        scr.put(0, 0, title[:w - 14], "bar")
-        b = " %s %s " % (sym, word)
+        room = w - len(b) - 2 - tabw - 1
+        if room < 6:
+            tabs = [(t.replace(name, name[:1]) if not on else t, on)
+                    for (t, on), (_, name) in zip(tabs, VIEWS)]
+            tabw = sum(len(t) for t, _ in tabs)
+            room = w - len(b) - 2 - tabw - 1
+        scr.put(0, 0, clip(title, max(room, 4), g), "bar")
+        x = max(room, 4) + 1
+        if x + tabw <= w - len(b) - 1:
+            for t, on in tabs:
+                scr.put(0, x, t, "tabon" if on else "bar")
+                x += len(t)
         scr.put(0, w - len(b) - 1, b, role)
 
+    def draw_message(self, scr, s, y):
+        g, w = self.g, scr.w
+        st = s["status"]
+        if self.entry is not None:
+            if self.entry_kind == "filter":
+                prompts = ("Show lines with (a callsign, or nothing for all), Enter shows, "
+                           "Esc cancels: ", "Callsign, Enter filters, Esc cancels: ", "Filter: ")
+            else:
+                prompts = ("Frequency (7.078 MHz, 14074 kHz or 7078000 Hz), Enter tunes, "
+                           "Esc cancels: ", "Frequency (MHz, kHz or Hz), Enter tunes, "
+                           "Esc cancels: ", "Frequency: ")
+            for prompt in prompts:
+                if len(prompt) + 14 <= w:
+                    break
+            scr.put(y, 0, prompt, "value")
+            scr.put(y, len(prompt), self.entry + "_", "key")
+        elif self.message:
+            scr.put(y, 1, clip(g.text(self.message), w - 2, g), self.message_role)
+        elif self.switching:
+            sw = self.switching
+            text = "%s Switching to %s%s rxd restarts, which takes a few seconds." % (
+                g.stop, sw["name"], g.ellipsis)
+            if sw["want_up"] != sw["prev_up"]:
+                text = "%s Switching to %s%s  %s Flip the Ham It Up to %s" % (
+                    g.stop, sw["name"], g.ellipsis, g.drop, hiu_word(sw["want_up"]))
+            scr.put(y, 1, clip(text, w - 2, g), "warn")
+        elif s["reachable"] is False:
+            scr.put(y, 1, clip("%s Can't reach rxd at %s (%s). Retrying." % (
+                g.bad, self.url, s["why"]), w - 2, g), "err")
+        elif st.get("error"):
+            scr.put(y, 1, clip("rxd: %s" % st["error"], w - 2, g), "err")
+
+    def draw_note(self, scr, s, y, what):
+        """The note above a picker for a view the receiver isn't in."""
+        g = self.g
+        st = s["status"]
+        p = self.active_profile(s)
+        text = "Receiver is on %s%s. Pick %s to switch." % (
+            st.get("profile") or "another profile",
+            " (%s)" % p["description"] if p and p.get("description") else "", what)
+        scr.put(y, 1, clip(g.text(text), scr.w - 2, g), "warn")
+
+    def picker_row(self, p, s, i, top, sub):
+        """(text, role, state text, state role) for one picker entry."""
+        g = self.g
+        st = s["status"]
+        active = p.get("name") == self.active_name(s) and not self.switching
+        mark = g.cursor if i == self.cursor else " "
+        if active:
+            state, srole = g.rx + " Active", "ok"
+        elif self.switching and self.switching["name"] == p.get("name"):
+            state, srole = g.stop + " Switching" + g.ellipsis, "warn"
+        elif flip_needed(p, st):
+            state, srole = "%s Flip Ham It Up to %s" % (g.drop, hiu_word(p.get("upconvert"))), \
+                "upconv"
+        else:
+            state, srole = "", "label"
+        text = "%s %s %s" % (mark, top, sub)
+        return text, ("sel" if i == self.cursor else "value"), state, srole
+
+    def draw_picker_rows(self, scr, rows, y0, y1):
+        """rows: [(text, role, state, srole)] or ("group", title); kept in view of the cursor."""
+        w = scr.w
+        n = y1 - y0
+        if n <= 0:
+            return
+        cur = next((i for i, r in enumerate(rows) if r[0] != "group" and r[1] == "sel"), 0)
+        first = 0
+        if len(rows) > n:
+            first = clamp(cur - n // 2, 0, len(rows) - n)
+            if first > 0 and rows[first - 1][0] == "group" and cur - first < n - 1:
+                first -= 1
+        for k, r in enumerate(rows[first:first + n]):
+            y = y0 + k
+            if r[0] == "group":
+                scr.put(y, 1, self.g.text(r[1]), "head")
+                continue
+            text, role, state, srole = r
+            state = self.g.text(state)
+            sx = max(w - len(state) - 2, w // 2) if state else w - 1
+            body = clip(text, (sx - 2 if state else w - 3), self.g)
+            scr.put(y, 1, body.ljust(min(sx - 2, w - 3)) if role == "sel" else body, role)
+            if state and sx < w - 2:
+                scr.put(y, sx, clip(self.g.text(state), w - sx - 1, self.g), srole)
+        if first > 0:
+            scr.put(y0, w - 2, self.g.keys["up"][:1], "label")
+        if first + n < len(rows):
+            scr.put(y1 - 1, w - 2, self.g.keys["down"][:1], "label")
+
+    def draw_js8(self, scr, s, y, bottom):
+        g, w = self.g, scr.w
+        st = s["status"]
+        mis = self.mismatch(s)
+        if mis:
+            self.draw_note(scr, s, y, "a JS8 frequency")
+            y += 2
+        items = self.picker(s)
+        if not items:
+            scr.put(y, 2, g.text(self.picker_empty(s)), "dim")
+            y += 2
+        else:
+            rows = []
+            for i, p in enumerate(items):
+                sub = "%s%s %s" % (p.get("description") or "", " " + g.dot if p.get("description")
+                                   else "", short_mhz(p.get("freq") or 0))
+                rows.append(self.picker_row(p, s, i, "%-10s" % p.get("name"), sub.strip()))
+            n = min(len(rows), 4 if not mis else bottom - y - 1)
+            self.draw_picker_rows(scr, rows, y, y + n)
+            y += n + 1
+        if mis:
+            return
+        lines = s["js8"]
+        # status: Ham It Up, receiver, level, stations heard
+        sym, word, role = badge(s["reachable"], st, self.p.dropping(), g, self.switching)
+        x = 1
+        up = st.get("upconverter_hz")
+        parts = [("Ham It Up ", "label"),
+                 (hiu_word(up > 0) if up is not None else "---",
+                  "upconv" if up else "value"),
+                 ("   ", ""), ("%s %s" % (sym, word), role), ("   Signal ", "label")]
+        lvl = st.get("level_dbfs")
+        parts.append(("%.1f dBFS" % lvl if lvl is not None else "--- dBFS", "value"))
+        heard = stations_heard(lines)
+        tail = "%d station%s heard" % (heard, "" if heard == 1 else "s")
+        used = sum(len(t) for t, _ in parts)
+        barw = clamp(w - used - len(tail) - 8, 0, 20)
+        if barw >= 4:
+            parts += [(" ", ""), (level_bar(lvl, barw, g), "spec")]
+        parts += [("   ", ""), (tail, "value")]
+        for t, r in parts:
+            scr.put(y, x, t[:max(0, w - 1 - x)], r)
+            x += len(t)
+        y += 1
+        ctext, crole = clock_words(st.get("clock"), g)
+        if crole == "bad":
+            scr.put(y, 0, " " * w, "bad")
+            scr.put(y, 1, clip(ctext + ". Check chrony and the GPS.", w - 2, g), "bad")
+        else:
+            scr.put(y, 1, clip(ctext, w - 2, g), crole)
+        y += 1
+        if self.audio and self.audio.on:
+            y = self.draw_audio_row(scr, y)
+        y += 1 if bottom - y > 8 else 0
+        # decodes
+        shown = js8_filter(lines, self.js8_filter)
+        area = bottom - y - 1
+        self.js8_page = max(area, 1)
+        prof = st.get("profile")
+        if self.js8_seen and self.js8_seen[0] == prof and self.js8_scroll:
+            self.js8_scroll += max(0, len(shown) - self.js8_seen[1])  # stay put as lines arrive
+        self.js8_seen = (prof, len(shown))
+        self.js8_scroll = clamp(self.js8_scroll, 0, max(0, len(shown) - area))
+        info = ""
+        if self.js8_filter:
+            info = "Filter %s: %d of %d  (Esc clears)" % (
+                self.js8_filter, len(shown), len(lines))
+        if self.js8_scroll:
+            info = ("%s %d back, PgDn for newest" % (g.drop, self.js8_scroll)) + \
+                ("   " + info if info else "")
+        scr.put(y, 1, JS8_HEADER, "head")
+        if info:
+            scr.put(y, max(len(JS8_HEADER) + 3, w - len(info) - 2),
+                    clip(info, w - len(JS8_HEADER) - 5, g), "warn" if self.js8_scroll else "label")
+        y += 1
+        if area <= 0:
+            return
+        if not shown:
+            if s["js8_state"] == "missing":
+                text = "%s This rxd has no JS8 feed." % g.bad
+            elif str(s["js8_state"]).startswith("error"):
+                text = "%s No decodes: %s" % (g.bad, s["js8_state"][7:])
+            elif self.js8_filter and lines:
+                text = "No lines with %s. / changes the filter, Esc clears it." % self.js8_filter
+            else:
+                text = "No decodes yet. They appear here as JS8Call hears them."
+            scr.put(y, 2, clip(text, w - 3, g), "dim")
+            return
+        end = len(shown) - self.js8_scroll
+        view = shown[max(0, end - area):end]
+        call = st.get("js8_call")
+        for i, line in enumerate(view):
+            text, mine = format_js8(line, call, w - 2, g)
+            scr.put(y + i, 1, text.ljust(w - 2) if mine else text, "mine" if mine else "")
+
+    def draw_listen(self, scr, s, y, bottom):
+        g, w, h = self.g, scr.w, scr.h
+        st = s["status"]
+        stale = not s["reachable"]
+        mis = self.mismatch(s)
+        if mis:
+            self.draw_note(scr, s, y, "a station")
+            y += 2
+        else:
+            p = self.active_profile(s)
+            name = (p.get("description") if p else None) or st.get("profile") or "---"
+            num, unit = station_freq(st["freq"], st.get("mode")) if st.get("freq") else ("-.-", "MHz")
+            scale = 2 if (w >= 120 and h >= 36) else 1
+            big = big_text(num, scale, g)
+            bigw = len(big[0])
+            y += 1 if h >= 22 else 0
+            sub = "%s   %s" % (unit, mode_label(st.get("mode")))
+            grp = dict(GROUPS).get(st.get("mode"))
+            if grp:
+                sub += "   " + g.text(grp)
+            if h >= 20 and bigw + 30 <= w:
+                for i, line in enumerate(big):
+                    scr.put(y + i, 2, line, "dim" if stale else "big")
+                sx = 2 + bigw + 3
+                rows = [0, 1, 2] if len(big) == 3 else [0, 2, 4]
+                scr.put(y + rows[0], sx, clip(name, w - sx - 1, g), "value")
+                scr.put(y + rows[1], sx, clip(sub, w - sx - 1, g), "label")
+                scr.put(y + rows[2], sx, clip(st.get("profile") or "", w - sx - 1, g), "dim")
+                y += len(big) + 1
+            else:
+                scr.put(y, 1, clip("%s  %s %s  %s" % (name, num, unit, mode_label(st.get("mode"))),
+                                   w - 2, g), "dim" if stale else "big")
+                y += 1
+            # signal and Ham It Up
+            lvl = st.get("level_dbfs")
+            scr.put(y, 1, "Signal", "label")
+            scr.put(y, 8, "%6.1f dBFS" % lvl if lvl is not None else "  --- dBFS", "value")
+            up = st.get("upconverter_hz")
+            hiu = "Ham It Up " + (hiu_word(up > 0) if up is not None else "---")
+            barw = clamp(w - 20 - len(hiu) - 4, 4, 40)
+            scr.put(y, 20, level_bar(lvl, barw, g), "spec")
+            scr.put(y, 20 + barw + 3, "Ham It Up ", "label")
+            scr.put(y, 20 + barw + 13, hiu[10:], "upconv" if up else "value")
+            y += 1
+            # gain, bandwidth, speaker
+            gain = st.get("gain_db")
+            bw = st.get("bandwidth")
+            vol = st.get("volume")
+            if self.mute_prev is not None:
+                spk = "Muted (M restores %s)" % percent(self.mute_prev)
+            else:
+                spk = percent(vol) if vol is not None else "---"
+            fields = [("Gain", "%.1f dB" % gain if gain is not None else "---"),
+                      ("Bandwidth", "%s %s" % (bandwidth_name(st.get("mode"), bw), format_hz(bw))
+                       if bw else "---"),
+                      ("Speaker", spk)]
+            x = 1
+            for label, val in fields:
+                if x + len(label) + len(val) + 1 > w - 1:
+                    break
+                scr.put(y, x, label, "label")
+                scr.put(y, x + len(label) + 1, val, "warn" if label == "Speaker" and
+                        self.mute_prev is not None else "value")
+                x += len(label) + len(val) + 5
+            y += 1
+            if st.get("mode") == "FM" and "squelch" in st:
+                text, role = squelch_words(st, g)
+                scr.put(y, 1, "Squelch", "label")
+                scr.put(y, 9, text, role)
+                y += 1
+            y = self.draw_audio_row(scr, y)
+            y += 1
+        # the station picker
+        items = self.picker(s)
+        if not items:
+            scr.put(y, 2, g.text(self.picker_empty(s)), "dim")
+            return
+        rows, i = [], 0
+        for title, members in group_stations(self.profile_list(s)):
+            rows.append(("group", title))
+            for p in members:
+                desc = p.get("description") or p.get("name")
+                num, unit = station_freq(p.get("freq") or 0, p.get("mode"))
+                rows.append(self.picker_row(p, s, i, "%-22s" % clip(desc, 22, g),
+                                            "%7s %-3s  %s" % (num, unit, mode_label(p.get("mode")))))
+                i += 1
+        self.draw_picker_rows(scr, rows, y, bottom)
+
+    def draw_audio_row(self, scr, y, x=1):
+        g = self.g
+        if self.audio is None:
+            scr.put(y, x, clip("%s No audio player: %s" % (g.bad, self.player_hint.split(". ", 1)[-1]),
+                               scr.w - x - 1, g), "bad")
+            return y + 1
+        sym, text, role = self.audio.words(g)
+        text = "%s %s" % (sym, text)
+        if self.audio.on:
+            text += "   Volume here %d %%" % self.local_vol
+        else:
+            text += ": l plays the audio here"
+        scr.put(y, x, clip(text, scr.w - x - 1, g), role)
+        return y + 1
+
+    def draw_manual(self, scr, s, bottom):
+        st, spec, hist = s["status"], s["spectrum"], s["history"]
+        reachable, spec_state = s["reachable"], s["spec_state"]
+        g, h, w = self.g, scr.h, scr.w
+        stale = not reachable
         # big frequency, with mode, bandwidth and step beside it
         freq = st.get("freq")
         ftext = format_mhz(freq) if freq is not None else "-.--- ---"
@@ -795,9 +2236,12 @@ class App:
         scr.put(y, x, sw, srole)
         x += len(sw) + 4
         gain = st.get("gain_db")
+        if self.mute_prev is not None:
+            spk = "Muted"
+        else:
+            spk = percent(st["volume"]) if st.get("volume") is not None else "---"
         for label, val in (("Gain", "%.1f dB" % gain if gain is not None else "---"),
-                           ("Volume", "%.2f" % st["volume"] if st.get("volume") is not None
-                            else "---")):
+                           ("Speaker", spk)):
             if x + len(label) + len(val) + 2 > w:
                 break
             scr.put(y, x, label, "label")
@@ -805,52 +2249,28 @@ class App:
             x += len(label) + len(val) + 5
         y += 1
 
-        # signal level, and the receiver's health when there is room
+        # signal level, the audio here when it's on, and the receiver's health when there is room
         lvl = st.get("level_dbfs")
         scr.put(y, 1, "Signal", "label")
         ltext = "%6.1f dBFS" % lvl if lvl is not None else "  --- dBFS"
         scr.put(y, 8, ltext, "value")
-        extra = ""
-        if w >= 110 and st:
+        extra, erole = "", "label"
+        if self.audio and self.audio.on:
+            sym, text, erole = self.audio.words(g)
+            extra = "%s %s" % (sym, text)
+        elif w >= 110 and st:
             extra = "DSP %d%%   Dropped %d" % (round((st.get("dsp_cpu") or 0) * 100),
                                               st.get("dropped") or 0)
         barw = clamp(w - 21 - (len(extra) + 4 if extra else 0), 4, 60)
         scr.put(y, 20, level_bar(lvl, barw, g), "spec")
         if extra:
-            scr.put(y, 20 + barw + 4, extra, "label")
+            scr.put(y, 20 + barw + 3, clip(extra, w - barw - 24, g), erole)
         y += 2 if h >= 30 else 1
 
         # spectrum, markers and waterfall
-        bottom = h - 2           # message line; help on h - 1
         avail = bottom - y
         if avail >= 3:
             self.draw_spectrum(scr, y, avail, w, spec, hist, reachable, spec_state)
-
-        # message line
-        if self.entry is not None:
-            for prompt in ("Frequency (7.078 MHz, 14074 kHz or 7078000 Hz), Enter tunes, "
-                           "Esc cancels: ", "Frequency (MHz, kHz or Hz), Enter tunes, Esc cancels: ",
-                           "Frequency: "):
-                if len(prompt) + 14 <= w:
-                    break
-            scr.put(bottom, 0, prompt, "value")
-            scr.put(bottom, len(prompt), self.entry + "_", "key")
-        elif self.message:
-            scr.put(bottom, 1, self.message, self.message_role)
-        elif reachable is False:
-            scr.put(bottom, 1, "%s Can't reach rxd at %s (%s). Retrying." % (
-                g.bad, self.url, why), "err")
-        elif st.get("error"):
-            scr.put(bottom, 1, "rxd: %s" % st["error"], "err")
-
-        # help line
-        x = 1
-        for text, r in help_line(w - 2, g):
-            scr.put(h - 1, x, text, r)
-            x += len(text)
-
-        if self.show_help:
-            self.draw_help(scr)
 
     def draw_spectrum(self, scr, y, avail, w, spec, hist, reachable, spec_state):
         g = self.g
@@ -886,20 +2306,57 @@ class App:
             scr.put(y + 2 + rows + i, 0, render_waterfall_row(cols_i, self.lo, self.hi, g), "wf")
         self.wf_cache = cache
 
-    def draw_help(self, scr):
+    def help_lines(self):
         k = self.g.keys
-        lines = [
-            "rxd-tui keys",
-            "",
-            "%-9s tune down / up by the step" % (k["left"] + " " + k["right"]),
-            "%-9s larger / smaller step: 10 Hz to 1 MHz" % (k["up"] + " " + k["down"]),
-            "f         type a frequency and press Enter:",
-            "            7.078 or 146.52 is MHz, 14074 is kHz,",
-            "            7078000 is Hz; 7078k and 7.078M work too",
-            "m         next mode: USB LSB AM FM WFM",
-            "[ ]       narrower / wider bandwidth",
-            "g G       gain down / up through the dongle's steps",
-            "- +       volume down / up (0 to 4)",
+        ud = k["updown"]
+        views = ["1 2 3     JS8, Listen or Manual view"]
+        if self.view == "js8":
+            body = [
+                "rxd-tui: JS8",
+                "",
+                "%-9s pick a JS8 frequency; Enter switches" % ud,
+                "PgUp PgDn scroll back through the decodes / forward",
+                "/         show only lines with a callsign; Esc",
+                "          shows them all again",
+                "l         stop the audio here, if it's playing",
+            ] + views + [
+                "",
+                "%s marks lines to your callsign. JS8 needs the" % self.g.mine,
+                "clock right to about a second, so the clock's",
+                "state is shown under the receiver's.",
+            ]
+        elif self.view == "listen":
+            body = [
+                "rxd-tui: Listen",
+                "",
+                "%-9s pick a station; Enter switches" % ud,
+                "g G       gain down / up through the dongle's steps",
+                "b         bandwidth: Narrow, Normal, Wide",
+                "s         squelch off / on (NFM only)",
+                ", .       squelch level down / up, 2 dB a press",
+                "- +       uConsole speaker volume down / up",
+                "M         mute the uConsole speaker / restore it",
+                "l         play the audio on this machine / stop",
+                "[ ]       volume of the audio here",
+            ] + views
+        else:
+            body = [
+                "rxd-tui: Manual",
+                "",
+                "%-9s tune down / up by the step" % (k["left"] + " " + k["right"]),
+                "%-9s larger / smaller step: 10 Hz to 1 MHz" % (k["up"] + " " + k["down"]),
+                "f         type a frequency and press Enter:",
+                "            7.078 or 146.52 is MHz, 14074 is kHz,",
+                "            7078000 is Hz; 7078k and 7.078M work too",
+                "m         next mode: USB LSB AM FM WFM",
+                "[ ]       narrower / wider bandwidth",
+                "g G       gain down / up through the dongle's steps",
+                "- +       uConsole speaker volume down / up (0-400 %)",
+                "M         mute the uConsole speaker / restore it",
+                "l         play the audio on this machine / stop",
+                "{ }       volume of the audio here",
+            ] + views
+        return body + [
             "?         this help",
             "q         quit (Ctrl-C works too)",
             "",
@@ -909,28 +2366,44 @@ class App:
             "",
             "Any key closes this.",
         ]
-        bw = max(len(s) for s in lines) + 4
+
+    def confirm_lines(self, s):
+        p = self.confirm
+        lines = ["Switch to %s?" % p["name"], ""]
+        if p.get("description"):
+            lines[0] = "Switch to %s (%s)?" % (p["name"], p["description"])
+        lines += ["Leaving %s closes JS8Call. rxd restarts," % self.active_name(s),
+                  "which takes a few seconds."]
+        if flip_needed(p, s["status"]):
+            lines += ["", "%s Then flip the Ham It Up to %s." % (self.g.drop,
+                                                                 hiu_word(p.get("upconvert")))]
+        return lines + ["", "y switches; any other key stays."]
+
+    def draw_box(self, scr, lines):
+        lines = [self.g.text(x) for x in lines]
+        bw = min(max(len(x) for x in lines) + 4, scr.w)
         bh = len(lines) + 2
         if bh > scr.h:
-            lines = [s for s in lines if s][:scr.h - 2]
+            lines = [x for x in lines if x][:scr.h - 2]
             bh = len(lines) + 2
         y0 = max(0, (scr.h - bh) // 2)
         x0 = max(0, (scr.w - bw) // 2)
         for i in range(bh):
             scr.put(y0 + i, x0, " " * bw, "bar")
-        for i, s in enumerate(lines):
-            scr.put(y0 + 1 + i, x0 + 2, s, "bar")
+        for i, x in enumerate(lines):
+            scr.put(y0 + 1 + i, x0 + 2, x[:bw - 4], "bar")
 
 
 # --------------------------------------------------------------------- main
 
 ESCAPES = {"[A": curses.KEY_UP, "OA": curses.KEY_UP, "[B": curses.KEY_DOWN,
            "OB": curses.KEY_DOWN, "[C": curses.KEY_RIGHT, "OC": curses.KEY_RIGHT,
-           "[D": curses.KEY_LEFT, "OD": curses.KEY_LEFT}
+           "[D": curses.KEY_LEFT, "OD": curses.KEY_LEFT, "[5~": curses.KEY_PPAGE,
+           "[6~": curses.KEY_NPAGE, "OM": 10}
 
 
 def read_escape(win):
-    """An arrow key whose sequence curses didn't recognise (the terminal not in the
+    """A key whose sequence curses didn't recognise (the terminal not in the
     keypad mode terminfo expects), Esc on its own, or None for anything else."""
     win.nodelay(True)
     seq = ""
@@ -978,6 +2451,8 @@ def run(stdscr, app, color):
             dirty = False
         ch = stdscr.getch()
         if ch == -1:
+            if app.switching or (app.audio and app.audio.on):
+                dirty = True  # the switch's timeout and the audio's state move on their own
             continue
         dirty = True
         if ch == 27:
@@ -999,18 +2474,36 @@ def main(argv=None):
                     help="rxd's HTTP API (default $RXD_URL or %s)" % DEFAULT_URL)
     ap.add_argument("--ascii", action="store_true",
                     help="plain ASCII, no Unicode block characters")
+    ap.add_argument("--listen", action="store_true",
+                    help="start with the audio playing on this machine")
+    ap.add_argument("--player", metavar="CMD",
+                    help="the command that plays raw s16le mono PCM from stdin; "
+                         "{rate} becomes the sample rate (default: the first of %s on PATH)"
+                         % ", ".join(PLAYERS))
     a = ap.parse_args(argv)
     locale.setlocale(locale.LC_ALL, "")
     os.environ.setdefault("ESCDELAY", "25")  # Esc cancels typing without a pause
     url = a.url if "//" in a.url else "http://" + a.url
     poller = Poller(Link(url))
-    app = App(poller, Glyphs(a.ascii or not unicode_ok()), url)
+    if a.player:
+        try:
+            player = Player.custom(a.player)
+        except ValueError as e:
+            ap.error(str(e))
+    else:
+        found = find_player()
+        player = Player.found(*found) if found else None
+    audio = AudioPlayer(url, player, poller.changed) if player else None
+    app = App(poller, Glyphs(a.ascii or not unicode_ok()), url, audio, listen=a.listen)
+    if a.listen and not audio:
+        app.say("%s %s" % (app.g.bad, app.player_hint), "err")
     try:
         curses.wrapper(run, app, use_color())
     except KeyboardInterrupt:
         pass
     finally:
         poller.stop()
+        app.close()
     return 0
 
 
