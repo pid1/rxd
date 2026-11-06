@@ -18,7 +18,7 @@ turns them into JS8 frames and messages:
 
 Run as a script it serves decodes for rxd over a pipe (--serve), decodes WAV
 files (--wav), builds the JSC word table (--jsc-import-source), or reports
-what it is (--version). See rxd/README.md for the
+what it is (--version). See README.md for the
 protocol sources and their licences: no JS8Call or WSJT-X code is used here.
 """
 import json
@@ -1463,8 +1463,8 @@ def jsc_path():
 
 JSC_WORDS = 262144
 # The table's source: JS8Call's jsc_map.cpp (GPL-3, (C) 2018 Jordan Sherer),
-# so it is never in rx; setup.sh fetches it at install and this importer,
-# rx's own code, turns it into the word list rxd reads. Pinned to the commit
+# so it is never in rxd; install.py fetches it and this importer, rxd's own
+# code, turns it into the word list rxd reads. Pinned to the commit
 # of JS8Call v2.2.0-ga in the original repository. The same table, entry for
 # entry, is in that repository's later main and in JS8Call-improved v3.0.3
 # (JS8_JSC/JSC_map.cpp), whose file is laid out differently.

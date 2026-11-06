@@ -5,8 +5,8 @@
                                        build it (the weekly GitHub workflow,
                                        .github/workflows/callsigns.yml)
   callsign_db.py validate DB [--previous DB]   the gate before publishing
-  callsign_db.py install [--db PATH]   fetch the published build (the Pi:
-                                       setup.sh runs this; nothing else does)
+  callsign_db.py install [--db PATH]   fetch the published build (the
+                                       receiver: install.py runs this)
   callsign_db.py lookup CALL [...]     what the database says (via rxd's own lookup)
   callsign_db.py info                  sources, counts and build time
 
@@ -587,7 +587,7 @@ def validate(path, previous=None, min_calls=500000, max_calls=3000000, min_prefi
 # ------------------------------------------------------------------ install (the Pi)
 
 RELEASE_URL = os.environ.get("RXD_CALLSIGNS_URL",
-                             "https://github.com/pid1/rx/releases/download/data-callsigns/")
+                             "https://github.com/pid1/rxd/releases/download/data-callsigns/")
 
 
 def http_get(url, headers=None, timeout=60):
@@ -683,7 +683,7 @@ def main(argv=None):
     v = sub.add_parser("validate", help="check a built database before publishing it")
     v.add_argument("db")
     v.add_argument("--previous", help="the last published build, to compare counts with")
-    i = sub.add_parser("install", help="fetch the published database (the Pi; setup.sh runs this)")
+    i = sub.add_parser("install", help="fetch the published database (the receiver; install.py runs this)")
     i.add_argument("--db", default=DB_PATH)
     i.add_argument("--url", default=RELEASE_URL, help="where the release assets are")
     lk = sub.add_parser("lookup", help="look calls up")

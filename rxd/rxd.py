@@ -13,17 +13,17 @@ It reads the same profile JSON as `radio`, opens the dongle by serial,
 demodulates one channel (USB, LSB, AM, FM or WFM) and plays it to a
 PipeWire/PulseAudio sink. Control is over HTTP, on 127.0.0.1 by default:
 
-  8073  HTTP JSON: GET /api/status, POST /api/tune {"freq": 7078000,
+  8073  HTTP JSON (docs/API.md): GET /api/v1/status, POST /api/v1/tune {"freq": 7078000,
         "mode": "USB", "bandwidth": 2800, "gain_db": 3.7, "volume": 0.2}
         ("gain_db" turns automatic gain off; "gain_auto": true turns it on;
         "audio_auto", "audio_nr", "audio_filter", "audio_norm", "audio_limit"
         and "audio_squelch" switch the listening clean-up)
 
 A JS8 profile ("decoder": "js8") also decodes JS8 itself, with js8.py beside
-rxd or in /usr/local/lib/rxd/; GET /api/js8 lists the messages. A WSPR
+rxd; GET /api/v1/js8 lists the messages. A WSPR
 profile ("decoder": "wspr") decodes WSPR with wsprd and reports the spots to
 WSPRnet as the station's call at its grid (/etc/rxd/station.json, see
-docs/station.md); GET /api/wspr lists them. Both decode
+docs/station.md); GET /api/v1/wspr lists them. Both decode
 the audio before squelch and volume, so the volume is only the speaker's.
 
 A profile's "frequency" is the dial: for USB, where a signal 1500 Hz up in
@@ -1384,7 +1384,10 @@ class Receiver:
 
 # ------------------------------------------------------- profiles via radio
 
-RADIO = os.environ.get("RXD_RADIO") or shutil.which("radio") or "/usr/local/bin/radio"
+# radio from the same install as this rxd (beside it), else the one on PATH.
+RADIO = os.environ.get("RXD_RADIO") or \
+    (os.path.join(HERE, "radio.py") if os.path.isfile(os.path.join(HERE, "radio.py")) else
+     shutil.which("radio") or "/usr/local/bin/radio")
 _profiles = {"at": 0.0, "doc": None}
 
 
@@ -2912,13 +2915,13 @@ def make_bands(rx, js8):
 
 # ---------------------------------------------------------------------- map
 # The web UI's station map. Two endpoints, both read-only:
-#   GET /tiles/Z/X/Y.png  offline raster tiles (z/x/y, Web Mercator), from
-#                         $RXD_TILES or the tree setup.sh installs for
-#                         meshtastic-ui: ~/.portduino/default/maps/<style>/
+#   GET /api/v1/tiles/Z/X/Y.png  offline raster tiles (z/x/y, Web Mercator),
+#                         from $RXD_TILES or the tree meshtastic-ui keeps
+#                         (rx installs one): ~/.portduino/default/maps/<style>/
 #                         (OSM standard style, zoom 1-6 worldwide). Nothing
 #                         is ever fetched from the internet.
-#   GET /tiles/info.json  whether there are tiles, and which zooms
-#   GET /api/stations     stations heard by JS8 and WSPR that have a grid,
+#   GET /api/v1/tiles/info.json  whether there are tiles, and which zooms
+#   GET /api/v1/stations  stations heard by JS8 and WSPR that have a grid,
 #                         one per mode and call, at their grid square's centre
 # Grids for JS8 stations come from their own heartbeats and CQs ("Q1ABC: @HB
 # HEARTBEAT FN31"), in rxd's JS8 logs: DIRECTED.TXT keeps the grid of those,
