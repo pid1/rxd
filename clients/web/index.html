@@ -30,6 +30,7 @@ try { var t = localStorage.getItem("rxd.theme");
   --ok:#ff3b2f;--warn:#ff3b2f;--bad:#ff3b2f;--plot:#000;--grid:#2a0604;--trace:#ff3b2f;
   --pass:rgba(255,40,20,.20);--mark:#ff2a10;color-scheme:dark}
 *{box-sizing:border-box}
+[hidden]{display:none!important}
 html{background:var(--bg);color:var(--fg);scrollbar-color:var(--line) var(--bg)}
 body{margin:0;background:var(--bg);color:var(--fg);font:18px/1.3 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   font-variant-numeric:tabular-nums;padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
@@ -112,6 +113,62 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
   .freq{font-size:64px}
 }
 .top{display:grid;gap:10px}
+.banner .sub{display:block;font-weight:600;font-size:16px;color:var(--dim);margin-top:4px}
+.banner.sw{border-color:var(--accent);color:var(--fg)}
+.banner.flip{border-color:var(--warn);color:var(--fg);display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:8px 12px}
+.banner .btn{font-size:18px;padding:4px 14px}
+.views{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.views .btn{font-size:19px}
+.views .btn small{display:block;font-size:13px;font-weight:600}
+.nname{font-size:clamp(30px,9vw,44px);font-weight:750;line-height:1.1;margin:2px 0;overflow-wrap:anywhere}
+.nfreq{font-size:24px;font-weight:650;color:var(--dim);margin-bottom:10px}
+.row3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0 4px}
+.row3 .btn{font-size:18px;line-height:1.1;padding:2px}
+.row3 .btn small{display:block;font-size:14px;font-weight:600}
+#sqLv{margin-top:8px}
+.pgroup{font-size:15px;color:var(--dim);font-weight:700;margin:12px 0 0}
+.pgroup:first-child{margin-top:4px}
+.jstat{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;padding:8px 12px}
+@media (min-width:700px){.jstat{grid-template-columns:repeat(4,auto);justify-content:space-between}}
+.wrap>*{order:0}
+body[data-view=manual] #aPick,body[data-view=manual] #js8,body[data-view=manual] #listenCard{order:1}
+body[data-view=manual] #pmsg,#appear0{order:2}
+body[data-view=js8] .jlist{max-height:none;overflow:visible}
+@media (min-width:900px){
+  body[data-view=listen] .wrap,body[data-view=js8] .wrap{max-width:1100px}
+  body[data-view=listen] .wrap{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;grid-auto-flow:row dense}
+  body[data-view=listen] .wrap>*{grid-column:1/-1}
+  body[data-view=listen] #now,body[data-view=listen] .top,body[data-view=listen] #listenCard,body[data-view=listen] #qual{grid-column:1}
+  body[data-view=listen] #lPick{grid-column:2;grid-row:span 4}
+  body[data-view=listen] .top{grid-template-columns:1fr}
+}
+.btn.big{width:100%;min-height:72px;font-size:22px;margin-top:6px}
+.btn.wide{width:100%;margin-top:8px;font-size:18px}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
+.astate{margin:8px 0 0;font-weight:700;font-size:19px}
+.note{font-size:14px;color:var(--dim);margin:8px 0 0}
+.plist{display:grid;gap:8px;margin-top:6px;grid-template-columns:repeat(auto-fill,minmax(230px,1fr))}
+.prof{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;gap:1px;text-align:left;width:100%;min-height:76px;padding:6px 12px}
+.prof.cur{border:3px solid var(--accent);background:var(--panel);border-radius:10px;font-weight:700}
+.prof .pd{font-size:21px;font-weight:750}
+.prof .pf{font-size:16px;font-weight:600;color:var(--dim)}
+.prof .pa{font-size:16px;font-weight:800;color:var(--accent)}
+.prof .pw{font-size:15px;font-weight:700;color:var(--warn)}
+dialog{background:var(--panel);color:var(--fg);border:2px solid var(--line);border-radius:14px;padding:16px;width:calc(100vw - 24px);max-width:520px}
+dialog::backdrop{background:rgba(0,0,0,.65)}
+dialog h2{margin:0 0 10px;font-size:22px}
+dialog p{margin:0 0 12px;font-size:18px}
+dialog .row2{margin-top:6px}
+.jf{display:grid;grid-template-columns:1fr auto;gap:8px;margin-top:6px}
+.jmsg{margin:8px 0 0;color:var(--dim);font-size:16px;font-weight:600}
+.jlist{list-style:none;margin:8px 0 0;padding:0;max-height:480px;overflow-y:auto;border-top:1px solid var(--line)}
+.jl{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 10px;padding:6px 4px;border-bottom:1px solid var(--line)}
+.jl .jt,.jl .js{font-size:15px;font-weight:600;color:var(--dim)}
+.jl .jfr{font-size:18px}
+.jl .jme{font-size:15px;font-weight:800;color:var(--accent)}
+.jl .jx{flex-basis:100%;font-size:17px;overflow-wrap:anywhere}
+.jl.me{background:var(--pass);border-left:5px solid var(--accent);padding-left:8px}
+@media (min-width:900px){.jl .jx{flex:1 1 300px}}
 </style>
 </head>
 <body>
@@ -120,17 +177,66 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
   <div class="id"><span class="app">rxd</span><span id="profile">—</span><span id="modeTag" class="tag" hidden></span></div>
   <div id="conn" class="pill dimc" aria-live="polite">◌ Connecting</div>
 </header>
+<nav id="views" class="views" aria-label="View" hidden></nav>
 <div id="down" class="banner" hidden>✕ Disconnected from rxd. Retrying.</div>
 <div id="err" class="banner" hidden></div>
-<div class="top">
+<div id="sw" class="banner sw" role="status" aria-live="polite" hidden><span id="swT"></span><span id="swS" class="sub"></span></div>
+<div id="swErr" class="banner flip" role="alert" hidden><span id="swErrT"></span><button type="button" class="btn" id="swErrOk">OK</button></div>
+<div id="flip" class="banner flip" role="alert" hidden><span id="flipT"></span><button type="button" class="btn" id="flipOk">✓ Done, it's flipped</button></div>
+<div id="note" class="banner sw" hidden></div>
+<section class="card" id="now" data-v="listen" data-live>
+  <div class="lbl"><span>Station</span><span id="nMode" class="tag"></span></div>
+  <div id="nName" class="nname">—</div>
+  <div id="nFreq" class="nfreq">—</div>
+  <div class="meter">
+    <div class="mbar" role="meter" aria-label="Signal level" aria-valuemin="-100" aria-valuemax="0" id="mbar2"><i id="mfill2"></i></div>
+    <div id="mnum2" class="mnum">— dBFS</div>
+    <div class="mscale"><span>−100</span><span>−75</span><span>−50</span><span>−25</span><span>0</span></div>
+  </div>
+</section>
+<div class="top" data-v="listen manual" data-live>
   <div id="hiu" class="hiu"><b id="hiuW">Ham It Up: —</b><span id="hiuS"></span></div>
-  <div class="stats">
+  <div class="stats" data-v="manual">
     <div class="stat"><span class="k">Receiver</span><span id="sRx" class="v">—</span></div>
     <div class="stat"><span class="k">DSP CPU</span><span id="sCpu" class="v">—</span></div>
     <div class="stat"><span class="k">Blocks</span><span id="sDrop" class="v">—</span></div>
   </div>
 </div>
-<fieldset id="ctl" disabled>
+<section class="card" id="listenCard" data-v="listen manual" data-live>
+  <div class="lbl"><span>Audio on this device</span><span id="aDepth"></span></div>
+  <button type="button" class="btn big" id="listen" aria-pressed="false">▶ Listen on this device</button>
+  <p id="aState" class="astate" role="status">■ Not listening</p>
+  <div class="sl"><div class="lbl"><label for="pvol">Volume on this device</label><span id="pvolV" class="val">—</span></div>
+    <input type="range" id="pvol" min="0" max="150" step="1"></div>
+  <button type="button" class="btn wide" id="mute" aria-pressed="false" disabled>Mute uConsole speaker</button>
+  <p class="note">Audio may stop when the phone locks or the browser goes to the background.</p>
+</section>
+<section class="card" id="jPick" data-v="js8">
+  <div class="lbl"><span>JS8 frequency</span></div>
+  <div id="jPickL" class="plist"></div>
+</section>
+<section class="card jstat" id="jStat" data-v="js8" data-live>
+  <div><span class="k">Ham It Up</span><span id="jHiu" class="v">—</span></div>
+  <div><span class="k">Receiver</span><span id="jRx" class="v">—</span></div>
+  <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
+  <div><span class="k">Heard</span><span id="jHeard" class="v">—</span></div>
+</section>
+<section class="card" id="js8" data-v="js8 manual" data-live hidden>
+  <div class="lbl"><span>JS8 decodes, newest first</span><span id="jCount"></span></div>
+  <div class="jf"><input type="text" id="jFilter" placeholder="Filter by callsign" aria-label="Filter decodes by callsign" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
+    <button type="button" class="btn" id="jClear" hidden>Clear</button></div>
+  <p id="jMsg" class="jmsg" role="status"></p>
+  <ol id="jList" class="jlist"></ol>
+</section>
+<section class="card" id="lPick" data-v="listen">
+  <div class="lbl"><span>Stations</span></div>
+  <div id="lPickL"></div>
+</section>
+<fieldset id="qual" class="card" data-v="listen" data-live disabled>
+  <div class="lbl"><span>Bandwidth</span><span id="bwPV" class="val">—</span></div>
+  <div class="row3" id="bwP" role="group" aria-label="Bandwidth"></div>
+</fieldset>
+<fieldset id="ctl" data-v="manual" disabled>
 <div class="layout">
   <section class="card tuner">
     <div class="lbl"><span>Dial, MHz</span><span id="cal"></span></div>
@@ -161,21 +267,30 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
     <div class="lbl"><span>Mode</span></div>
     <div class="mgrid" role="group" aria-label="Mode" id="modes"></div>
   </section>
-  <section class="card sliders">
+  <section class="card sliders" id="sliders">
     <div class="sl"><div class="lbl"><label for="bw">Bandwidth</label><span id="bwV" class="val">—</span></div>
       <input type="range" id="bw" min="300" max="4000" step="100"></div>
-    <div class="sl"><div class="lbl"><label for="gain">RF gain</label><span id="gainV" class="val">—</span></div>
+    <div class="sl" id="gainSl"><div class="lbl"><label for="gain">RF gain</label><span id="gainV" class="val">—</span></div>
       <input type="range" id="gain" min="0" max="50" step="0.1"></div>
-    <div class="sl"><div class="lbl"><label for="vol">Volume</label><span id="volV" class="val">—</span></div>
+    <div class="sl" id="volSl"><div class="lbl"><label for="vol">uConsole speaker</label><span id="volV" class="val">—</span></div>
       <input type="range" id="vol" min="0" max="1000" step="1"></div>
   </section>
 </div>
 </fieldset>
-<section class="card">
+<section class="card" id="aPick" data-v="manual">
+  <div class="lbl"><span>Profiles</span></div>
+  <div id="aPickL" class="plist"></div>
+</section>
+<p id="pmsg" class="msg" role="status" hidden></p>
+<section class="card" id="appear0">
   <div class="lbl"><span>Appearance</span></div>
   <div class="appear" role="group" aria-label="Appearance" id="appear"></div>
 </section>
 </div>
+<dialog id="dlg" aria-labelledby="dlgT">
+  <h2 id="dlgT"></h2><div id="dlgB"></div>
+  <div class="row2"><button type="button" class="btn" id="dlgNo">Cancel</button><button type="button" class="btn pri" id="dlgYes">Switch</button></div>
+</dialog>
 <script>
 "use strict";
 (function () {
@@ -188,6 +303,7 @@ const THEMES = [["auto", "Automatic"], ["light", "Light"], ["dark", "Dark"], ["n
 
 function load(k) { try { return localStorage.getItem("rxd." + k); } catch (e) { return null; } }
 function store(k, v) { try { localStorage.setItem("rxd." + k, v); } catch (e) {} }
+function forget(k) { try { localStorage.removeItem("rxd." + k); } catch (e) {} }
 function now() { return performance.now(); }
 
 // ---------------------------------------------------------------- state
@@ -252,7 +368,7 @@ async function pollStatus() {
     applyStatus(r.doc);
   } catch (e) {
     fails++;
-    backoff = Math.min(backoff ? backoff * 2 : 1000, 10000);
+    backoff = Math.min(backoff ? backoff * 2 : 1000, switching ? 1000 : 10000);
     if (fails >= 2 || conn !== "ok") setConn("down");
   }
   statusTimer = setTimeout(pollStatus, backoff || (document.hidden ? 5000 : 500));
@@ -298,6 +414,7 @@ function showMsg(t) { const m = $("msg"); m.textContent = "✕ " + t; m.hidden =
 function clearMsg() { $("msg").hidden = true; }
 
 // ---------------------------------------------------------------- status rendering
+let viewKey = "";
 let lastDropped = null, dropAt = -1e9, lastBlocks = null, stallCount = 0, gainsKey = "";
 function setText(el, t, cls) {
   if (el.textContent !== t) el.textContent = t;
@@ -306,21 +423,30 @@ function setText(el, t, cls) {
 function setConn(c) {
   if (c === conn) return;
   conn = c;
-  const el = $("conn");
-  if (c === "ok") setText(el, "● Connected", "pill ok");
-  else if (c === "down") setText(el, "✕ Disconnected", "pill bad");
-  $("down").hidden = c !== "down";
-  $("ctl").disabled = c !== "ok";
+  renderConn();
   if (c === "down") {
     setText($("sRx"), "— Unknown", "v dimc"); setText($("sCpu"), "—", "v dimc"); setText($("sDrop"), "—", "v dimc");
     if (st) { $("hiu").classList.add("stale"); setText($("hiuS"), "Last known. rxd is not answering."); }
-    drawSpecMsg("✕ Disconnected");
+    drawSpecMsg(downMsg());
   }
-  if (c === "ok") pollSpecSoon();
+  if (c === "ok") { pollSpecSoon(); if (profAvail && !profiles) loadProfiles(); }
+}
+function downMsg() { return switching ? "■ Switching to " + switching.name + "…" : "✕ Disconnected"; }
+function renderConn() {
+  const el = $("conn");
+  if (switching) setText(el, "■ Switching", "pill warn");
+  else if (conn === "ok") setText(el, "● Connected", "pill ok");
+  else if (conn === "down") setText(el, "✕ Disconnected", "pill bad");
+  $("down").hidden = conn !== "down" || !!switching;
+  $("ctl").disabled = $("qual").disabled = conn !== "ok" || !!switching;
+  $("sw").hidden = !switching;
+  if (switching) $("note").hidden = true;
+  renderProfiles(); renderMute();
 }
 
 function applyStatus(s) {
   st = s;
+  if (switching && s.profile === switching.name) finishSwitch();
   if (!held("freq")) localFreq = s.freq;
   if (!held("mode")) localMode = s.mode;
   renderFreq();
@@ -359,10 +485,12 @@ function applyStatus(s) {
   const lv = s.level_dbfs;
   if (typeof lv === "number") {
     const pct = Math.max(0, Math.min(100, (lv + 100)));
-    $("mfill").style.width = pct + "%";
-    $("mbar").setAttribute("aria-valuenow", String(lv));
-    setText($("mnum"), (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS");
-  } else { $("mfill").style.width = "0"; setText($("mnum"), "— dBFS"); }
+    for (const i of ["", "2"]) {
+      $("mfill" + i).style.width = pct + "%";
+      $("mbar" + i).setAttribute("aria-valuenow", String(lv));
+      setText($("mnum" + i), (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS");
+    }
+  } else for (const i of ["", "2"]) { $("mfill" + i).style.width = "0"; setText($("mnum" + i), "— dBFS"); }
 
   // sliders
   if (!held("bandwidth")) setBw(localMode, s.bandwidth);
@@ -371,6 +499,17 @@ function applyStatus(s) {
   if (gk !== gainsKey) { gainsKey = gk; setupGain(gains); }
   if (!held("gain_db")) setGain(s.gain_db);
   if (!held("volume")) setVol(s.volume);
+
+  syncMute();
+  autoView();
+  if (A.on && s.js8 && view === "js8") stopListen();
+  const vk = [view, curKind(), !!s.js8, profAvail, A.on].join();
+  if (vk !== viewKey) { viewKey = vk; renderView(); }
+  renderProfiles(); renderQual();
+  renderJs8Stat(s, $("sRx").textContent, $("sRx").className);
+  if (profAvail && profiles && !switching && !profLoading && s.profile !== profiles.active && s.profile !== profAskedFor) loadProfiles();
+  if (A.on && rateFor(s.mode) !== A.want) connectAudio();
+  js8Sync();
 }
 
 function renderFreq() {
@@ -559,7 +698,7 @@ function updateRange(bins) {
   else { range.lo += (lo - range.lo) * 0.15; range.hi += (hi - range.hi) * 0.15; }
 }
 function redrawSpec() {
-  if (last && conn === "ok") drawSpec(last); else drawSpecMsg(conn === "down" ? "✕ Disconnected" : specMsg);
+  if (last && conn === "ok") drawSpec(last); else drawSpecMsg(conn === "down" ? downMsg() : specMsg);
 }
 function drawSpecMsg(text) {
   if (!spec.width) return;
@@ -664,7 +803,7 @@ let specTimer = 0, specBusy = false, lastSeq = null;
 function pollSpecSoon() { clearTimeout(specTimer); specTimer = setTimeout(pollSpec, 0); }
 async function pollSpec() {
   clearTimeout(specTimer);
-  if (document.hidden || specBusy) return;
+  if (document.hidden || specBusy || view !== "manual") return;
   specBusy = true;
   const t0 = now(); let wait = 200;
   if (conn === "ok") {
@@ -719,12 +858,525 @@ for (const b of $("appear").children) b.setAttribute("aria-pressed", String(b.da
 const mq = window.matchMedia("(prefers-color-scheme: dark)");
 (mq.addEventListener ? mq.addEventListener.bind(mq, "change") : mq.addListener.bind(mq))(readColors);
 
+
+// ---------------------------------------------------------------- profiles and views
+// Views follow the active profile's kind: JS8 profiles get the decode stream,
+// WFM/FM/AM get the station picker and Listen, anything else gets Manual.
+// Manual is the only view that sticks, and only because the user chose it.
+const LISTEN_MODES = ["WFM", "FM", "AM"];
+const GROUPS = [["WFM", "Broadcast FM"], ["FM", "VHF · UHF"], ["AM", "AM"]];
+const VIEWS = [["js8", "JS8"], ["listen", "Listen"], ["manual", "Manual", "tuning"]];
+let profiles = null, profAvail = true, profLoading = false, profAskedFor = null;
+let switching = null, switchTimer = 0, flipText = "";
+let view = load("view") === "manual" ? "manual" : null, viewFor = null;
+function pkind(p) { return p.js8 ? "js8" : LISTEN_MODES.indexOf(p.mode) >= 0 ? "listen" : "manual"; }
+function activeName() { return (st && st.profile) || (profiles && profiles.active) || null; }
+function activeProf() { const n = activeName(); return (profiles && profiles.profiles.find(p => p.name === n)) || null; }
+function curKind() {
+  const p = activeProf();
+  if (p) return pkind(p);
+  if (!st) return null;
+  return st.js8 ? "js8" : LISTEN_MODES.indexOf(st.mode) >= 0 ? "listen" : "manual";
+}
+function curUp() { return !!(st && st.upconverter_hz > 0); }
+function hiuWord(up) { return up ? "UPCONVERT" : "BYPASS"; }
+function fmtMHz(hz) { return trim(hz / 1e6, 6) + " MHz"; }
+function pdesc(p) { return p.description || p.name; }
+function showPmsg(t) { const m = $("pmsg"); m.textContent = t ? "✕ " + t : ""; m.hidden = !t; }
+
+async function loadProfiles() {
+  if (profLoading) return;
+  profLoading = true; profAskedFor = st && st.profile;
+  try {
+    const r = await api("/api/profiles");
+    if (r.status === 404) { profAvail = false; profiles = null; }
+    else if (r.ok && r.doc && Array.isArray(r.doc.profiles)) { profAvail = true; profiles = r.doc; }
+  } catch (e) {}
+  profLoading = false;
+  pickKey = ""; autoView(); renderView();
+}
+
+function autoView() {
+  const n = activeName(), k = curKind();
+  if (!profAvail) { view = "manual"; return; }
+  if (view === "manual" && load("view") === "manual") { viewFor = n; return; }
+  if (n && k && n !== viewFor) { viewFor = n; view = k; }
+}
+function setView(v) {
+  view = v;
+  if (v === "manual") store("view", "manual"); else forget("view");
+  viewFor = activeName();
+  renderView();
+  window.scrollTo(0, 0);
+}
+for (const [v, name, sub] of VIEWS) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn"; b.dataset.view = v;
+  b.onclick = () => setView(v);
+  $("views").appendChild(b);
+}
+
+function renderView() {
+  const v = view, k = curKind();
+  const mis = !!v && v !== "manual" && !!k && k !== v;
+  document.body.dataset.view = v || "";
+  $("views").hidden = !profAvail || !v;
+  for (const b of $("views").children) {
+    const on = b.dataset.view === v, d = VIEWS.find(x => x[0] === b.dataset.view);
+    b.setAttribute("aria-pressed", String(on));
+    b.innerHTML = "";
+    b.append((on ? "● " : "") + d[1]);
+    if (on || d[2]) { const sm = document.createElement("small"); sm.textContent = on ? "showing" : d[2]; b.appendChild(sm); }
+  }
+  for (const el of document.querySelectorAll("[data-v]")) {
+    if (el.parentElement.closest("[data-v]")) { el.hidden = el.dataset.v.split(" ").indexOf(v) < 0; continue; }
+    el.hidden = !v || el.dataset.v.split(" ").indexOf(v) < 0 || (el.hasAttribute("data-live") && mis);
+  }
+  // the decodes need a JS8 profile; Listen stays reachable while audio plays
+  if (!(st && st.js8)) $("js8").hidden = true;
+  $("jCount").hidden = v === "js8";
+  if (A.on && v === "js8") $("listenCard").hidden = false;
+  $("aPick").hidden = $("aPick").hidden || !profiles;
+  $("lPick").hidden = $("lPick").hidden || !profAvail;
+  $("jPick").hidden = $("jPick").hidden || !profAvail;
+  const nt = $("note");
+  if (mis && st && !switching) {
+    const p = activeProf();
+    nt.textContent = "Receiver is on " + st.profile + (p && p.description ? " (" + p.description + ")" : "") + ". " +
+      (v === "js8" ? "Pick a JS8 frequency to switch." : "Pick a station to switch.");
+    nt.hidden = false;
+  } else nt.hidden = true;
+  // RF gain and the speaker slider live in whichever view shows them
+  const home = v === "listen" ? $("qual") : $("sliders");
+  if ($("gainSl").parentElement !== home) { home.appendChild($("gainSl")); home.appendChild($("volSl")); }
+  if (v === "listen") home.appendChild($("sqSl"));
+  renderProfiles(); renderQual();
+  if (v === "manual") requestAnimationFrame(() => { onResize(); pollSpecSoon(); });
+}
+
+let pickKey = "";
+function profBtn(p, top, sub) {
+  const act = p.name === activeName() && !switching;
+  const el = document.createElement(act ? "div" : "button");
+  el.className = act ? "prof cur" : "btn prof";
+  const add = (cls, t) => { const s = document.createElement("span"); s.className = cls; s.textContent = t; el.appendChild(s); };
+  add("pd", top); add("pf", sub);
+  if (act) add("pa", "● Active");
+  else {
+    el.type = "button";
+    if (switching && switching.name === p.name) add("pa", "■ Switching…");
+    else if (!!p.upconvert !== curUp()) add("pw", "▲ Flip the Ham It Up to " + hiuWord(p.upconvert));
+    el.disabled = conn !== "ok" || !!switching;
+    el.onclick = () => askSwitch(p);
+  }
+  return el;
+}
+function renderProfiles() {
+  const key = JSON.stringify([profiles, activeName(), curUp(), conn === "ok", switching && switching.name, view]);
+  if (key === pickKey) return;
+  pickKey = key;
+  const all = profiles ? profiles.profiles : [];
+  const mk = (id, list, f) => {
+    const box = $(id); box.textContent = "";
+    if (!profiles) { const m = document.createElement("span"); m.className = "jmsg"; m.textContent = profAvail ? "Loading stations" : ""; box.appendChild(m); return; }
+    if (!list.length) { const m = document.createElement("span"); m.className = "jmsg"; m.textContent = "No profiles of this kind are saved."; box.appendChild(m); return; }
+    for (const p of list) box.appendChild(f(p));
+  };
+  if (view === "js8") mk("jPickL", all.filter(p => p.js8), p => profBtn(p, p.name, (p.description ? p.description + " · " : "") + fmtMHz(p.freq)));
+  if (view === "manual") mk("aPickL", all, p => profBtn(p, pdesc(p), p.name + " · " + fmtMHz(p.freq) + " · " + p.mode + (p.js8 ? " · JS8" : "")));
+  if (view === "listen") {
+    const box = $("lPickL"); box.textContent = "";
+    const ls = all.filter(p => pkind(p) === "listen");
+    if (!profiles || !ls.length) { mk("lPickL", ls, null); return; }
+    for (const [m, title] of GROUPS) {
+      const g = ls.filter(p => p.mode === m);
+      if (!g.length) continue;
+      const h = document.createElement("div"); h.className = "pgroup"; h.textContent = title; box.appendChild(h);
+      const l = document.createElement("div"); l.className = "plist"; box.appendChild(l);
+      for (const p of g) l.appendChild(profBtn(p, pdesc(p), fmtMHz(p.freq) + " · " + (p.mode === "FM" ? "NFM" : p.mode)));
+    }
+  }
+}
+
+// switching
+const dlg = $("dlg");
+let dlgAct = null;
+$("dlgNo").onclick = () => dlg.close();
+$("dlgYes").onclick = () => { dlg.close(); if (dlgAct) dlgAct(); };
+dlg.addEventListener("close", () => { dlgAct = null; });
+function askSwitch(p) {
+  const cur = activeProf(), leavingJs8 = !!((st && st.js8) || (cur && cur.js8));
+  if (!leavingJs8) return doSwitch(p);
+  $("dlgT").textContent = "Switch to " + p.name + "?";
+  const b = $("dlgB"); b.textContent = "";
+  const para = t => { const e = document.createElement("p"); e.textContent = t; b.appendChild(e); };
+  para("Leaving " + activeName() + " closes JS8Call. rxd restarts, which takes a few seconds.");
+  if (!!p.upconvert !== curUp()) para("▲ Then flip the Ham It Up to " + hiuWord(p.upconvert) + ".");
+  $("dlgYes").textContent = "Switch";
+  dlgAct = () => doSwitch(p);
+  dlg.showModal();
+}
+async function doSwitch(p) {
+  showPmsg(""); $("swErr").hidden = true; $("flip").hidden = true;
+  let r;
+  try { r = await api("/api/profile", {name: p.name}); }
+  catch (e) { showPmsg("Could not reach rxd. Still on " + activeName() + "."); return; }
+  if (!r.ok) { showPmsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status))); return; }
+  switching = {name: p.name, desc: pdesc(p), prevUp: curUp(), wantUp: !!p.upconvert};
+  setText($("swT"), "■ Switching to " + p.name + "…");
+  setText($("swS"), "rxd restarts on " + pdesc(p) + "; this takes a few seconds." +
+    (switching.wantUp !== switching.prevUp ? " Flip the Ham It Up to " + hiuWord(switching.wantUp) + "." : ""));
+  clearTimeout(switchTimer);
+  switchTimer = setTimeout(switchTimeout, 25000);
+  renderConn(); drawSpecMsg(downMsg());
+  clearTimeout(statusTimer); statusTimer = setTimeout(pollStatus, 1500);
+}
+function finishSwitch() {
+  const sw = switching;
+  clearTimeout(switchTimer); switching = null;
+  if (curUp() !== sw.prevUp) {
+    setText($("flipT"), "▲ Flip the Ham It Up to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
+    $("flip").hidden = false;
+  }
+  if (muted() && st.volume > 0) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
+  jKey = null;
+  renderConn(); renderView();
+  loadProfiles();
+}
+function switchTimeout() {
+  const sw = switching; if (!sw) return;
+  switching = null;
+  setText($("swErrT"), "✕ The switch to " + sw.name + " did not finish. " +
+    (conn === "ok" && st ? "rxd is still on " + st.profile + "." : "rxd has not come back after 25 seconds."));
+  $("swErr").hidden = false;
+  renderConn(); renderView();
+  if (conn === "ok") loadProfiles();
+}
+$("swErrOk").onclick = () => { $("swErr").hidden = true; };
+$("flipOk").onclick = () => { $("flip").hidden = true; };
+
+// ---------------------------------------------------------------- Listen view: station, bandwidth, squelch
+const BWP = {WFM: [100e3, 150e3, 200e3], FM: [8e3, 12.5e3, 16e3], AM: [6e3, 10e3, 15e3]};
+const sqSl = document.createElement("div");
+sqSl.className = "sl"; sqSl.id = "sqSl"; sqSl.dataset.v = "listen";
+sqSl.innerHTML = '<div class="lbl"><span>Squelch</span><span id="sqS" class="val">—</span></div>' +
+  '<div class="row2"><button type="button" class="btn" id="sqOff">Off</button><button type="button" class="btn" id="sqOn">On</button></div>' +
+  '<div id="sqLv"><div class="lbl"><label for="sq">Opens above</label><span id="sqV" class="val">—</span></div>' +
+  '<input type="range" id="sq" min="-120" max="0" step="1"></div>';
+$("qual").appendChild(sqSl);
+for (const [i, name] of ["Narrow", "Normal", "Wide"].entries()) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn"; b.dataset.i = i;
+  b.onclick = () => { const p = BWP[st && st.mode]; if (p) { tune({bandwidth: p[i]}, 0); st.bandwidth = p[i]; renderQual(); } };
+  b.dataset.name = name;
+  $("bwP").appendChild(b);
+}
+const sqEl = $("sq");
+function sqLevel() { const v = +load("squelch"); return v <= 0 && v >= -150 && load("squelch") !== null ? v : -60; }
+$("sqOff").onclick = () => { tune({squelch: null}, 0); if (st) st.squelch = null; renderQual(); };
+$("sqOn").onclick = () => { const v = sqLevel(); tune({squelch: v}, 0); if (st) st.squelch = v; renderQual(); };
+sqEl.oninput = () => { const v = +sqEl.value; store("squelch", String(v)); setText($("sqV"), "−" + Math.abs(v) + " dBFS"); fill(sqEl); tune({squelch: v}, 200); };
+track(sqEl, "squelch");
+function renderQual() {
+  if (!st || view !== "listen") return;
+  const p = activeProf();
+  setText($("nName"), p ? pdesc(p) : st.profile || "—");
+  setText($("nFreq"), fmtMHz(st.freq));
+  setText($("nMode"), st.mode === "FM" ? "NFM" : st.mode);
+  const pre = BWP[st.mode] || [];
+  for (const b of $("bwP").children) {
+    const hz = pre[+b.dataset.i];
+    b.hidden = !hz;
+    if (!hz) continue;
+    b.innerHTML = ""; b.append(b.dataset.name);
+    const sm = document.createElement("small"); sm.textContent = fmtBw(hz); b.appendChild(sm);
+    b.setAttribute("aria-pressed", String(Math.abs(st.bandwidth - hz) < 1));
+  }
+  const named = pre.findIndex(hz => Math.abs(st.bandwidth - hz) < 1);
+  setText($("bwPV"), named >= 0 ? fmtBw(Math.round(st.bandwidth)) : "Custom, " + fmtBw(Math.round(st.bandwidth)));
+  // squelch: NFM voice only, and only if this rxd reports it
+  const hasSq = st.mode === "FM" && "squelch" in st;
+  $("sqSl").hidden = !hasSq;
+  if (hasSq) {
+    const on = st.squelch !== null && st.squelch !== undefined;
+    $("sqOff").setAttribute("aria-pressed", String(!on)); $("sqOn").setAttribute("aria-pressed", String(on));
+    $("sqLv").hidden = !on;
+    if (on && !held("squelch")) { sqEl.value = st.squelch; fill(sqEl); setText($("sqV"), (st.squelch < 0 ? "−" : "") + Math.abs(st.squelch) + " dBFS"); }
+    if (!on) setText($("sqS"), "Off, always open", "val");
+    else if (st.squelch_open) setText($("sqS"), "● Open (signal)", "val ok");
+    else setText($("sqS"), "■ Closed (quiet)", "val dimc");
+  }
+}
+
+// ---------------------------------------------------------------- uConsole speaker mute
+function muted() { return load("spkprev") !== null; }
+function syncMute() {
+  if (muted() && st && st.volume > 0 && !held("volume")) forget("spkprev");
+  renderMute();
+}
+function renderMute() {
+  const b = $("mute"), m = muted();
+  b.disabled = conn !== "ok" || !!switching || !st || (!m && st.volume === 0);
+  b.setAttribute("aria-pressed", String(m));
+  if (m) setText(b, "Unmute uConsole speaker (back to " + Math.round(+load("spkprev") * 100) + " %)");
+  else if (st && st.volume === 0) setText(b, "uConsole speaker is at 0 %");
+  else setText(b, "Mute uConsole speaker");
+}
+$("mute").onclick = () => {
+  if (!st) return;
+  if (muted()) { const v = +load("spkprev") || 0.5; forget("spkprev"); setVol(v); tune({volume: v}, 0); st.volume = v; }
+  else { store("spkprev", String(st.volume)); setVol(0); tune({volume: 0}, 0); st.volume = 0; }
+  renderMute();
+};
+
+// ---------------------------------------------------------------- audio on this device
+// rxd streams s16le mono PCM; chunks are queued and scheduled back to back on
+// one AudioContext clock, with ~0.4 s banked first and again after an underrun.
+const A = {ctx: null, gain: null, on: false, gen: 0, want: 0, rate: 0, up: 1, bufRate: 0, ctl: null,
+  q: [], qLen: 0, head: 0, playing: false, rest: -1, prev: 0, srcs: new Set(), scheduled: 0, underruns: 0,
+  dropped: 0, bytes: 0, lastData: 0, retry: 0, err: "", rt: 0, tick: 0};
+window.rxdAudio = A;  // read-only inspection from the console
+function rateFor(m) { return m === "WFM" ? 24000 : 12000; }
+function insecure() { return window.isSecureContext === false ? " This page is plain http, not a secure context, and some browsers limit audio there." : ""; }
+const pvol = $("pvol");
+pvol.value = load("phonevol") !== null ? +load("phonevol") : 100;
+function phoneGain() { const v = +pvol.value / 100; return v * v; }
+function renderPvol() { setText($("pvolV"), pvol.value + " %"); fill(pvol); if (A.gain) A.gain.gain.value = phoneGain(); }
+pvol.oninput = () => { store("phonevol", pvol.value); renderPvol(); };
+renderPvol();
+
+$("listen").onclick = () => {
+  if (A.on && A.ctx && A.ctx.state !== "running") { A.ctx.resume().then(renderAudio, renderAudio); return; }
+  if (A.on) stopListen(); else startListen();
+};
+function startListen() {
+  const AC = window.AudioContext || window.webkitAudioContext;
+  A.err = "";
+  if (!AC || !window.fetch || !window.ReadableStream) { A.err = "this browser cannot play a live stream." + insecure(); renderAudio(); return; }
+  try {
+    if (!A.ctx) {
+      A.ctx = new AC();
+      A.gain = A.ctx.createGain(); A.gain.connect(A.ctx.destination);
+      A.ctx.onstatechange = renderAudio;
+    }
+    A.gain.gain.value = phoneGain();
+    A.ctx.resume().catch(() => {});
+    // iOS unlocks output for a context that starts a source inside the tap
+    const s = A.ctx.createBufferSource(); s.buffer = A.ctx.createBuffer(1, 1, A.ctx.sampleRate); s.connect(A.ctx.destination); s.start(0);
+  } catch (e) { A.err = "the browser refused to start audio." + insecure(); renderAudio(); return; }
+  A.on = true; A.retry = 0; A.underruns = 0;
+  clearInterval(A.tick); A.tick = setInterval(audioTick, 250);
+  connectAudio();
+  renderView();
+}
+function stopListen() {
+  A.on = false; A.gen++;
+  if (A.ctl) A.ctl.abort();
+  A.ctl = null; clearTimeout(A.rt); clearInterval(A.tick);
+  dropAudio();
+  if (A.ctx) A.ctx.suspend().catch(() => {});
+  renderAudio(); renderView();
+}
+function dropAudio() {
+  for (const s of A.srcs) { try { s.stop(); } catch (e) {} }
+  A.srcs.clear(); A.q = []; A.qLen = 0; A.playing = false; A.rest = -1;
+}
+function setRate(rate) {
+  A.rate = rate; A.up = 1;
+  try { A.ctx.createBuffer(1, 1, rate); } catch (e) { A.up = Math.ceil(22050 / rate); }
+  A.bufRate = rate * A.up;
+}
+async function connectAudio() {
+  const gen = ++A.gen;
+  if (A.ctl) A.ctl.abort();
+  clearTimeout(A.rt);
+  dropAudio();
+  const want = rateFor(st ? st.mode : "USB");
+  A.want = want;
+  const ctl = new AbortController(); A.ctl = ctl;
+  renderAudio();
+  let why = "";
+  try {
+    const r = await fetch("/api/audio?rate=" + want, {cache: "no-store", signal: ctl.signal});
+    if (gen !== A.gen) return;
+    if (!r.ok) {
+      let d = null; try { d = await r.json(); } catch (e) {}
+      why = r.status === 404 ? "this rxd has no audio stream." : "rxd refused: " + ((d && d.error) || "HTTP " + r.status) + ".";
+      throw new Error(why);
+    }
+    if (!r.body || !r.body.getReader) { why = "this browser cannot read a stream." + insecure(); throw new Error(why); }
+    setRate(+r.headers.get("X-Audio-Rate") || want);
+    A.lastData = now();
+    const rd = r.body.getReader();
+    for (;;) {
+      const x = await rd.read();
+      if (gen !== A.gen) { rd.cancel().catch(() => {}); return; }
+      if (x.done) break;
+      A.bytes += x.value.length; A.lastData = now(); A.retry = 0; A.err = "";
+      push(x.value);
+    }
+  } catch (e) { if (gen !== A.gen) return; }
+  if (gen !== A.gen || !A.on) return;
+  A.retry++; A.err = why;
+  renderAudio();
+  A.rt = setTimeout(() => { if (A.on && gen === A.gen) connectAudio(); }, why ? 5000 : Math.min(500 * A.retry, 3000));
+}
+function push(u8) {
+  let b = u8;
+  if (A.rest >= 0) { b = new Uint8Array(u8.length + 1); b[0] = A.rest; b.set(u8, 1); A.rest = -1; }
+  const n = b.length >> 1;
+  if (b.length & 1) A.rest = b[b.length - 1];
+  if (!n) return;
+  const dv = new DataView(b.buffer, b.byteOffset, n * 2), up = A.up, f = new Float32Array(n * up);
+  if (up === 1) for (let i = 0; i < n; i++) f[i] = dv.getInt16(2 * i, true) / 32768;
+  else {
+    let p = A.prev;
+    for (let i = 0; i < n; i++) { const x = dv.getInt16(2 * i, true) / 32768; for (let k = 1; k <= up; k++) f[i * up + k - 1] = p + (x - p) * k / up; p = x; }
+    A.prev = p;
+  }
+  A.q.push(f); A.qLen += f.length;
+  pump();
+}
+function pump() {
+  const ctx = A.ctx, t = ctx.currentTime, R = A.bufRate;
+  if (A.playing && A.head < t + 0.01) { A.playing = false; A.underruns++; }
+  if (!A.playing) {
+    if (A.qLen < R * 0.4) return;
+    A.head = t + 0.05; A.playing = true;
+  } else if (A.qLen < R * 0.05) return;
+  if (A.head - t > 0.9) { A.dropped += A.qLen; A.q = []; A.qLen = 0; return; }  // clocks drift: stay near 0.4 s
+  const buf = ctx.createBuffer(1, A.qLen, R), ch = buf.getChannelData(0);
+  let o = 0; for (const c of A.q) { ch.set(c, o); o += c.length; }
+  A.q = []; A.qLen = 0;
+  const s = ctx.createBufferSource(); s.buffer = buf; s.connect(A.gain); s.start(A.head);
+  A.head += buf.duration; A.scheduled++;
+  A.srcs.add(s); s.onended = () => A.srcs.delete(s);
+}
+function audioTick() {
+  // a stream that stalls without closing (rxd went away mid-restart) is dropped and retried
+  if (A.on && A.ctl && A.lastData && now() - A.lastData > 3000 && !A.err) { A.lastData = 0; A.ctl.abort(); connectAudio(); }
+  renderAudio();
+}
+function renderAudio() {
+  const b = $("listen"), el = $("aState");
+  let t, cls, depth = "";
+  if (!A.on) {
+    setText(b, "▶ Listen on this device"); b.setAttribute("aria-pressed", "false");
+    if (A.err) { t = "✕ Audio unavailable: " + A.err; cls = "astate bad"; } else { t = "■ Not listening"; cls = "astate dimc"; }
+  } else if (A.ctx.state !== "running") {
+    setText(b, "▶ Resume listening"); b.setAttribute("aria-pressed", "true");
+    t = "■ Paused by the browser. Tap Resume listening."; cls = "astate warn";
+  } else {
+    setText(b, "■ Stop listening"); b.setAttribute("aria-pressed", "true");
+    const d = A.head - A.ctx.currentTime;
+    if (A.err) { t = "✕ Audio unavailable: " + A.err + " Retrying."; cls = "astate bad"; }
+    else if (A.playing && d > 0) { t = "● Listening, " + trim(A.rate / 1000, 1) + " kHz"; cls = "astate ok"; depth = "Buffer " + Math.round(d * 1000) + " ms"; }
+    else if (A.retry || (switching && !A.playing)) { t = "▲ Reconnecting to rxd"; cls = "astate warn"; }
+    else { t = "▲ Buffering"; cls = "astate warn"; }
+  }
+  setText(el, t, cls); setText($("aDepth"), depth);
+}
+renderAudio();
+
+// ---------------------------------------------------------------- JS8 decodes
+const JMAX = 500;
+let jOn = false, jKey = null, jSeq = 0, jTimer = 0, jHeard = new Map(), jFilt = "";
+function js8Sync() {
+  const want = !!(st && st.js8);
+  if (want && st.profile !== jKey) {
+    jKey = st.profile; jOn = true; jSeq = 0; jHeard = new Map();
+    $("jList").textContent = ""; setText($("jMsg"), "Loading decodes");
+    pollJs8();
+  } else if (!want && jOn) { jOn = false; jKey = null; clearTimeout(jTimer); }
+}
+async function pollJs8() {
+  clearTimeout(jTimer);
+  if (!jOn) return;
+  if (document.hidden) { jTimer = setTimeout(pollJs8, 5000); return; }
+  const key = jKey;
+  try {
+    const r = await api("/api/js8?after=" + jSeq);
+    if (key !== jKey) return;
+    if (r.ok && r.doc && Array.isArray(r.doc.lines)) {
+      addJs8(r.doc.lines.filter(l => l.seq > jSeq).sort((a, b) => a.seq - b.seq));
+      if (typeof r.doc.seq === "number") jSeq = Math.max(jSeq, r.doc.seq);
+      jStatus("");
+    } else jStatus(r.status === 404 ? "✕ This rxd has no JS8 feed." : "✕ No decodes: " + ((r.doc && r.doc.error) || "HTTP " + r.status));
+  } catch (e) {}
+  if (jOn && key === jKey) jTimer = setTimeout(pollJs8, 2500);
+}
+function mineLine(l) {
+  if (l.mycall === true) return true;
+  const c = (st && st.js8_call || "").toUpperCase();
+  if (!c) return false;
+  return (l.to || "").toUpperCase() === c || String(l.text || "").toUpperCase().split(/[^A-Z0-9\/]+/).indexOf(c) >= 0;
+}
+function jMatch(li) { return !jFilt || li.dataset.k.indexOf(jFilt) >= 0; }
+function addJs8(lines) {
+  if (!lines.length) return jStatus("");
+  const list = $("jList"), frag = document.createDocumentFragment(), call = (st && st.js8_call) || "";
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i], li = document.createElement("li"), mine = mineLine(l), fr = String(l.from || "?");
+    li.className = "jl" + (mine ? " me" : "");
+    li.dataset.k = [fr, l.to || "", l.text || ""].join(" ").toUpperCase();
+    li.dataset.f = fr;
+    const add = (tag, cls, t) => { const e = document.createElement(tag); e.className = cls; e.textContent = t; li.appendChild(e); };
+    const tm = /\d\d:\d\d:\d\d/.exec(String(l.time || ""));
+    add("span", "jt", (tm ? tm[0] : String(l.time || "")) + " UTC");
+    add("span", "js", typeof l.snr === "number" ? "SNR " + (l.snr > 0 ? "+" : l.snr < 0 ? "−" : "") + Math.abs(l.snr) : "SNR —");
+    add("b", "jfr", fr);
+    if (mine) add("span", "jme", "◆ " + (call || "You"));
+    let text = String(l.text || "");
+    if (text.toUpperCase().indexOf(fr.toUpperCase() + ":") === 0) text = text.slice(fr.length + 1).trim();
+    add("span", "jx", text);
+    li.hidden = !jMatch(li);
+    jHeard.set(fr, (jHeard.get(fr) || 0) + 1);
+    frag.appendChild(li);
+  }
+  list.insertBefore(frag, list.firstChild);
+  while (list.children.length > JMAX) {
+    const f = list.lastChild.dataset.f, n = jHeard.get(f) - 1;
+    if (n > 0) jHeard.set(f, n); else jHeard.delete(f);
+    list.removeChild(list.lastChild);
+  }
+  jStatus("");
+}
+function jStatus(err) {
+  const list = $("jList"), n = jHeard.size;
+  const heard = n + (n === 1 ? " station heard" : " stations heard");
+  let shown = 0; if (jFilt) for (const li of list.children) if (!li.hidden) shown++;
+  setText($("jCount"), heard); setText($("jHeard"), n + (n === 1 ? " station" : " stations"), "v");
+  if (err) setText($("jMsg"), err);
+  else if (!list.children.length) setText($("jMsg"), "No decodes yet. They appear here as JS8Call hears them.");
+  else if (jFilt) setText($("jMsg"), shown ? "Showing " + shown + " of " + list.children.length + " lines with " + jFilt : "No lines with " + jFilt + ".");
+  else setText($("jMsg"), "");
+}
+$("jFilter").oninput = () => {
+  jFilt = $("jFilter").value.trim().toUpperCase();
+  $("jClear").hidden = !jFilt;
+  for (const li of $("jList").children) li.hidden = !jMatch(li);
+  jStatus("");
+};
+$("jClear").onclick = () => { $("jFilter").value = ""; $("jFilter").oninput(); $("jFilter").focus(); };
+function renderJs8Stat(s, rxText, rxCls) {
+  if (view !== "js8") return;
+  setText($("jHiu"), s.upconverter_hz > 0 ? "⇅ UPCONVERT" : "→ BYPASS", "v");
+  setText($("jRx"), rxText, rxCls);
+  const lv = s.level_dbfs;
+  setText($("jLvl"), typeof lv === "number" ? (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS" : "— dBFS", "v");
+}
+
 // ---------------------------------------------------------------- start
 document.addEventListener("visibilitychange", () => {
-  if (!document.hidden) { pollStatus(); pollSpecSoon(); }
+  if (!document.hidden) {
+    pollStatus(); pollSpecSoon(); if (jOn) pollJs8();
+    if (A.on && A.ctx && A.ctx.state !== "running") A.ctx.resume().catch(() => {});
+    renderAudio();
+  }
 });
 if (window.ResizeObserver) new ResizeObserver(onResize).observe($("ctl"));
 window.addEventListener("resize", onResize);
+renderView();
 onResize(); readColors();
 pollStatus();
 })();
