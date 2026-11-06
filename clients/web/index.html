@@ -333,8 +333,9 @@ function applyStatus(s) {
   const up = s.upconverter_hz > 0, hiu = $("hiu");
   hiu.className = "hiu" + (up ? " up" : "");
   setText($("hiuW"), up ? "⇅ Ham It Up: UPCONVERT" : "→ Ham It Up: BYPASS");
-  setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below 30 MHz" : "")
-    : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", 30 MHz and up" : ""));
+  var below = trim((s.upconvert_below_hz || 30e6) / 1e6, 3) + " MHz";
+  setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below " + below : "")
+    : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", " + below + " and up" : ""));
 
   // receiver
   if (s.error) { $("err").hidden = false; setText($("err"), "✕ rxd error: " + s.error); } else $("err").hidden = true;
