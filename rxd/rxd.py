@@ -62,7 +62,7 @@ from scipy import signal as sps  # noqa: E402
 
 # rxd's version: the one place it is set. GET /api/v1/status reports it, and
 # the release workflow refuses a tag that doesn't match it.
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 # The HTTP API's version: the N in /api/vN/. It goes up only when a client
 # written for the old one would misread the new one (docs/API.md).
 API_VERSION = 1

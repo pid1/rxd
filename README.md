@@ -33,6 +33,7 @@ It is receive only. Nothing in it transmits. It runs on a Raspberry Pi CM4 (it w
 ## What it does
 
 - **Receives one channel** from one RTL-SDR: USB, LSB, AM, FM or WFM (in mono), to a PipeWire or PulseAudio sink.
+- **Plays HD Radio** on FM broadcast stations when [nrsc5](https://github.com/theori-io/nrsc5) is installed: analog first, then HD1 once the digital signal is clean, lined up so the switch is seamless, and back to analog when it fades. HD2 and HD3 too, with the station's name and what's playing.
 - **Decodes JS8 itself**, with its own decoder, in all four speeds: normal, fast, turbo and slow (turbo is off by default). No JS8Call code is used.
 - **Decodes WSPR** with `wsprd` and reports the spots to WSPRnet as your call at your grid. Spots that can't be sent wait for the next slot.
 - **Picks the band itself** on Auto: from the band conditions, the sun at your grid and what it has heard at this hour. Without internet it scans the bands and keeps the counts.
@@ -58,10 +59,12 @@ You need Linux with systemd and PipeWire (or PulseAudio), Python 3.11 or later w
 sudo apt install python3-numpy python3-scipy librtlsdr0 libpulse0 wsjtx chrony
 ```
 
+For HD Radio, build nrsc5 too ([docs/install.md](docs/install.md#hd-radio-nrsc5)). Without it FM is analog only.
+
 Then install a release, verified by its checksum:
 
 ```bash
-v=0.4.1
+v=0.5.0
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz.sha256
 sha256sum -c rxd-$v.tar.gz.sha256 && tar xzf rxd-$v.tar.gz
