@@ -1343,7 +1343,10 @@ class Receiver:
                 "gain_loop": self.autogain.status() if self.autogain is not None else
                 {"state": "unavailable", "reason": "this source has no gain control"},
                 "audio": self.fx.status(snap["audio"]) if self.fx is not None else
-                dict(snap["audio"], active=[]),
+                # Before the first block: the same shape, nothing active yet.
+                dict(snap["audio"], active=[], nr_setting=snap["audio"]["nr"],
+                     nr=snap["audio"]["nr"] if snap["audio"]["nr"] is not None
+                     else snap["mode"] != "WFM"),
                 "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
                 "upconvert_below_hz": snap["upconvert_below"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
