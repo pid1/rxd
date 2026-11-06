@@ -647,6 +647,20 @@ def band_plan_words(bp, g):
     return "%s %s: %s" % (sym, head, reason), role
 
 
+def station_words(st, g):
+    """(text, role) for the station line: its grid and where it comes from,
+    "Station EM13lc from GPS (10 satellites)", or None from an older rxd."""
+    s = (st or {}).get("station") or {}
+    reason = s.get("grid_reason")
+    if not reason:
+        return None
+    src = s.get("grid_source")
+    gps = (s.get("gps") or {}).get("state")
+    sym = g.rx if src == "gps" else g.bad if not src else g.drop if gps == "rejected" else g.dot
+    role = "ok" if src == "gps" else "bad" if not src else "warn" if gps == "rejected" else "label"
+    return "%s Station %s" % (sym, reason), role
+
+
 def band_plan_extra(bp, g):
     """The second band plan line: conditions (credited) and the sun, or why there are none."""
     if not isinstance(bp, dict):
@@ -2488,6 +2502,10 @@ class App:
         else:
             put(y, 1, clip(ctext, w - 2, g), crole)
         y += 1
+        sw = station_words(st, g)
+        if sw and bottom - y > 8:
+            put(y, 1, clip(g.text(sw[0]), w - 2, g), sw[1])
+            y += 1
         bpw = band_plan_words(st.get("band_plan"), g)
         if bpw:
             put(y, 1, clip(g.text(bpw[0]), w - 2, g), bpw[1])

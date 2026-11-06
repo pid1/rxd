@@ -62,7 +62,7 @@ from scipy import signal as sps  # noqa: E402
 
 # rxd's version: the one place it is set. GET /api/v1/status reports it, and
 # the release workflow refuses a tag that doesn't match it.
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 # The HTTP API's version: the N in /api/vN/. It goes up only when a client
 # written for the old one would misread the new one (docs/API.md).
 API_VERSION = 1
@@ -73,6 +73,7 @@ STATE = os.path.expanduser("~/.config/rxd/radio")
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import station as station_conf  # noqa: E402
+import location as location_conf  # noqa: E402
 AUDIO_RATE = 48000
 # A profile's "offset": "auto" (the default) upconverts below
 # upconvert_below_hz when the station has an upconverter (station.json), since
@@ -111,6 +112,33 @@ def station():
             log("station: " + p)
         _station.update(key=key, st=st)
     return _station["st"]
+
+
+# The station's grid: a live GPS fix, else the last one saved, else the
+# station file's (location.py). Everything that needs the station's grid gets
+# it from station_id(), which asks this.
+_location = {"loc": None}
+
+
+def location():
+    if _location["loc"] is None:
+        _location["loc"] = location_conf.Location(
+            lambda: station().identity()[1], location_conf.SavedGrid(log=log),
+            off_reason="GPS is off" if station().gpsd() is None else "rxd isn't reading the GPS")
+    return _location["loc"]
+
+
+def start_gps():
+    """Read the GPS through gpsd, unless the station file or $RXD_GPSD says off."""
+    addr = station().gpsd()
+    loc = location()
+    if addr is None:
+        loc.off_reason = "GPS is off (station file or $RXD_GPSD)"
+        log("gps: off")
+        return None
+    gps = location_conf.GpsLocation(addr, log=log)
+    loc.attach(gps)
+    return gps.start()
 
 
 # ------------------------------------------------------------------ profile
@@ -692,6 +720,7 @@ class AutoGain:
         self.decoder = decoder
         self.key = None          # what it settled for: (mode, tuner MHz)
         self.spec_seq = None     # the last spectrum it took a floor from
+        self.fresh_from = 0      # the first block read at the current gain
         self.steps = 0
         self.state = "settling"
         self.reason = None
@@ -1254,11 +1283,15 @@ class Receiver:
         floor, sp = None, self.spectrum
         if sp is not None and sp.get("seq") != ag.spec_seq:
             ag.spec_seq = sp.get("seq")
-            floor = ag.floor_of(sp["bins"])
+            # Not a spectrum of a block read before the last step: its floor
+            # is the old gain's, and would ask for the same step again.
+            if sp.get("block", 0) >= ag.fresh_from:
+                floor = ag.floor_of(sp["bins"])
         new = ag.observe(x, snap["gain_db"], now, self.wallclock(), floor)
         if new is not None and self.s.set_auto_gain(new):
             self.src.set_gain(new)
             ag.skip = self.q.qsize() + 2   # blocks already read at the old gain
+            ag.fresh_from = self.blocks + 1 + ag.skip
             log("auto gain %.1f dB (%s)" % (new, ag.reason))
         ag.cpu += ((time.thread_time() - t0) / (len(x) / self.chain.rate) - ag.cpu) * 0.05
 
@@ -1296,7 +1329,7 @@ class Receiver:
             band = [dial - bw / 2, dial + bw / 2]
         return {"bins": [round(float(v), 1) for v in db], "start_hz": center - rate / 2,
                 "stop_hz": center + rate / 2, "dial_hz": dial, "passband": band,
-                "seq": (self.spectrum or {}).get("seq", 0) + 1}
+                "seq": (self.spectrum or {}).get("seq", 0) + 1, "block": self.blocks}
 
     def gate(self, audio, level):
         """Squelch: silence below level dBFS; opens at it, closes 3 dB under."""
@@ -1636,15 +1669,23 @@ def station_missing():
 
 
 def station_id():
-    """(call, grid): this station, from station.json ($RXD_CALL and $RXD_GRID win)."""
-    return station().identity()
+    """(call, grid): this station. The call is station.json's ($RXD_CALL wins);
+    the grid is the GPS's when it has an accepted fix, else the last one saved,
+    else station.json's ($RXD_GRID wins). See location()."""
+    return station().identity()[0], location().grid()[0]
 
 
 def station_status():
-    """{"call", "grid", "file", "upconverter", "problems"}, and "missing" saying
-    what to set when the call or grid is."""
-    call, grid = station_id()
-    doc = dict({"call": call, "grid": grid}, **station().describe())
+    """{"call", "grid", "grid_source", "grid_reason", "default_grid",
+    "saved_grid", "gps", "file", "upconverter", "problems"}, and "missing"
+    saying what to set when the call or grid is."""
+    call = station().identity()[0]
+    loc = location().status()
+    grid = loc["grid"]
+    doc = dict({"call": call}, **station().describe())
+    if loc.pop("saved_problem"):
+        doc["problems"].append(location().saved.problem)
+    doc.update(loc)
     if not call or not grid:
         doc["missing"] = "no %s: %s" % (" or ".join(
             x for x, v in (("callsign", call), ("grid", grid)) if not v), station_missing())
@@ -1702,8 +1743,10 @@ class WsprNet:
 
     KEEP = 2000  # about a day of a busy band, offline
 
-    def __init__(self, call, grid, url=None, post=None):
-        self.call, self.grid = call, grid
+    def __init__(self, call=None, grid=None, url=None, post=None, ident=None):
+        # ident() -> (call, grid), read at each report so a new grid (the
+        # GPS's, say) is used without a restart.
+        self.ident = ident or (lambda: (call, grid))
         self.url = url or WSPRNET_URL
         self.post = post or self._post
         self.pending = collections.deque(maxlen=self.KEEP)
@@ -1719,9 +1762,20 @@ class WsprNet:
         with urllib.request.urlopen(req, timeout=20) as r:
             return r.status, r.read(4096).decode("utf-8", "replace")
 
+    @property
+    def call(self):
+        return self.ident()[0]
+
+    @property
+    def grid(self):
+        return self.ident()[1]
+
     def queue_slot(self, spots, dial_hz):
+        call, grid = self.ident()
+        if not call or not grid:
+            return 0
         rqrg = "%.6f" % (dial_hz / 1e6)
-        common = {"version": RXD_VERSION, "rcall": self.call, "rgrid": self.grid,
+        common = {"version": RXD_VERSION, "rcall": call, "rgrid": grid,
                   "rqrg": rqrg, "mode": "2"}
         n = 0
         for s in spots:
@@ -1739,8 +1793,9 @@ class WsprNet:
 
     def flush(self, dial_hz, had_spots):
         """Send what's waiting (and a heartbeat for an empty slot)."""
-        if not had_spots:
-            beat = {"function": "wsprstat", "rcall": self.call, "rgrid": self.grid,
+        call, grid = self.ident()
+        if not had_spots and call and grid:
+            beat = {"function": "wsprstat", "rcall": call, "rgrid": grid,
                     "rqrg": "%.6f" % (dial_hz / 1e6), "tpct": "0",
                     "tqrg": "%.6f" % (dial_hz / 1e6), "dbm": "0",
                     "version": RXD_VERSION, "mode": "2"}
@@ -1766,7 +1821,8 @@ class WsprNet:
             time.sleep(0.2)  # WSJT-X's pace
 
     def status(self):
-        return {"enabled": True, "call": self.call, "grid": self.grid, "sent": self.sent,
+        call, grid = self.ident()
+        return {"enabled": True, "call": call, "grid": grid, "sent": self.sent,
                 "pending": len(self.pending), "online": self.online, "error": self.error}
 
 
@@ -1801,9 +1857,17 @@ class WsprDecoder:
         self.decoding = None   # the slot being decoded
         self.last = None       # {"slot", "spots"} for the last decoded slot
         self.error = None
-        self.call, self.grid = station_id()
         self.load_history()
         threading.Thread(target=self.worker, name="wspr", daemon=True).start()
+
+    # The station, read live: the GPS may move the grid while rxd runs.
+    @property
+    def call(self):
+        return station_id()[0]
+
+    @property
+    def grid(self):
+        return station_id()[1]
 
     def iso(self, t):
         return time.strftime("%Y-%m-%dT%H:%M:00Z", time.gmtime(t))
@@ -1943,8 +2007,9 @@ class WsprDecoder:
         else:
             state, slot = "waiting", (now // self.SLOT + 1) * self.SLOT
         snap = self.s.snapshot()
-        if self.reporter is None:
-            report = {"enabled": False, "call": self.call, "grid": self.grid,
+        call, grid = self.reporter.ident() if self.reporter is not None else station_id()
+        if self.reporter is None or not call or not grid:
+            report = {"enabled": False, "call": call, "grid": grid,
                       "reason": "no callsign and grid to report as: " + station_missing()}
         else:
             report = self.reporter.status()
@@ -2369,9 +2434,7 @@ class BandPlanner:
         self.clock = clock
         self.cond = conditions or Conditions(os.path.join(d, "conditions.json"), clock=clock)
         self.history = BandHistory(os.path.join(d, "bands.json"), clock=clock)
-        if latlon is Ellipsis:
-            latlon = grid_latlon(station_id()[1])
-        self.latlon = latlon
+        self._latlon = latlon   # Ellipsis: the station's grid centre, read live
         self.synced = synced or (lambda: clock_status().get("synced") is not False)
         self.js8_alive = js8_alive or (lambda: js8_decoding(rx))
         self.lock = threading.Lock()
@@ -2392,6 +2455,16 @@ class BandPlanner:
         self.arrive(now)
 
     # ----------------------------------------------------- settings, state
+
+    @property
+    def latlon(self):
+        """Where the sun is worked out for: the station's grid centre, live
+        (so a GPS fix moves it), or the location the planner was given."""
+        return grid_latlon(station_id()[1]) if self._latlon is Ellipsis else self._latlon
+
+    @latlon.setter
+    def latlon(self, v):
+        self._latlon = v
 
     def load_conf(self):
         c = dict(PLAN_DEFAULTS)
@@ -3116,7 +3189,7 @@ class StationMap:
             os.path.join(os.path.dirname(JS8_LOG), "ALL.TXT")
         self.grids_path = grids_path if grids_path is not None else GRIDS_FILE
         self.clock = clock
-        self.me = me if me is not None else station_id()
+        self._me = me                 # (call, grid), or None: this station, read live
         self.lock = threading.Lock()
         self.grids = {}               # call -> {"grid", "time"}
         self.heard = {}               # call -> JS8 frames from ALL.TXT: {"time", "snr", "freq"}
@@ -3141,6 +3214,10 @@ class StationMap:
             with lk:
                 return list(src.lines)
         return src.since(0).get("lines", [])
+
+    @property
+    def me(self):
+        return self._me if self._me is not None else station_id()
 
     def learn(self, call, grid, t):
         old = self.grids.get(call)
@@ -3190,6 +3267,7 @@ class StationMap:
     def snapshot(self, hours=24.0):
         cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock() - hours * 3600))
         out, nogrid = {}, set()
+        me_call, me_grid = self.me     # once, so every distance uses the same grid
 
         def add(mode, call, grid, t, snr, freq=None, dbm=None):
             if not t or t < cutoff:
@@ -3208,7 +3286,7 @@ class StationMap:
                 ll = grid_latlon(grid)
                 s = out[k] = {"call": call, "mode": mode, "grid": grid, "lat": round(ll[0], 4),
                               "lon": round(ll[1], 4),
-                              "km": grid_km(self.me[1], grid) if src != "country" else None,
+                              "km": grid_km(me_grid, grid) if src != "country" else None,
                               "snr": snr, "last": t, "last_snr": snr, "freq": freq, "dbm": dbm,
                               "src": src, "region": region}
             if snr is not None and (s["snr"] is None or snr > s["snr"]):
@@ -3222,7 +3300,7 @@ class StationMap:
                 if grid != s["grid"] and src == "heard" == s["src"]:  # moved: plot it where it is now
                     ll = grid_latlon(grid)
                     s.update(grid=grid, lat=round(ll[0], 4), lon=round(ll[1], 4),
-                             km=grid_km(self.me[1], grid))
+                             km=grid_km(me_grid, grid))
 
         with self.lock:
             self.read_all()
@@ -3253,9 +3331,8 @@ class StationMap:
                 g = sp.get("grid") or (grids.get(call) or {}).get("grid")
                 add("wspr", call, g, sp.get("time"), sp.get("snr"), sp.get("freq"), sp.get("dbm"))
         stations = sorted(out.values(), key=lambda s: s["last"], reverse=True)
-        call, grid = self.me
-        ll = grid_latlon(grid)
-        me = {"call": call, "grid": grid, "lat": ll[0], "lon": ll[1]} if ll else None
+        ll = grid_latlon(me_grid)
+        me = {"call": me_call, "grid": me_grid, "lat": ll[0], "lon": ll[1]} if ll else None
         return {"me": me, "hours": hours, "stations": stations,
                 "no_grid": {m: sum(1 for x in nogrid if x[0] == m and x not in out)
                             for m in ("js8", "wspr")}}
@@ -3486,9 +3563,10 @@ class Api(BaseHTTPRequestHandler):
 def make_wspr(settings):
     if not os.path.isfile(WSPRD):
         log("no wsprd at %s (sudo apt install wsjtx): WSPR won't decode" % WSPRD)
-    call, grid = station_id()
-    reporter = WsprNet(call, grid) if call and grid else None
-    return WsprDecoder(settings, reporter=reporter)
+    # Always a reporter: it reports only while there's a call and a grid,
+    # read at each slot, so a GPS fix or an edited station file takes effect
+    # without a restart.
+    return WsprDecoder(settings, reporter=WsprNet(ident=station_id))
 
 
 def hostport(text, default_port):
@@ -3546,6 +3624,7 @@ def main(argv=None):
             rx.js8dec = make_js8(settings, p)
     except ValueError as e:
         sys.exit("rxd: " + str(e))
+    start_gps()
     if not all(station_id()):
         log("no station identity: " + station_missing())
     rx.start()

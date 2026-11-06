@@ -199,7 +199,7 @@ class InRadio(StationEnv):
                 fh.write("#!/bin/sh\n")
             os.chmod(os.path.join(bindir, name), mode)
         old = os.environ["PATH"]
-        os.environ["PATH"] = bindir + os.pathsep + old
+        os.environ["PATH"] = bindir  # only ours: the box has real radio-* commands
         try:
             self.assertEqual(list(r.extensions()), ["mesh"])
             ran = []

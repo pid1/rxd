@@ -37,7 +37,7 @@ plainly when they reach an rxd they don't understand.
 From a release, verified by its checksum:
 
 ```bash
-v=0.3.0
+v=0.4.0
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz.sha256
 sha256sum -c rxd-$v.tar.gz.sha256 && tar xzf rxd-$v.tar.gz
@@ -56,7 +56,8 @@ Everything that makes one receiver different from another is in
 serial number, the upconverter (a Ham It Up, say: its offset, and whether its
 switch is one a person flips), the audio sink, and the station's own profiles
 (local repeaters, broadcast stations). Every key is optional; with no file rxd
-is a generic receiver. [docs/station.md](docs/station.md) has the schema.
+is a generic receiver. With a GPS behind gpsd, rxd takes the grid from it
+when it has a steady fix. [docs/station.md](docs/station.md) has the schema.
 
 ## Who owns what
 
@@ -79,7 +80,7 @@ when CMD isn't a profile, so a machine can add commands of its own.
 
 ```
 rxd/            the daemon and its modules: rxd.py, js8.py, callsign_db.py,
-                radio.py, station.py
+                radio.py, station.py, location.py
 clients/web/    the browser UI (one file)
 clients/tui/    rxd-tui
 completions/    radio's bash completion
@@ -207,7 +208,7 @@ even minute, and runs `wsprd` on it. Spots come from `GET /api/v1/wspr`, and
 wsprd's `ALL_WSPR.TXT` is kept in `~/.local/share/rxd/wspr/`.
 
 - **Reporting** to WSPRnet is on by default, as the station file's `call`
-  at its `grid`; without both rxd decodes but doesn't report, and its status
+  at its grid (the GPS's, when it has one: docs/station.md); without both rxd decodes but doesn't report, and its status
   says why. Spots that can't be sent wait (up to 2000) for the next slot.
   `POST /api/v1/tune {"wspr_report": false}` turns it off, and `radio` saves
   the choice with the profile.

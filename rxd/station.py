@@ -13,11 +13,14 @@ the default audio sink. See docs/station.md.
       "upconverter": {"name": "Ham It Up", "hz": 125000000,
                       "below_hz": 30000000, "switch": true},
       "sink": "Built-in Audio",
+      "gps": {"enabled": true, "gpsd": "127.0.0.1:2947"},
       "profiles": {"dcara": {"description": "DCARA", "frequency": 146920000,
                              "demod": "FM", "demod_settings": {"bandwidth": 12500}}}
     }
 
-$RXD_CALL and $RXD_GRID, when set, win over "call" and "grid".
+$RXD_CALL and $RXD_GRID, when set, win over "call" and "grid", and $RXD_GPSD
+("HOST:PORT" or "off") over "gps". rxd's GPS (location.py) wins over "grid"
+when it has a fix.
 """
 import json
 import os
@@ -28,6 +31,8 @@ MODES = ("USB", "LSB", "AM", "FM", "WFM")
 
 DEFAULT_PATH = "/etc/rxd/station.json"
 GRID = re.compile(r"^[A-Ra-r]{2}[0-9]{2}(?:[A-Xa-x]{2})?$")
+HOSTPORT = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9_.-]+):[0-9]{1,5}$")
+GPS_DEFAULTS = {"enabled": True, "gpsd": "127.0.0.1:2947"}
 UPCONVERTER_DEFAULTS = {"name": "upconverter", "hz": 125e6, "below_hz": 30e6, "switch": True}
 
 
@@ -63,6 +68,7 @@ class Station:
             sink = None
         self.sink = sink or None
         self.profiles = self._profiles(doc.get("profiles"))
+        self.gps = self._gps(doc.get("gps"))
 
     def _call(self, v):
         if v is None:
@@ -104,6 +110,27 @@ class Station:
                 q.setdefault("description", name)
                 q.setdefault("demod", "USB")
                 out[name] = q
+        return out
+
+    def _gps(self, v):
+        out = dict(GPS_DEFAULTS)
+        if v is None:
+            return out
+        if v is False:
+            return dict(out, enabled=False)
+        if not isinstance(v, dict):
+            self.problems.append("gps must be an object, or false")
+            return out
+        if "enabled" in v:
+            if isinstance(v["enabled"], bool):
+                out["enabled"] = v["enabled"]
+            else:
+                self.problems.append("gps.enabled must be true or false")
+        if "gpsd" in v:
+            if isinstance(v["gpsd"], str) and HOSTPORT.match(v["gpsd"].strip()):
+                out["gpsd"] = v["gpsd"].strip()
+            else:
+                self.problems.append("gps.gpsd must be HOST:PORT, like 127.0.0.1:2947")
         return out
 
     def _upconverter(self, v):
@@ -164,6 +191,17 @@ class Station:
             g = env_grid.strip()
             grid = g[:4].upper() + g[4:].lower() if GRID.match(g) else None
         return call, grid
+
+    def gpsd(self):
+        """gpsd's HOST:PORT, or None when the GPS is off ($RXD_GPSD wins)."""
+        env = os.environ.get("RXD_GPSD")
+        if env is not None:
+            env = env.strip()
+            if env.lower() in ("", "off", "0", "false", "no"):
+                return None
+            if HOSTPORT.match(env):
+                return env
+        return self.gps["gpsd"] if self.gps["enabled"] else None
 
     def describe(self):
         """For rxd's /api/v1/status: what the clients need to know."""

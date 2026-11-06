@@ -86,6 +86,10 @@ def state_for(name):
             "sample_rate": 240000, "dsp_cpu": 0.25, "blocks": 100, "dropped": 0,
             "error": None, "running": True, "gains": list(GAINS),
             "station": {"call": "KA1PID", "grid": "EM13lc", "file": "/etc/rxd/station.json",
+                        "grid_source": "gps", "default_grid": "EM13lc", "saved_grid": "EM13lc",
+                        "grid_reason": "EM13lc from GPS (10 satellites)",
+                        "gps": {"state": "fix", "reason": "GPS fix", "satellites": 10,
+                                "accuracy_m": 3, "source": "ubx", "gpsd": "127.0.0.1:2947"},
                         "upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
                                         "switch": True}, "problems": []},
             "api_version": 1, "version": "0.3.0",
@@ -580,7 +584,7 @@ class Pty:
                 self.raw += data
                 self.vt.feed(data)
 
-    def wait_for(self, text, seconds=5.0):
+    def wait_for(self, text, seconds=15.0):  # generous: a loaded CM4 is slow to draw
         end = time.monotonic() + seconds
         while time.monotonic() < end:
             self.pump(0.1)
@@ -901,6 +905,22 @@ class Views(unittest.TestCase):
             self.assertEqual(t.clock_words(c, U), ("? Clock unknown", "warn"))
         for c in ({"synced": True, "source": "GPS"}, {"synced": False}, None):
             self.assertTrue(t.clock_words(c, A)[0].isascii())
+
+    def test_station_words(self):
+        st = {"station": {"grid_reason": "EM13lc from GPS (10 satellites)", "grid_source": "gps",
+                          "gps": {"state": "fix"}}}
+        self.assertEqual(t.station_words(st, U), ("● Station EM13lc from GPS (10 satellites)", "ok"))
+        st["station"].update(grid_source="station", grid_reason="EM13lc from station config: "
+                             "GPS has no fix", gps={"state": "no fix"})
+        self.assertEqual(t.station_words(st, U),
+                         ("· Station EM13lc from station config: GPS has no fix", "label"))
+        st["station"]["gps"]["state"] = "rejected"
+        self.assertEqual(t.station_words(st, A)[1], "warn")
+        self.assertTrue(t.station_words(st, A)[0].startswith("! Station"))
+        st["station"].update(grid_source=None, grid_reason="No grid: GPS is off, and no grid")
+        self.assertEqual(t.station_words(st, U)[1], "bad")
+        self.assertIsNone(t.station_words({"station": {"call": "KA1PID"}}, U))  # an older rxd
+        self.assertIsNone(t.station_words(None, U))
 
     def test_flip_needed(self):
         fm = PROFILES[2]
@@ -1271,6 +1291,7 @@ class Drawing(unittest.TestCase):
     def test_js8_clock_ok_and_unknown(self):
         app = app_on("js8")
         self.assertIn("● Clock synced (GPS)", frame(app).text())
+        self.assertIn("● Station EM13lc from GPS (10 satellites)", frame(app).text())
         app.p.status["clock"] = {"synced": None}
         self.assertIn("? Clock unknown", frame(app).text())
 
@@ -1906,7 +1927,7 @@ class RealProgram(unittest.TestCase):
         self.assertEqual(fake.posts, [{"freq": 7201000}, {"freq": 7205000}, {"mode": "AM"},
                                       {"gain_db": 7.7}, {"volume": 0.25},
                                       {"freq": 146520000}])
-        self.assertIn("3 ● Manual", tui.vt.text())               # tuning to FM didn't move it
+        self.assertTrue(tui.wait_for("3 ● Manual"), tui.vt.text())               # tuning to FM didn't move it
         tui.send(b"?")
         self.assertTrue(tui.wait_for("Any key closes this"), tui.vt.text())
         tui.send(b" ")
@@ -1936,7 +1957,7 @@ class RealProgram(unittest.TestCase):
         self.assertNotIn("PgDn for newest", tui.vt.text())
         tui.send(b"g")
         tui.pump(0.3)
-        self.assertIn("isn't a key in Digital", tui.vt.text())
+        self.assertTrue(tui.wait_for("isn't a key in Digital"), tui.vt.text())
         self.assertEqual(fake.posts, [])
         self.quit_cleanly(tui)
 
@@ -1974,9 +1995,9 @@ class RealProgram(unittest.TestCase):
                                       {"squelch": -70.0}, {"squelch": -68.0}, {"squelch": -70.0},
                                       {"volume": 0.15}, {"volume": 0.2}, {"volume": 0.0},
                                       {"volume": 0.2}])
-        self.assertIn("Bandwidth Wide 16 kHz", tui.vt.text())
+        self.assertTrue(tui.wait_for("Bandwidth Wide 16 kHz"), tui.vt.text())
         tui.keys(b"M")
-        self.assertIn("Speaker Muted (M restores 20 %)", tui.vt.text())
+        self.assertTrue(tui.wait_for("Speaker Muted (M restores 20 %)"), tui.vt.text())
         self.quit_cleanly(tui)
         self.assertEqual(fake.posts[-2:], [{"volume": 0.0}, {"volume": 0.2}])  # given back on quit
 
@@ -1994,9 +2015,9 @@ class RealProgram(unittest.TestCase):
         tui.send(b"2")
         self.assertTrue(tui.wait_for("Pick a station to switch"), tui.vt.text())
         tui.keys(KEYS["enter"])
-        self.assertTrue(tui.wait_for("Flip the Ham It Up to BYPASS for WBUR Boston", 8),
+        self.assertTrue(tui.wait_for("Flip the Ham It Up to BYPASS for WBUR Boston"),
                         tui.vt.text())
-        self.assertIn("2 ● Listen", tui.vt.text())
+        self.assertTrue(tui.wait_for("2 ● Listen"), tui.vt.text())
         self.assertEqual(fake.switches, ["js8", "fm-105.3"])
         self.quit_cleanly(tui)
 
@@ -2018,7 +2039,7 @@ class RealProgram(unittest.TestCase):
             pid = int(fh.read())
         self.assertTrue(alive(pid))
         tui.keys(b"]", b"]")
-        self.assertIn("Volume here 120 %", tui.vt.text())
+        self.assertTrue(tui.wait_for("Volume here 120 %"), tui.vt.text())
         self.quit_cleanly(tui)
         self.assertFalse(alive(pid))
         self.assertTrue(AgainstFakeRxd.wait(self, lambda: fake.listeners == 0, 3))
@@ -2050,7 +2071,8 @@ class RealProgram(unittest.TestCase):
         fake.close()        # nothing listening
         tui = self.run_tui(url, env={"NO_COLOR": "1"})
         self.assertTrue(tui.wait_for("✕ NO RXD"), tui.vt.text())
-        self.assertIn("Can't reach rxd", tui.vt.text())
+        # The header can land a frame before the body on a busy machine.
+        self.assertTrue(tui.wait_for("Can't reach rxd"), tui.vt.text())
         # No colour at all: only the terminal's defaults (39, 49) are ever set.
         sgr = re.findall(r"\x1b\[([0-9;]*)m", tui.raw.decode("utf-8", "ignore"))
         codes = {c for p in sgr for c in p.split(";") if c}

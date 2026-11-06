@@ -413,10 +413,12 @@ class Recording(unittest.TestCase):
             for i in range(0, len(x48) - blk + 1, blk):
                 now[0] += blk / 48000
                 sd.push(x48[i:i + blk], 7078000)
-            deadline = time.time() + 60
+            # A loaded CM4 (the whole suite running) can take a while per slot.
+            deadline = time.time() + 180
             while sd.last is None and time.time() < deadline:
                 time.sleep(0.05)
             st = sd.status()
+            self.assertIsNotNone(st["last"], "no slot decoded: %s" % st)
             self.assertEqual(st["last"]["decodes"], 1, st)
             with open(os.path.join(d, "DIRECTED.TXT"), encoding="utf-8") as fh:
                 row = fh.read().strip().split("\t")

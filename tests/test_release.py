@@ -50,7 +50,7 @@ class Release(unittest.TestCase):
         with tarfile.open(path) as tar:
             members = {m.name: m for m in tar.getmembers()}
         for f in ("install.py", "rxd/rxd.py", "rxd/js8.py", "rxd/callsign_db.py", "rxd/radio.py",
-                  "rxd/station.py", "clients/web/index.html", "clients/tui/rxd_tui.py",
+                  "rxd/station.py", "rxd/location.py", "clients/web/index.html", "clients/tui/rxd_tui.py",
                   "completions/radio", "LICENSE", "README.md", "docs/API.md", "docs/station.md"):
             self.assertIn(top + f, members, f)
         self.assertFalse([n for n in members if n.startswith(top + "tests/")

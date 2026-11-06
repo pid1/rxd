@@ -47,6 +47,9 @@ header .id{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;font-si
 .pill{font-size:17px;font-weight:600;white-space:nowrap}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dimc{color:var(--dim)}
 .jclock{grid-column:1/-1;margin:4px 0 0}
+/* location: the station's grid and where it comes from, one line */
+.jloc{grid-column:1/-1;margin:2px 0 0;font-size:17px;font-weight:600;color:var(--dim);overflow-wrap:anywhere}
+.jloc.ok{color:var(--ok)}.jloc.warn{color:var(--warn)}.jloc.bad{color:var(--bad)}
 .banner{border:2px solid var(--bad);color:var(--bad);background:var(--panel);border-radius:10px;padding:12px 14px;font-weight:700;font-size:19px}
 .hiu{border:2px solid var(--accent);border-radius:10px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;background:var(--panel)}
 .hiu b{font-size:22px}
@@ -304,6 +307,7 @@ body[data-view=listen] #gWhy{display:none}
   <div><span class="k">Clock</span><span id="jClock" class="v">—</span></div>
   <div id="jGainC" hidden><span class="k">RF gain</span><span id="jGain" class="v">—</span></div>
   <p id="jClockBad" class="banner jclock" role="alert" hidden></p>
+  <p id="jLoc" class="jloc" role="status" hidden></p>
 </section>
 <section class="card wst" id="wStat" data-v="digital" data-live hidden>
   <div><span class="k">Cycle</span><span id="wCycle" class="v">—</span></div>
@@ -1533,6 +1537,21 @@ function renderJs8Stat(s, rxText, rxCls) {
     const off = typeof c.offset_s === "number" ? " It is " + Math.abs(c.offset_s).toFixed(1) + " s " + (c.offset_s > 0 ? "fast" : "slow") + "." : "";
     setText(bad, "✕ Clock not synced: " + decName(pdec(s)) + " won't decode until it is." + off + " No GPS fix and no network? Check chronyc sources.");
   }
+  renderLocation(s.station);
+}
+
+// ---------------------------------------------------------------- location: the station's grid, from GPS or the station file
+// One line: "● Station EM13lc from GPS (10 satellites)". Symbol and words
+// carry the state; colour only repeats it.
+function renderLocation(st) {
+  const el = $("jLoc"), why = st && st.grid_reason;
+  el.hidden = !why;
+  if (!why) return;
+  const src = st.grid_source, gps = (st.gps || {}).state;
+  const sym = src === "gps" ? "●" : !src ? "✕" : gps === "rejected" ? "▲" : "·";
+  const cls = src === "gps" ? "jloc ok" : !src ? "jloc bad" : gps === "rejected" ? "jloc warn" : "jloc";
+  setText(el, sym + " Station " + why, cls);
+  el.title = st.gps && st.gps.reason ? st.gps.reason : "";
 }
 
 // ---------------------------------------------------------------- gain: auto RF gain and audio clean-up
