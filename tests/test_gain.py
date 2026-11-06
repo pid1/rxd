@@ -200,6 +200,23 @@ class Loop(unittest.TestCase):
         self.assertLess(wall - WALL0 - t, 2.5)
         self.assertLessEqual(db, 29.7 - rxd.AutoGain.URGENT_DROP)
 
+    def test_a_step_that_flip_flops_is_held(self):
+        # A dongle whose floor jumps 11 dB between 0 and 3.7 dB, as the R820T
+        # did on WFM: neither step is in the band.
+        class Jumpy(GainSynth):
+            def read(self, n):
+                real = self.gain
+                self.gain = 0.0 if real < 1 else real + 12.3
+                try:
+                    return super().read(n)
+                finally:
+                    self.gain = real
+        self.make(Jumpy(noise_db=-48), gain=0.0)
+        self.run_to(90)
+        self.assertLessEqual(len(self.decisions), 2, self.decisions)
+        self.assertEqual(self.settings.snapshot()["gain_db"], 3.7)  # holds the higher one
+        self.assertIn("flip-flopped", self.rx.autogain.status()["reason"])
+
     def test_manual_gain_stops_the_loop_and_gain_auto_restarts_it(self):
         rx = self.make(GainSynth(noise_db=-70), gain=49.6)
         self.run_to(5)

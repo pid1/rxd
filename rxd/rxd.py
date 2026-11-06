@@ -659,6 +659,12 @@ class AutoGain:
     URGENT_DROP = 6.0      # dB: an overload steps down at least this far
     FAST, SLOW = 1.0, 5.0  # seconds between steps while settling / after
     SETTLE_FOR = 30.0      # seconds of fast steps at most
+    # The floor doesn't always move dB for dB: on WFM at 93.3 MHz the R820T's
+    # floor rose 11 dB for its 0 -> 3.7 dB step, so neither was in the band
+    # and the loop flipped between them every second (2026-11-06). A step
+    # that would undo the last one within REVERSAL_S is refused, the loop
+    # holds the higher gain, and that move waits BAR_S. Overload isn't barred.
+    REVERSAL_S, BAR_S = 120.0, 600.0
     # Decoder -> (slot period, gap start, gap end), seconds into the period.
     # WSPR records 114 s from the even minute; a JS8 Normal frame ends 13.1 s
     # into its 15 s slot.
@@ -685,6 +691,8 @@ class AutoGain:
         self.settling = True
         self.holds = 0
         self.state = "settling"
+        self.last_step = None    # (from, to, when) of the last non-overload step
+        self.barred = {}         # (index, direction) -> until when
 
     @staticmethod
     def measure(x):
@@ -804,10 +812,22 @@ class AutoGain:
         self.t_dec = now
         d, why = self.decide(clip, rms, margin, i)
         self.reason = why
+        if d and why not in ("clipping", "near full scale"):
+            if self.barred.get((i, d), -1.0) > now:
+                d, why = 0, why + "; held, as the step flip-flopped"
+                self.reason = why
+            elif self.last_step and now - self.last_step[2] < self.REVERSAL_S and \
+                    (self.last_step[1] - self.last_step[0]) * d < 0:
+                self.barred[(i, d) if d < 0 else (self.last_step[0], -1)] = now + self.BAR_S
+                if d < 0:  # stay up here
+                    d, why = 0, why + "; held, as the step flip-flopped"
+                    self.reason = why
         if d:
             self.holds = 0
-            return self.step(i, self.jump(i, d, rms, margin) if self.settling else i + d,
-                             now, why)
+            j = self.jump(i, d, rms, margin) if self.settling else i + d
+            if why not in ("clipping", "near full scale"):
+                self.last_step = (i, j, now)
+            return self.step(i, j, now, why)
         self.holds += 1
         if self.settling and (self.holds >= 2 or now - self.t_start > self.SETTLE_FOR):
             self.settling = False
