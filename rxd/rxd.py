@@ -1009,6 +1009,11 @@ def js8_mycall():
     return None
 
 
+# A callsign: a 1-3 character prefix, a digit, a 1-4 letter suffix, and an
+# optional /P-style part. Not "INFO", "HELLO" or a group like "@HB".
+CALLSIGN = re.compile(r"^(?:[A-Z0-9]{1,4}/)?[A-Z0-9]{1,3}[0-9][A-Z]{1,4}(?:/[A-Z0-9]{1,4})?$")
+
+
 class Js8Feed:
     """New lines of DIRECTED.TXT, parsed and numbered, read as they're asked for."""
 
@@ -1031,7 +1036,7 @@ class Js8Feed:
         text = f[4].replace("\u2662", "").strip()  # JS8Call's end-of-message diamond
         frm, _, body = text.partition(":")
         words = body.split()
-        to = words[0] if words and not words[0].startswith("@") and words[0].isalnum() else None
+        to = words[0] if words and CALLSIGN.match(words[0]) else None
         try:
             freq = float(f[1]) * 1e6 if float(f[1]) < 1000 else float(f[1])
             off, snr = int(f[2]), int(f[3])

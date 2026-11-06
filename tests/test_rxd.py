@@ -269,6 +269,11 @@ class Js8(unittest.TestCase):
                                 "text": "W0WQQ: 9A3QXZ HEARTBEAT SNR -04"})
         self.assertIsNone(rxd.Js8Feed.parse(JS8_LINES[1])["to"])  # @HB is a group
         self.assertIsNone(rxd.Js8Feed.parse("garbage\n"))
+        for word, call in (("HELLO", False), ("INFO", False), ("SNR", False), ("@HB", False),
+                           ("KA1PID", True), ("9A3QXZ", True), ("VE6/LB9YH", True),
+                           ("N5DQQ/P", True), ("W1AW", True), ("K1", False)):
+            line = JS8_LINES[0].replace("9A3QXZ HEARTBEAT", word + " HEARTBEAT")
+            self.assertEqual(rxd.Js8Feed.parse(line)["to"], word if call else None, word)
 
     def test_follows_appends_partial_lines_and_rotation(self):
         with tempfile.TemporaryDirectory() as d:
