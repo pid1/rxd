@@ -719,7 +719,7 @@ class AutoGain:
             if clip > self.CLIP_UP or rms + (g[i + 1] - g[i]) > self.RMS_UP:
                 return 0, "noise near the ADC's, but no headroom for more"
             return 1, "noise near the ADC's"
-        return 0, "good"
+        return 0, "the antenna sets the noise floor, with headroom"
 
     def target(self, i, d, urgent=False):
         g = self.gains
@@ -775,15 +775,17 @@ class AutoGain:
                     return self.step(i, i + 1, now, "noise far too near the ADC's")
         if now - self.t_dec < (self.FAST if self.settling else self.SLOW):
             return None
-        if not self.settling and self.decoder in self.SLOTS and not self.in_gap(wall):
-            self.state = "holding for the gap between slots"
-            return None
         cl, n, pw, fl = self.acc
         if not n:
             return None
         clip, rms = cl / (2.0 * n), db10(pw / n)
         floor_db = float(np.median(fl)) if fl else None
         margin = floor_db - self.ADC_FLOOR_DB if floor_db is not None else None
+        if not self.settling and self.decoder in self.SLOTS and not self.in_gap(wall):
+            d, why = self.decide(clip, rms, margin, i)
+            if d:  # keep measuring; step in the gap
+                self.state, self.reason = "waiting for the gap between slots", why
+            return None
         self.last = {"clip": clip, "rms_dbfs": round(rms, 1),
                      "floor_db": None if floor_db is None else round(floor_db, 1),
                      "margin_db": None if margin is None else round(margin, 1)}
@@ -926,7 +928,7 @@ class AudioFx:
     FILTERS = {"USB": (100.0, 2, None), "LSB": (100.0, 2, None), "AM": (100.0, 4, None),
                "FM": (300.0, 6, 3500.0), "WFM": (30.0, 2, None)}
     TARGET_DB = -20.0                  # RMS the normaliser aims at, dBFS
-    GAIN_MIN_DB, GAIN_MAX_DB = -20.0, 24.0
+    GAIN_MIN_DB, GAIN_MAX_DB = -20.0, 12.0  # +12: dead air stays quiet
     NORM_GATE_DB = -60.0               # quieter than this doesn't move it
     SQ_BAND = (8000.0, 16000.0)        # NFM noise squelch measures here
     SQ_OPEN_DB, SQ_CLOSE_DB = 6.0, 3.0  # quieter than pure noise by, to open/close

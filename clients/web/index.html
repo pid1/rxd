@@ -180,6 +180,14 @@ dialog .row2{margin-top:6px}
 .wl .wg{font-size:18px;font-weight:650}
 .wl .wd{font-size:18px}
 .wl .wx{flex-basis:100%;font-size:16px;font-weight:600;color:var(--dim)}
+/* gain: auto RF gain and audio clean-up */
+#gAuto{margin:6px 0 0}
+#gAuto .btn small,#auSl .btn small,.augrid .btn small{display:block;font-size:14px;font-weight:600}
+#gWhy{margin:4px 0 0}
+body[data-view=listen] #gWhy{display:none}
+.augrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:6px;margin-top:6px}
+.augrid .btn{font-size:18px;line-height:1.1;text-align:left;padding:4px 10px}
+@media (min-width:700px){#jStat{grid-template-columns:repeat(6,auto)}}
 </style>
 </head>
 <body>
@@ -232,6 +240,7 @@ dialog .row2{margin-top:6px}
   <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
   <div><span class="k">Heard</span><span id="jHeard" class="v">—</span></div>
   <div><span class="k">Clock</span><span id="jClock" class="v">—</span></div>
+  <div id="jGainC" hidden><span class="k">RF gain</span><span id="jGain" class="v">—</span></div>
   <p id="jClockBad" class="banner jclock" role="alert" hidden></p>
 </section>
 <section class="card wst" id="wStat" data-v="digital" data-live hidden>
@@ -300,11 +309,18 @@ dialog .row2{margin-top:6px}
     <div class="sl"><div class="lbl"><label for="bw">Bandwidth</label><span id="bwV" class="val">—</span></div>
       <input type="range" id="bw" min="300" max="4000" step="100"></div>
     <div class="sl" id="gainSl"><div class="lbl"><label for="gain">RF gain</label><span id="gainV" class="val">—</span></div>
-      <input type="range" id="gain" min="0" max="50" step="0.1"></div>
+      <div class="row2" id="gAuto" role="group" aria-label="RF gain: automatic or set by hand" hidden><button type="button" class="btn" id="gAutoOff">By hand</button><button type="button" class="btn" id="gAutoOn">Auto</button></div>
+      <input type="range" id="gain" min="0" max="50" step="0.1">
+      <p id="gWhy" class="note" hidden></p></div>
     <div class="sl" id="volSl"><div class="lbl"><label for="vol">uConsole speaker</label><span id="volV" class="val">—</span></div>
       <input type="range" id="vol" min="0" max="1000" step="1"></div>
   </section>
 </div>
+</fieldset>
+<fieldset class="card" id="audioCard" data-v="manual" data-live disabled hidden>
+  <div class="lbl"><span>Audio clean-up</span><span id="auState" class="val"></span></div>
+  <div class="augrid" role="group" aria-label="Audio clean-up" id="auGrid"></div>
+  <p class="note">For the uConsole speaker and the audio on this device. JS8Call and the WSPR decoder always get the audio untouched.</p>
 </fieldset>
 <section class="card" id="aPick" data-v="manual">
   <div class="lbl"><span>Profiles</span></div>
@@ -484,7 +500,7 @@ function renderConn() {
   else if (conn === "ok") setText(el, "● Connected", "pill ok");
   else if (conn === "down") setText(el, "✕ Disconnected", "pill bad");
   $("down").hidden = conn !== "down" || !!switching;
-  $("ctl").disabled = $("qual").disabled = conn !== "ok" || !!switching;
+  $("ctl").disabled = $("qual").disabled = $("audioCard").disabled = conn !== "ok" || !!switching;
   $("sw").hidden = !switching;
   if (switching) $("note").hidden = true;
   renderProfiles(); renderMute();
@@ -555,6 +571,7 @@ function applyStatus(s) {
   renderProfiles(); renderQual();
   renderJs8Stat(s, $("sRx").textContent, $("sRx").className);
   renderWsprStat(s);
+  renderGainAudio(s);
   if (profAvail && profiles && !switching && !profLoading && s.profile !== profiles.active && s.profile !== profAskedFor) loadProfiles();
   if (A.on && rateFor(s.mode) !== A.want) connectAudio();
   js8Sync(); wsprSync();
@@ -1006,7 +1023,7 @@ function renderView() {
   // RF gain and the speaker slider live in whichever view shows them
   const home = v === "listen" ? $("qual") : $("sliders");
   if ($("gainSl").parentElement !== home) { home.appendChild($("gainSl")); home.appendChild($("volSl")); }
-  if (v === "listen") home.appendChild($("sqSl"));
+  if (v === "listen") { home.appendChild($("sqSl")); home.appendChild($("auSl")); }
   renderProfiles(); renderQual();
   if (v === "manual") requestAnimationFrame(() => { onResize(); pollSpecSoon(); });
 }
@@ -1119,7 +1136,7 @@ const BWP = {WFM: [100e3, 150e3, 200e3], FM: [8e3, 12.5e3, 16e3], AM: [6e3, 10e3
 const sqSl = document.createElement("div");
 sqSl.className = "sl"; sqSl.id = "sqSl"; sqSl.dataset.v = "listen";
 sqSl.innerHTML = '<div class="lbl"><span>Squelch</span><span id="sqS" class="val">—</span></div>' +
-  '<div class="row2"><button type="button" class="btn" id="sqOff">Off</button><button type="button" class="btn" id="sqOn">On</button></div>' +
+  '<div class="row2" id="sqBtns"><button type="button" class="btn" id="sqOff">Off</button><button type="button" class="btn" id="sqOn">On</button></div>' +
   '<div id="sqLv"><div class="lbl"><label for="sq">Opens above</label><span id="sqV" class="val">—</span></div>' +
   '<input type="range" id="sq" min="-120" max="0" step="1"></div>';
 $("qual").appendChild(sqSl);
@@ -1132,7 +1149,7 @@ for (const [i, name] of ["Narrow", "Normal", "Wide"].entries()) {
 }
 const sqEl = $("sq");
 function sqLevel() { const v = +load("squelch"); return v <= 0 && v >= -150 && load("squelch") !== null ? v : -60; }
-$("sqOff").onclick = () => { tune({squelch: null}, 0); if (st) st.squelch = null; renderQual(); };
+$("sqOff").onclick = () => { tune(sqAutoAvail() ? {squelch: null, audio_squelch: false} : {squelch: null}, 0); if (st) { st.squelch = null; if (sqAutoAvail()) st.audio.squelch = false; } renderQual(); };
 $("sqOn").onclick = () => { const v = sqLevel(); tune({squelch: v}, 0); if (st) st.squelch = v; renderQual(); };
 sqEl.oninput = () => { const v = +sqEl.value; store("squelch", String(v)); setText($("sqV"), "−" + Math.abs(v) + " dBFS"); fill(sqEl); tune({squelch: v}, 200); };
 track(sqEl, "squelch");
@@ -1161,7 +1178,9 @@ function renderQual() {
     $("sqOff").setAttribute("aria-pressed", String(!on)); $("sqOn").setAttribute("aria-pressed", String(on));
     $("sqLv").hidden = !on;
     if (on && !held("squelch")) { sqEl.value = st.squelch; fill(sqEl); setText($("sqV"), (st.squelch < 0 ? "−" : "") + Math.abs(st.squelch) + " dBFS"); }
-    if (!on) setText($("sqS"), "Off, always open", "val");
+    sqRenderAuto(on);
+    if (on) {} else if (sqAuto()) setText($("sqS"), st.squelch_open ? "● Auto: open (signal)" : "■ Auto: closed (quiet)", st.squelch_open ? "val ok" : "val dimc");
+    else if (!on) setText($("sqS"), "Off, always open", "val");
     else if (st.squelch_open) setText($("sqS"), "● Open (signal)", "val ok");
     else setText($("sqS"), "■ Closed (quiet)", "val dimc");
   }
@@ -1433,6 +1452,108 @@ function renderJs8Stat(s, rxText, rxCls) {
   if (c.synced === false) {
     const off = typeof c.offset_s === "number" ? " It is " + Math.abs(c.offset_s).toFixed(1) + " s " + (c.offset_s > 0 ? "fast" : "slow") + "." : "";
     setText(bad, "✕ Clock not synced: " + decName(pdec(s)) + " won't decode until it is." + off + " No GPS fix and no network? Check chronyc sources.");
+  }
+}
+
+// ---------------------------------------------------------------- gain: auto RF gain and audio clean-up
+// Auto gain sits in the RF gain block, which moves between Listen and Manual;
+// moving the slider sets the gain by hand, which turns auto off in rxd.
+// Listen gets one Auto audio switch; Manual a switch per stage.
+const AU = [["auto", "Auto audio"], ["nr", "Noise reduction"], ["filter", "Hum filter"],
+  ["norm", "Even loudness"], ["limit", "Limiter"], ["squelch", "NFM squelch"]];
+const auSl = document.createElement("div");
+auSl.className = "sl"; auSl.id = "auSl"; auSl.dataset.v = "listen"; auSl.hidden = true;
+auSl.innerHTML = '<div class="lbl"><span>Auto audio</span><span id="auS" class="val">—</span></div>' +
+  '<div class="row2" role="group" aria-label="Auto audio"><button type="button" class="btn" id="auOff">Off</button><button type="button" class="btn" id="auOn">On</button></div>' +
+  '<p id="auNote" class="note"></p>';
+$("qual").appendChild(auSl);
+for (const [k, name] of AU) {
+  const b = document.createElement("button");
+  b.type = "button"; b.className = "btn"; b.dataset.k = k; b.dataset.name = name;
+  b.onclick = () => auToggle(k);
+  $("auGrid").appendChild(b);
+}
+function gAuto(s) { return held("gain_auto") && "gain_auto" in pend ? pend.gain_auto : s.gain_auto; }
+function setGainAuto(on) { if (!st) return; tune({gain_auto: on}, 0); st.gain_auto = on; renderGainAudio(st); }
+$("gAutoOn").onclick = () => setGainAuto(true);
+$("gAutoOff").onclick = () => { if (st) { tune({gain_db: st.gain_db}, 0); st.gain_auto = false; renderGainAudio(st); } };
+$("auOn").onclick = () => auSet("auto", true);
+$("auOff").onclick = () => auSet("auto", false);
+function auSet(k, v) {
+  if (!st || !st.audio) return;
+  const f = {}; f["audio_" + k] = v; tune(f, 0);
+  st.audio[k] = v;
+  if (k === "nr") { st.audio.nr_setting = v; st.audio.nr = v === null ? st.mode !== "WFM" : v; }
+  renderGainAudio(st);
+}
+function auToggle(k) {
+  if (!st || !st.audio) return;
+  if (k !== "nr") return auSet(k, !st.audio[k]);
+  // noise reduction is on by mode (off for WFM); back to "by mode" when that's what's asked
+  const want = !st.audio.nr, byMode = st.mode !== "WFM";
+  auSet("nr", want === byMode ? null : want);
+}
+const AU_WORDS = {nr: "noise reduction", filter: "hum filter", norm: "even loudness", limit: "limiter", squelch: "squelch"};
+function gainWhy(s) {
+  const g = s.gain_loop || {};
+  if (!s.gain_auto) return "Set by hand. Auto picks the gain with the best signal-to-noise without overload.";
+  if (g.state === "unavailable") return "✕ " + (g.reason || "No gain control on this source.");
+  const state = {settling: "■ Settling", holding: "● Holding", stepped: "● Stepped", "waiting for the gap between slots": "■ Stepping in the next gap between slots"}[g.state] || g.state;
+  const m = typeof g.margin_db === "number" ? "; band noise " + Math.round(g.margin_db) + " dB over the ADC's" : "";
+  return state + (g.reason ? ": " + g.reason : "") + m + ".";
+}
+// NFM's squelch row in Listen: Off, Auto (rxd's noise squelch) or a level
+const sqAutoB = document.createElement("button");
+sqAutoB.type = "button"; sqAutoB.className = "btn"; sqAutoB.id = "sqAuto"; sqAutoB.textContent = "Auto";
+$("sqBtns").insertBefore(sqAutoB, $("sqOn"));
+sqAutoB.onclick = () => { tune({squelch: null, audio_squelch: true, audio_auto: true}, 0); if (st) { st.squelch = null; Object.assign(st.audio, {squelch: true, auto: true}); } renderQual(); renderGainAudio(st); };
+function sqAutoAvail() { return !!(st && st.audio && typeof st.audio.squelch === "boolean"); }
+function sqAuto() { return sqAutoAvail() && st.audio.auto && st.audio.squelch && (st.squelch === null || st.squelch === undefined); }
+function sqRenderAuto(level) {
+  const av = sqAutoAvail(), au = sqAuto() && !level;
+  sqAutoB.hidden = !av;
+  $("sqBtns").className = av ? "row3" : "row2";
+  sqAutoB.setAttribute("aria-pressed", String(au));
+  $("sqOff").setAttribute("aria-pressed", String(!level && !au));
+  $("sqOn").textContent = av ? "Level" : "On";
+}
+function renderGainAudio(s) {
+  const has = typeof s.gain_auto === "boolean";
+  $("gAuto").hidden = !has;
+  if (has) {
+    const on = gAuto(s);
+    $("gAutoOn").setAttribute("aria-pressed", String(on)); $("gAutoOff").setAttribute("aria-pressed", String(!on));
+    $("gAutoOn").textContent = (on ? "● " : "") + "Auto"; $("gAutoOff").textContent = (on ? "" : "● ") + "By hand";
+    if (!held("gain_db") && typeof s.gain_db === "number") setText($("gainV"), (on ? "Auto, " : "") + s.gain_db.toFixed(1) + " dB");
+    setText($("gWhy"), gainWhy(s)); $("gWhy").hidden = false;
+  }
+  const jc = $("jGainC");
+  jc.hidden = !has;
+  if (has && view === "digital") setText($("jGain"), (s.gain_auto ? "Auto " : "Set ") + (typeof s.gain_db === "number" ? s.gain_db.toFixed(1) : "—") + " dB", "v");
+  const a = s.audio;
+  const hasA = !!a && typeof a.auto === "boolean";
+  $("auSl").hidden = !hasA || view !== "listen";
+  $("audioCard").hidden = $("audioCard").hidden || !hasA;
+  if (!hasA) return;
+  const act = Array.isArray(a.active) ? a.active : [];
+  const sum = !a.auto ? "Off, untouched" : act.length ? "On: " + act.map(k => AU_WORDS[k]).filter(Boolean).join(", ") : "On, nothing for this mode";
+  $("auOn").setAttribute("aria-pressed", String(a.auto)); $("auOff").setAttribute("aria-pressed", String(!a.auto));
+  $("auOn").textContent = (a.auto ? "● " : "") + "On"; $("auOff").textContent = (a.auto ? "" : "● ") + "Off";
+  setText($("auS"), a.auto ? "On" : "Off", "val");
+  setText($("auNote"), sum);
+  setText($("auState"), a.auto ? (a.squelch_open === false ? "■ Squelch closed (quiet)" : a.squelch_open ? "● Squelch open (signal)" : "● On") : "Off", "val");
+  for (const b of $("auGrid").children) {
+    const k = b.dataset.k;
+    b.hidden = k === "squelch" && s.mode !== "FM";
+    const on = k === "nr" ? a.nr : a[k];
+    b.disabled = k !== "auto" && !a.auto;
+    b.setAttribute("aria-pressed", String(!!on));
+    b.textContent = "";
+    b.append((on ? "● " : "○ ") + (k === "filter" && s.mode === "FM" ? "Voice filter" : b.dataset.name));
+    const sm = document.createElement("small");
+    sm.textContent = (on ? "On" : "Off") + (k === "nr" && a.nr_setting === null ? " (by mode)" : "") +
+      (k === "squelch" && on && s.squelch !== null && s.squelch !== undefined ? ", the level squelch is on instead" : "");
+    b.appendChild(sm);
   }
 }
 

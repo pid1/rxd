@@ -557,5 +557,83 @@ class Routing(unittest.TestCase):
         self.assertAlmostEqual(rms_db(stream[-3 * FS:]), rxd.AudioFx.TARGET_DB, delta=2.0)
 
 
+# ------------------------------------------------------------------ rxd-tui
+
+AUDIO_ON = {"auto": True, "nr": True, "nr_setting": None, "filter": True, "norm": True,
+            "limit": True, "squelch": True, "active": ["filter", "nr", "norm", "limit"]}
+
+
+class Tui(unittest.TestCase):
+    def app(self, profile, **st):
+        import test_rxd_tui as tt
+        app = tt.app_on(profile)
+        app.p.status.update({"gain_auto": True, "gain_db": 7.7, "audio": dict(AUDIO_ON)}, **st)
+        tt.frame(app)
+        self.tt = tt
+        return app
+
+    def test_words(self):
+        import rxd_tui as t
+        st = {"gain_auto": True, "gain_db": 7.7, "mode": "AM", "audio": dict(AUDIO_ON)}
+        self.assertEqual(t.gain_words(st), "Auto 7.7 dB")
+        self.assertEqual(t.gain_words(dict(st, gain_auto=False)), "7.7 dB")
+        self.assertEqual(t.audio_words(st, short=True), "Auto: NR, hum, loudness, limiter")
+        self.assertIn("squelch", t.audio_words(dict(st, mode="FM"), short=True))
+        self.assertEqual(t.audio_words(dict(st, audio_auto=False)), "Off, untouched")  # sent, unconfirmed
+        self.assertEqual(t.audio_words({"mode": "AM"}), "---")   # an rxd without it
+
+    def test_toggles(self):
+        import rxd_tui as t
+        st = {"mode": "AM", "audio": dict(AUDIO_ON)}
+        self.assertEqual(t.audio_toggle(st, "A")[0], {"audio_auto": False})
+        self.assertEqual(t.audio_toggle(st, "c")[0], {"audio_limit": False})
+        self.assertEqual(t.audio_toggle(st, "n")[0], {"audio_nr": False})
+        # turning NR back on where the mode does anyway returns it to "by mode"
+        off = dict(st, audio=dict(AUDIO_ON, nr=False, nr_setting=False))
+        self.assertEqual(t.audio_toggle(off, "n")[0], {"audio_nr": None})
+        wfm = {"mode": "WFM", "audio": dict(AUDIO_ON, nr=False)}
+        self.assertEqual(t.audio_toggle(wfm, "n")[0], {"audio_nr": True})
+        self.assertIsNone(t.audio_toggle(st, "S")[0])             # NFM only
+        self.assertIsNone(t.audio_toggle(dict(st, audio=dict(AUDIO_ON, auto=False)), "n")[0])
+        fm = {"mode": "FM", "squelch": None, "audio": dict(AUDIO_ON)}
+        self.assertEqual(t.squelch_cycle(fm, -60)[0], {"squelch": -60})
+        self.assertEqual(t.squelch_cycle(dict(fm, squelch=-60.0), -60)[0],
+                         {"squelch": None, "audio_squelch": False})
+        self.assertEqual(t.squelch_cycle(dict(fm, audio=dict(AUDIO_ON, squelch=False)), -60)[0],
+                         {"audio_squelch": True, "audio_auto": True})
+
+    def test_listen_keys_and_screen(self):
+        app = self.app("noaa", squelch=None)
+        text = self.tt.frame(app).text()
+        self.assertIn("Gain Auto 7.7 dB", text)
+        self.assertIn("Squelch Auto", text)
+        self.assertIn("Audio Auto: noise reduction", text)
+        app.key(ord("a"))
+        self.assertEqual(app.p.sent[-1], {"gain_db": 7.7, "gain_auto": False})
+        self.assertIn("Gain by hand", app.message)
+        app.key(ord("s"))
+        self.assertEqual(app.p.sent[-1], {"squelch": app.sq_level})  # auto -> a level
+        app.key(ord("A"))
+        self.assertEqual(app.p.sent[-1], {"audio_auto": False})
+        help_text = "\n".join(app.help_lines())
+        self.assertIn("auto gain on / off", help_text)
+
+    def test_manual_keys(self):
+        app = self.app("40m")
+        self.assertIn("Gain Auto 7.7 dB", self.tt.frame(app, 24, 120).text())
+        app.key(ord("S"))
+        self.assertIn("NFM only", app.message)
+        for k in "nhecA":
+            app.key(ord(k))
+        self.assertEqual(app.p.sent, [{"audio_nr": False}, {"audio_filter": False},
+                                      {"audio_norm": False}, {"audio_limit": False},
+                                      {"audio_auto": False}])
+        app.p.status["gain_auto"] = False
+        app.overrides.clear()
+        self.tt.frame(app)
+        app.key(ord("a"))
+        self.assertEqual(app.p.sent[-1], {"gain_auto": True})
+
+
 if __name__ == "__main__":
     unittest.main()

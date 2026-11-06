@@ -330,12 +330,96 @@ def squelch_key(key, squelch, level):
 def squelch_words(st, g):
     """(text, role) for the squelch: Off, or the level and whether it's open."""
     sq = st.get("squelch")
+    a = audio_of(st)
+    if sq is None and a and a["auto"] and a.get("squelch"):
+        if st.get("squelch_open") is False:
+            return "Auto  %s Closed (quiet)" % g.stop, "label"
+        return "Auto  %s Open (signal)" % g.rx, "ok"
     if sq is None:
         return "Off, always open", "value"
     lvl = "%d dBFS" % round(sq)
     if st.get("squelch_open") is False:
         return "%s  %s Closed (quiet)" % (lvl, g.stop), "label"
     return "%s  %s Open (signal)" % (lvl, g.rx), "ok"
+
+
+# ---- gain: auto RF gain and audio clean-up
+
+# Manual's keys for each stage of rxd's audio clean-up: (key, field, words)
+AUDIO_STAGES = (("n", "nr", "noise reduction"), ("h", "filter", "hum filter"),
+                ("e", "norm", "even loudness"), ("c", "limit", "limiter"),
+                ("S", "squelch", "NFM squelch"))
+AUDIO_SHORT = {"nr": "NR", "filter": "hum", "norm": "loudness", "limit": "limiter",
+               "squelch": "squelch"}
+
+
+def audio_of(st):
+    """rxd's audio settings with anything sent but not yet confirmed, or None
+    for an rxd without them. nr is the effective state; nr_setting None is
+    "by mode" (on except for WFM)."""
+    a = st.get("audio") if st else None
+    if not isinstance(a, dict) or not isinstance(a.get("auto"), bool):
+        return None
+    a = dict(a)
+    for k in ("auto",) + tuple(f for _, f, _ in AUDIO_STAGES):
+        if "audio_" + k in st:
+            a[k] = st["audio_" + k]
+    if "audio_nr" in st:
+        a["nr_setting"] = st["audio_nr"]
+        a["nr"] = st["mode"] != "WFM" if st["audio_nr"] is None else st["audio_nr"]
+    return a
+
+
+def gain_words(st):
+    """The gain in use, and whether rxd picks it: "Auto 7.7 dB" or "7.7 dB"."""
+    gain = st.get("gain_db") if st else None
+    if gain is None:
+        return "---"
+    return ("Auto %.1f dB" if st.get("gain_auto") else "%.1f dB") % gain
+
+
+def audio_words(st, short=False):
+    """What the clean-up is doing: "Auto: NR, hum, loudness, limiter" or "Off"."""
+    a = audio_of(st)
+    if a is None:
+        return "---"
+    if not a["auto"]:
+        return "Off, untouched"
+    names = AUDIO_SHORT if short else {f: w for _, f, w in AUDIO_STAGES}
+    on = [names[f] for _, f, _ in AUDIO_STAGES
+          if a.get(f) and (f != "squelch" or st.get("mode") == "FM")]
+    return "Auto: " + (", ".join(on) if on else "nothing on")
+
+
+def audio_toggle(st, key):
+    """(fields to send, message) for A (all of it) or a stage's key in Manual."""
+    a = audio_of(st)
+    if a is None:
+        return None, "This rxd has no audio clean-up"
+    if key == "A":
+        on = not a["auto"]
+        return {"audio_auto": on}, "Audio clean-up %s" % ("on" if on else "off, untouched")
+    _, field, words = next(x for x in AUDIO_STAGES if x[0] == key)
+    if not a["auto"]:
+        return None, "Audio clean-up is off; A turns it on"
+    if field == "squelch" and st.get("mode") != "FM":
+        return None, "The noise squelch is for NFM only"
+    on = not a.get(field)
+    v = on
+    if field == "nr" and on == (st.get("mode") != "WFM"):
+        v = None   # what the mode does anyway: back to "by mode"
+    return {"audio_" + field: v}, "%s %s" % (words[0].upper() + words[1:], "on" if on else "off")
+
+
+def squelch_cycle(st, level):
+    """Listen's s on an rxd with the noise squelch: Off, Auto, Level, Off..."""
+    a = audio_of(st)
+    auto = bool(a and a["auto"] and a.get("squelch"))
+    if st.get("squelch") is not None:
+        return {"squelch": None, "audio_squelch": False}, "Squelch off"
+    if auto:
+        return {"squelch": level}, "Squelch opens above %d dBFS" % round(level)
+    return {"audio_squelch": True, "audio_auto": True}, "Squelch auto: opens for a signal"
 
 
 def clock_words(clock, g, mode="JS8"):
@@ -849,7 +933,8 @@ def badge(reachable, status, dropping, g, switching=None):
 
 SHORT_LABELS = {"bandwidth": "bw", "volume": "vol", "speaker": "spkr", "station": "pick",
                 "switch": "pick", "squelch": "sq", "listen": "listen", "filter": "filter",
-                "reporting": "report"}
+                "reporting": "report", "auto gain": "auto g", "auto audio": "auto a",
+                "clean-up": "clean"}
 
 
 def help_items(g, view="manual", mode=None, listening=False, decoder=None, report=False):
@@ -870,7 +955,8 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
             items.append(("l", "stop audio"))
         items.append(("1 2 3", "view"))
     elif view == "listen":
-        items = [(ud + " Enter", "station"), ("g G", "gain"), ("b", "bandwidth")]
+        items = [(ud + " Enter", "station"), ("g G", "gain"), ("a", "auto gain"),
+                 ("A", "auto audio"), ("b", "bandwidth")]
         if mode == "FM":
             items.append(("s , .", "squelch"))
         items += [("l", "listen")] + ([("[ ]", "volume")] if listening else []) + \
@@ -878,7 +964,8 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
     else:
         items = [(k["left"] + k["sep"] + k["right"], "tune"), (k["up"] + k["sep"] + k["down"], "step"),
                  ("f", "freq"), ("m", "mode"), ("l", "listen"), ("[ ]", "bandwidth"),
-                 ("g G", "gain"), ("- +", "volume"), ("1 2 3", "view")]
+                 ("g G", "gain"), ("a", "auto gain"), ("A n h e c", "clean-up"),
+                 ("- +", "volume"), ("1 2 3", "view")]
     return items + [("?", "help"), ("q", "quit")]
 
 
@@ -1894,6 +1981,25 @@ class App:
         else:
             self.send(gain_db=g)
 
+    def gain_auto_key(self, st):
+        """a: automatic RF gain on / off (off keeps the gain in use)."""
+        if not st or "gain_auto" not in st:
+            return self.say("This rxd has no automatic gain", "err") if st else self.not_yet()
+        if st.get("gain_auto"):
+            self.send(gain_db=st.get("gain_db"), gain_auto=False)
+            self.say("Gain by hand, %.1f dB: g G change it" % st.get("gain_db"))
+        else:
+            self.send(gain_auto=True)
+            self.say("Auto gain: rxd picks the best signal-to-noise")
+
+    def audio_key(self, ch, st):
+        if not st:
+            return self.not_yet()
+        fields, msg = audio_toggle(st, chr(ch))
+        if fields:
+            self.send(**fields)
+        self.say(msg, "msg" if fields else "err")
+
     def digital_key(self, ch, s):
         if self.picker_key(ch, s):
             return
@@ -1934,12 +2040,20 @@ class App:
         st = s["status"]
         if self.picker_key(ch, s):
             return
-        controls = (ord("g"), ord("G"), ord("b"), ord("s"), ord(","), ord("."))
+        controls = (ord("g"), ord("G"), ord("b"), ord("s"), ord(","), ord("."), ord("a"), ord("A"))
         if ch in controls and self.mismatch(s):
             self.say("Receiver is on %s; pick a station first (%s Enter)" % (
                 st.get("profile"), self.g.keys["updown"]))
         elif ch in (ord("g"), ord("G")):
             self.gain_key(ch, st)
+        elif ch == ord("a"):
+            self.gain_auto_key(st)
+        elif ch == ord("A"):
+            self.audio_key(ch, st)
+        elif ch == ord("s") and audio_of(st) is not None and st.get("mode") == "FM":
+            fields, msg = squelch_cycle(st, self.sq_level)
+            self.send(**fields)
+            self.say(msg)
         elif ch == ord("b"):
             if st.get("mode") is None:
                 return self.not_yet()
@@ -2002,6 +2116,10 @@ class App:
             self.local_volume_key(ch)
         elif ch in (ord("g"), ord("G")):
             self.gain_key(ch, st)
+        elif ch == ord("a"):
+            self.gain_auto_key(st)
+        elif ch in [ord(c) for c in "AnhecS"]:
+            self.audio_key(ch, st)
         elif ch in (ord("-"), ord("_"), ord("+"), ord("=")):
             self.speaker_key(ch, st)
         elif ch == ord("M"):
@@ -2395,7 +2513,7 @@ class App:
                 spk = "Muted (M restores %s)" % percent(self.mute_prev)
             else:
                 spk = percent(vol) if vol is not None else "---"
-            fields = [("Gain", "%.1f dB" % gain if gain is not None else "---"),
+            fields = [("Gain", gain_words(st)),
                       ("Bandwidth", "%s %s" % (bandwidth_name(st.get("mode"), bw), format_hz(bw))
                        if bw else "---"),
                       ("Speaker", spk)]
@@ -2412,6 +2530,10 @@ class App:
                 text, role = squelch_words(st, g)
                 scr.put(y, 1, "Squelch", "label")
                 scr.put(y, 9, text, role)
+                y += 1
+            if audio_of(st) is not None:
+                scr.put(y, 1, "Audio", "label")
+                scr.put(y, 7, clip(audio_words(st), w - 8, g), "value")
                 y += 1
             y = self.draw_audio_row(scr, y)
             y += 1
@@ -2495,8 +2617,10 @@ class App:
             spk = "Muted"
         else:
             spk = percent(st["volume"]) if st.get("volume") is not None else "---"
-        for label, val in (("Gain", "%.1f dB" % gain if gain is not None else "---"),
-                           ("Speaker", spk)):
+        for label, val in (("Gain", gain_words(st)), ("Speaker", spk),
+                           ("Audio", audio_words(st, short=True))):
+            if label == "Audio" and x + len(label) + len(val) + 2 > w:
+                val = val.split(":")[0]   # just Auto or Off when the list won't fit
             if x + len(label) + len(val) + 2 > w:
                 break
             scr.put(y, x, label, "label")
@@ -2591,8 +2715,11 @@ class App:
                 "",
                 "%-9s pick a station; Enter switches" % ud,
                 "g G       gain down / up through the dongle's steps",
+                "          (sets it by hand: auto gain goes off)",
+                "a         auto gain on / off",
+                "A         auto audio (the clean-up) on / off",
                 "b         bandwidth: Narrow, Normal, Wide",
-                "s         squelch off / on (NFM only)",
+                "s         squelch: off, auto, at a level (NFM only)",
                 ", .       squelch level down / up, 2 dB a press",
                 "- +       uConsole speaker volume down / up",
                 "M         mute the uConsole speaker / restore it",
@@ -2611,6 +2738,10 @@ class App:
                 "m         next mode: USB LSB AM FM WFM",
                 "[ ]       narrower / wider bandwidth",
                 "g G       gain down / up through the dongle's steps",
+                "a         auto gain on / off",
+                "A         audio clean-up on / off",
+                "n h e c S its parts on / off: noise reduction, hum",
+                "          filter, even loudness, limiter, NFM squelch",
                 "- +       uConsole speaker volume down / up (0-400 %)",
                 "M         mute the uConsole speaker / restore it",
                 "l         play the audio on this machine / stop",
@@ -2644,7 +2775,9 @@ class App:
         bw = min(max(len(x) for x in lines) + 4, scr.w)
         bh = len(lines) + 2
         if bh > scr.h:
-            lines = [x for x in lines if x][:scr.h - 2]
+            lines = [x for x in lines if x]
+            if len(lines) + 2 > scr.h:  # keep the last line: how to close it
+                lines = lines[:max(scr.h - 3, 0)] + lines[-1:]
             bh = len(lines) + 2
         y0 = max(0, (scr.h - bh) // 2)
         x0 = max(0, (scr.w - bw) // 2)
