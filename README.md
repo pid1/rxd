@@ -37,7 +37,7 @@ plainly when they reach an rxd they don't understand.
 From a release, verified by its checksum:
 
 ```bash
-v=0.3.0
+v=0.4.0
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz.sha256
 sha256sum -c rxd-$v.tar.gz.sha256 && tar xzf rxd-$v.tar.gz
