@@ -1648,6 +1648,12 @@ class Receiver:
     def hd_status(self, snap):
         if self.hd is not None:
             doc = self.hd.status(self.clock())
+            if doc["program"] != snap["hd_program"]:
+                # Picked, and the DSP thread hasn't restarted nrsc5 yet.
+                n = snap["hd_program"]
+                doc.update(state="acquiring", synced=False, title=None, artist=None, album=None,
+                           reason=("Analog: switching to HD1." if n == 0 else
+                                   "HD%d is digital-only: switching to it." % (n + 1)))
         else:
             why = self.hd_why or self.hd_capable(snap)[1] or "HD Radio is starting."
             doc = hd_mod.off_status(why, snap["hd_program"])

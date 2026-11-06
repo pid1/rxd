@@ -838,6 +838,7 @@ class Hd:
             reason = "Analog only: %s; trying again later." % self.ended
         if self.program != 0:
             why = re.sub(r"^(Analog|Back on analog|Analog only): ", "", reason)
+            why = why.replace("lining HD up with analog", "waiting for its audio")
             if not why.startswith("nrsc5"):
                 why = why[:1].upper() + why[1:]
             reason = {"digital": "Playing HD%d." % (self.program + 1)}.get(

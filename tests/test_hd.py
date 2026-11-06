@@ -571,6 +571,7 @@ class FakeNrsc5(unittest.TestCase):
         fb = next(t for t, s in seen if s == "analog fallback")
         self.assertLess(np.max(np.abs(out[int((fb + 0.4) * 48000):int((fb + 0.9) * 48000)])), 1e-6)
         self.assertIn("HD2 is digital-only", h.status(fb + 0.5)["reason"])
+        self.assertNotIn("analog", h.status(fb + 0.5)["reason"].lower())
         # and HD2's own audio while digital
         seg = out[int((dig + 0.5) * 48000):int(fb * 48000)]
         self.assertGreater(np.sqrt(np.mean(seg ** 2)), 0.05)
@@ -825,6 +826,8 @@ class Wiring(unittest.TestCase):
                                      headers={"Content-Type": "application/json"})
         st = json.load(urllib.request.urlopen(req))
         self.assertEqual(st["hd"]["program"], 1)
+        self.assertNotEqual(st["hd"]["state"], "digital")      # not HD1's state, a moment on
+        self.assertIn("HD2", st["hd"]["reason"])
         time.sleep(0.5)
         stop.set()
         pcm = np.frombuffer(b"".join(got), "<i2").astype(np.float32) / 32767
