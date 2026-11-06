@@ -74,6 +74,11 @@ UPCONVERT_BELOW_HZ = 30e6
 SINKS = {"SDR to JS8 (virtual cable)": "SDR_to_JS8", "Built-in Audio": None}
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
 DECODERS = ("js8", "wspr", None)
+# A JS8 profile's sink is JS8Call's input: silence there means no decodes
+# (2026-11-06, a saved volume 0 cost 18 minutes of them). Below this rxd
+# refuses a volume; a profile saved with less loads at JS8_VOLUME.
+DECODER_MIN_VOLUME = 0.05
+JS8_VOLUME = 0.2
 DEFAULT_BW = {"USB": 2800.0, "LSB": 2800.0, "AM": 10000.0, "FM": 12500.0,
               "WFM": 150000.0}
 
@@ -148,6 +153,9 @@ class Settings:
             if self.decoder not in DECODERS:
                 raise ValueError("decoder must be one of " + ", ".join(d for d in DECODERS if d))
             self.wspr_report = bool(p.get("wspr_report", True))
+            if self.decoder == "js8" and self.volume < DECODER_MIN_VOLUME:
+                log("volume %g would silence JS8Call: using %g" % (self.volume, JS8_VOLUME))
+                self.volume = JS8_VOLUME
             self.version = getattr(self, "version", 0) + 1
 
     def snapshot(self):
@@ -204,6 +212,9 @@ class Settings:
                 volume = float(volume)
                 if not 0 <= volume <= 4:
                     raise ValueError("volume must be between 0 and 4")
+                if self.decoder == "js8" and volume < DECODER_MIN_VOLUME:
+                    raise ValueError("JS8Call decodes this audio: volume can't go below %g"
+                                     % DECODER_MIN_VOLUME)
                 self.volume = volume
             if squelch is not Ellipsis:  # None (JSON null) turns it off
                 if squelch is not None:
@@ -1302,6 +1313,7 @@ class Receiver:
                 "mode": snap["mode"], "bandwidth": snap["bandwidth"],
                 "gain_db": snap["gain_db"], "volume": snap["volume"],
                 "squelch": snap["squelch"],
+                "volume_min": DECODER_MIN_VOLUME if self.s.decoder == "js8" else 0.0,
                 "squelch_open": self.squelch_open and (self.fx is None or self.fx.sq_open),
                 "gain_auto": snap["gain_auto"],
                 "gain_loop": self.autogain.status() if self.autogain is not None else

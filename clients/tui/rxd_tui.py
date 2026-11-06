@@ -964,8 +964,8 @@ def help_items(g, view="manual", mode=None, listening=False, decoder=None, repor
     else:
         items = [(k["left"] + k["sep"] + k["right"], "tune"), (k["up"] + k["sep"] + k["down"], "step"),
                  ("f", "freq"), ("m", "mode"), ("l", "listen"), ("[ ]", "bandwidth"),
-                 ("g G", "gain"), ("a", "auto gain"), ("A n h e c", "clean-up"),
-                 ("- +", "volume"), ("1 2 3", "view")]
+                 ("g G", "gain"), ("a", "auto gain"), ("A n h e c", "clean-up")] + \
+            ([] if decoder == "js8" else [("- +", "volume")]) + [("1 2 3", "view")]
     return items + [("?", "help"), ("q", "quit")]
 
 
@@ -1795,7 +1795,7 @@ class App:
                      % (self.g.drop, hiu_word(up), sw["desc"]), "warn")
         else:
             self.say("%s Now on %s" % (self.g.rx, sw["desc"]), "ok")
-        if sw.get("muted") is not None and st.get("volume"):
+        if sw.get("muted") is not None and st.get("volume") and decoder_of(st) != "js8":
             self.mute_prev = st["volume"]
             self.send(volume=0.0)
         self.js8_scroll = 0
@@ -1946,7 +1946,7 @@ class App:
 
     def mute_key(self, s):
         st = s["status"]
-        if self.view == "digital" and self.decoder(s) == "js8":
+        if self.decoder(s) == "js8":
             self.say("Not on JS8: the receiver's audio feeds JS8Call")
         elif st.get("volume") is None:
             self.not_yet()
@@ -1960,6 +1960,8 @@ class App:
             self.send(volume=0.0)
 
     def speaker_key(self, ch, st):
+        if decoder_of(st) == "js8":
+            return self.say("Not on JS8: the receiver's audio feeds JS8Call")
         if st.get("volume") is None:
             return self.not_yet()
         d = 1 if ch in (ord("+"), ord("=")) else -1

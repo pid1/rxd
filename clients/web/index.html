@@ -1114,7 +1114,8 @@ function finishSwitch() {
     setText($("flipT"), "▲ Flip the Ham It Up to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
     $("flip").hidden = false;
   }
-  if (muted() && st.volume > 0) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
+  // a mute carries over to the next station, never to JS8: its audio is JS8Call's input
+  if (muted() && st.volume > 0 && !feedsDecoder(st)) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
   jKey = null; wKey = null;
   renderConn(); renderView();
   loadProfiles();
@@ -1189,11 +1190,12 @@ function renderQual() {
 // ---------------------------------------------------------------- uConsole speaker mute
 function muted() { return load("spkprev") !== null; }
 function syncMute() {
-  if (muted() && st && st.volume > 0 && !held("volume")) forget("spkprev");
+  if (muted() && st && st.volume > 0 && !held("volume") && !feedsDecoder(st)) forget("spkprev");
   renderMute();
 }
 function renderMute() {
   const b = $("mute"), m = muted();
+  b.hidden = feedsDecoder(st);
   b.disabled = conn !== "ok" || !!switching || !st || (!m && st.volume === 0);
   b.setAttribute("aria-pressed", String(m));
   if (m) setText(b, "Unmute uConsole speaker (back to " + Math.round(+load("spkprev") * 100) + " %)");
@@ -1517,7 +1519,11 @@ function sqRenderAuto(level) {
   $("sqOff").setAttribute("aria-pressed", String(!level && !au));
   $("sqOn").textContent = av ? "Level" : "On";
 }
+// A JS8 profile's speaker audio is JS8Call's input (rxd refuses a volume
+// under volume_min there), so no speaker volume or mute is offered.
+function feedsDecoder(s) { return !!s && (s.volume_min > 0 || pdec(s) === "js8"); }
 function renderGainAudio(s) {
+  $("volSl").hidden = feedsDecoder(s);
   const has = typeof s.gain_auto === "boolean";
   $("gAuto").hidden = !has;
   if (has) {

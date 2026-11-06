@@ -291,6 +291,46 @@ class Settings(unittest.TestCase):
         self.assertEqual(s.gain_db, 1.4)
 
 
+class DecoderVolume(unittest.TestCase):
+    """A JS8 profile's audio is JS8Call's input: it is never silenced."""
+
+    def test_refuses_silence_on_js8(self):
+        s = rxd.Settings(json.loads(json.dumps(JS8)))
+        for v in (0.0, 0.01):
+            with self.assertRaises(ValueError):
+                s.update(volume=v)
+        self.assertEqual(s.volume, 0.5)
+        s.update(volume=rxd.DECODER_MIN_VOLUME)
+        self.assertEqual(s.volume, rxd.DECODER_MIN_VOLUME)
+        # a listening profile and WSPR (decoded before the volume) may go to 0
+        for p in (USB, dict(USB, decoder="wspr")):
+            s = rxd.Settings(json.loads(json.dumps(p)))
+            s.update(volume=0.0)
+            self.assertEqual(s.volume, 0.0)
+
+    def test_a_profile_saved_silent_loads_audible(self):
+        s = rxd.Settings(dict(json.loads(json.dumps(JS8)), volume=0.0))
+        self.assertEqual(s.volume, rxd.JS8_VOLUME)
+        s = rxd.Settings(dict(json.loads(json.dumps(USB)), volume=0.0))
+        self.assertEqual(s.volume, 0.0)
+
+    def test_status_and_http(self):
+        rx = rxd.Receiver(rxd.Settings(json.loads(json.dumps(JS8))), GainSynth(-70), Capture())
+        self.assertEqual(rx.status()["volume_min"], rxd.DECODER_MIN_VOLUME)
+        rx2 = rxd.Receiver(rxd.Settings(json.loads(json.dumps(USB))), GainSynth(-70), Capture())
+        self.assertEqual(rx2.status()["volume_min"], 0.0)
+        http = rxd.ThreadingHTTPServer(("127.0.0.1", 0), rxd.Api)
+        http.rx = rx
+        threading.Thread(target=http.serve_forever, daemon=True).start()
+        self.addCleanup(http.shutdown)
+        req = urllib.request.Request("http://%s:%d/api/tune" % http.server_address, method="POST",
+                                     data=b'{"volume": 0}', headers={"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=2)
+        self.assertEqual(e.exception.code, 400)
+        self.assertIn("JS8Call", json.load(e.exception)["error"])
+
+
 class Http(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -633,6 +673,23 @@ class Tui(unittest.TestCase):
         self.tt.frame(app)
         app.key(ord("a"))
         self.assertEqual(app.p.sent[-1], {"gain_auto": True})
+
+    def test_no_speaker_volume_or_mute_on_js8(self):
+        import rxd_tui as t
+        app = self.app("ghostnet")   # JS8: its audio is JS8Call's input
+        app.view = "manual"
+        for k in "M-+":
+            app.key(ord(k))
+            self.assertIn("feeds JS8Call", app.message)
+        self.assertEqual(app.p.sent, [])
+        keys = [k for k, _ in t.help_items(app.g, "manual", "USB", decoder="js8")]
+        self.assertNotIn("- +", keys)
+        # a mute made on a station isn't carried over into JS8
+        st = dict(app.p.status)
+        app.switching = {"name": "ghostnet", "desc": "GhostNet", "prev_up": True, "muted": 0.3}
+        app.finish_switch(st)
+        self.assertEqual(app.p.sent, [])
+        self.assertIsNone(app.mute_prev)
 
 
 if __name__ == "__main__":
