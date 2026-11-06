@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -84,6 +85,11 @@ class Http(unittest.TestCase):
             self.assertIn("upconverter", st["station"])
 
     def test_every_get_answers_the_same_on_both(self):
+        # The first spectrum comes a block or two after start: until then both
+        # paths say 503, but one could be asked just before it and one after.
+        end = time.time() + 5
+        while time.time() < end and self.raw("GET", "/api/v1/spectrum")[0] != 200:
+            time.sleep(0.05)
         for name in GETS:
             v1 = self.raw("GET", "/api/v1/" + name)
             old = self.raw("GET", "/api/" + name)
