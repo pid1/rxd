@@ -225,5 +225,75 @@ class InRadio(StationEnv):
             os.environ["PATH"] = old
 
 
+class SwitchPosition(unittest.TestCase):
+    """The upconverter switch's confirmed position, kept per boot (station.py)."""
+
+    def setUp(self):
+        self.dir = tempfile.mkdtemp(prefix="rxd-switch-")
+        self.path = os.path.join(self.dir, "state", "switch.json")
+        self.boot_file = os.path.join(self.dir, "boot_id")
+        for k, v in (("RXD_SWITCH", self.path), ("RXD_BOOT_ID", self.boot_file)):
+            self.addCleanup(os.environ.__setitem__, k, os.environ[k])
+            os.environ[k] = v
+        self.boot("6f1c2d3e-0000-4000-8000-000000000001")
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def boot(self, bid):
+        with open(self.boot_file, "w") as fh:
+            fh.write(bid + "\n")
+
+    def test_unknown_until_confirmed(self):
+        self.assertEqual(station.read_switch(),
+                         {"position": "unknown", "confirmed_at": None, "why": "not confirmed yet"})
+
+    def test_confirm_keeps_it_with_the_time_and_the_boot(self):
+        got = station.confirm_switch("bypass", now=1794146520.0)
+        self.assertEqual(got, {"position": "bypass", "confirmed_at": 1794146520.0, "why": None})
+        with open(self.path) as fh:
+            doc = json.load(fh)
+        self.assertEqual(doc, {"position": "bypass", "confirmed_at": 1794146520.0,
+                               "boot_id": "6f1c2d3e-0000-4000-8000-000000000001"})
+        self.assertEqual(station.read_switch()["position"], "bypass")   # a restart reads it
+        station.confirm_switch("upconvert")
+        self.assertEqual(station.read_switch()["position"], "upconvert")
+        self.assertEqual(os.listdir(os.path.dirname(self.path)), ["switch.json"])  # no tmp left
+        with self.assertRaises(ValueError):
+            station.confirm_switch("unknown")
+        self.assertEqual(station.read_switch()["position"], "upconvert")
+
+    def test_a_new_boot_forgets_it(self):
+        station.confirm_switch("upconvert")
+        self.boot("6f1c2d3e-0000-4000-8000-000000000002")
+        got = station.read_switch()
+        self.assertEqual((got["position"], got["confirmed_at"]), ("unknown", None))
+        self.assertEqual(got["why"], "the machine has started up since it was confirmed")
+        station.confirm_switch("bypass")                                # confirmed again
+        self.assertEqual(station.read_switch()["position"], "bypass")
+
+    def test_no_boot_id_keeps_it(self):
+        os.remove(self.boot_file)                                        # not Linux
+        self.assertIsNone(station.boot_id())
+        station.confirm_switch("bypass")
+        self.assertEqual(station.read_switch()["position"], "bypass")
+
+    def test_bad_files_are_unknown(self):
+        os.makedirs(os.path.dirname(self.path))
+        for text in ("not json", "[]", '{"position": "sideways", "confirmed_at": 1}',
+                     '{"position": "bypass"}', '{"position": "bypass", "confirmed_at": true}'):
+            with open(self.path, "w") as fh:
+                fh.write(text)
+            got = station.read_switch()
+            self.assertEqual(got["position"], "unknown", text)
+            self.assertTrue(got["why"], text)
+
+    def test_words(self):
+        self.assertEqual((station.side(True), station.side(False)), ("upconvert", "bypass"))
+        self.assertEqual([station.side_word(p) for p in ("upconvert", "bypass", "unknown")],
+                         ["UPCONVERT", "BYPASS", "not confirmed"])
+
+
 if __name__ == "__main__":
     unittest.main()

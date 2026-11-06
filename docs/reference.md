@@ -101,7 +101,8 @@ radio help
 - **The upconverter:** profiles use `"offset": "auto"`, so below the
   station's `upconverter.below_hz` the signal goes through the upconverter
   and above it not, including when you retune live. `"Ham-It-Up"` or `"None"`
-  pins it. If its switch is one a person flips, `radio` says when to flip it.
+  pins it. If its switch is one a person flips, rxd asks which way it is
+  (below), and `radio` asks you to flip it before a profile on the other side.
 
 ### JS8 and WSPR on every band
 
@@ -158,9 +159,13 @@ band yourself, from a picker or with `radio NAME`, sets it to Manual.
 - **Bands:** every band is enabled by default, 2190 m and 630 m included
   (Win's call, 2026-11-06: no assumptions about antennas); turn off the ones
   without an antenna under *Bands and timing*.
-- **An upconverter with a manual switch:** Auto only uses bands on the side
-  the switch is on now (the side the running profile needs), unless *Allow,
-  I'll flip it* (`cross_side`) is set.
+- **An upconverter with a manual switch:** rxd can't see the switch, so a
+  person says which way it is ([station.md](station.md#the-switch)). Until
+  someone has, after every start-up, Auto is paused: no scanning, no hopping,
+  nothing learned. Then it uses only bands on the side confirmed ("Only
+  BYPASS bands: 6 m, 2 m"), and never learns while the tuning needs the other
+  side, on Manual too. It never picks a band across the switch: nobody is
+  there to flip it.
 - **Switching** goes through `radio NAME`. A switch waits for a WSPR slot's
   decode to finish, and stays put unless another band scores 15 % better.
   The re-check interval is 30 minutes by default.

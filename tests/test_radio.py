@@ -105,6 +105,21 @@ class FakeRxd:
         self.server.server_close()
 
 
+class FakeTty:
+    """sys.stdin for radio: a terminal that answers each question with the
+    next of answers (then "y"), or no terminal at all."""
+
+    def __init__(self, answers=(), tty=True):
+        self.answers, self.tty, self.asked = list(answers), tty, 0
+
+    def isatty(self):
+        return self.tty
+
+    def readline(self):
+        self.asked += 1
+        return (self.answers.pop(0) if self.answers else "y") + "\n"
+
+
 class RadioTest(unittest.TestCase):
 
     def setUp(self):
@@ -120,8 +135,12 @@ class RadioTest(unittest.TestCase):
                 fh.write(body)
             os.chmod(path, 0o755)
 
-        self.env = {k: os.environ.get(k) for k in ("PATH", "FAKE", "DISPLAY")}
+        self.env = {k: os.environ.get(k) for k in ("PATH", "FAKE", "DISPLAY", "RXD_SWITCH")}
         os.environ["PATH"] = bindir + os.pathsep + os.environ["PATH"]
+        # the Ham It Up's switch: nobody has said which way it is yet
+        self.switch_file = os.path.join(self.tmp, "switch.json")
+        os.environ["RXD_SWITCH"] = self.switch_file
+        self.tty = FakeTty()
         os.environ["FAKE"] = self.fake
         os.environ.pop("DISPLAY", None)  # no i3-nagbar
 
@@ -151,11 +170,12 @@ class RadioTest(unittest.TestCase):
         out, err = io.StringIO(), io.StringIO()
         old = sys.argv
         sys.argv = ["radio", *argv]
+        stdin, sys.stdin = sys.stdin, self.tty
         try:
             with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
                 self.r.main()
         finally:
-            sys.argv = old
+            sys.argv, sys.stdin = old, stdin
             # Kept for tests where main() exits: the return never happens.
             self._last_err = (out.getvalue(), err.getvalue())
         return self._last_err
@@ -238,7 +258,9 @@ class RadioTest(unittest.TestCase):
         self.assertIn("--user start rxd@js8.service", self.systemctl_log())
         # rxd decodes JS8 itself: nothing else starts, the clock is checked.
         self.assertEqual(self.calls, [("clock", "JS8")])
-        self.assertIn("flip the Ham It Up to UPCONVERT", err)
+        # vhf -> js8 crosses the Ham It Up's switch: asked, and confirmed
+        self.assertIn("js8 needs the Ham It Up on UPCONVERT", err)
+        self.assertEqual(self.switch_position(), "upconvert")
 
     def test_js8_profile_is_the_dial_and_the_speaker(self):
         p = self.r.PROFILES["js8"]
@@ -364,12 +386,75 @@ class RadioTest(unittest.TestCase):
         self.assertIn("Ham It Up bypass", self.r.summary("vhf", self.r.PROFILES["vhf"]))
         self.assertIn("Ham It Up upconvert", self.r.summary("js8", self.r.PROFILES["js8"]))
 
-    def test_flip_warning_to_bypass(self):
-        self.radio("am-820")
-        _, err = self.radio("noaa")
-        self.assertIn("flip the Ham It Up to BYPASS", err)
-        _, err = self.radio("vhf")
-        self.assertNotIn("flip", err)
+    def switch_position(self):
+        return self.r.station_conf.read_switch(self.switch_file)["position"]
+
+    def test_crossing_the_switch_asks_at_the_terminal(self):
+        self.radio("am-820")                       # nothing confirmed: asked
+        self.assertEqual((self.tty.asked, self.switch_position()), (1, "upconvert"))
+        _, err = self.radio("noaa")                # to BYPASS: asked again
+        self.assertIn("noaa needs the Ham It Up on BYPASS, and it's on UPCONVERT", err)
+        self.assertIn("flip it to BYPASS, then press y", err)
+        self.assertEqual((self.tty.asked, self.switch_position()), (2, "bypass"))
+        self.assertEqual(self.up(), "rxd@noaa.service")
+        _, err = self.radio("vhf")                 # the same side: nothing asked
+        self.assertEqual(self.tty.asked, 2)
+        self.assertNotIn("needs the Ham It Up", err)
+        self.assertEqual(self.up(), "rxd@vhf.service")
+
+    def test_cancel_stays_put(self):
+        self.r.station_conf.confirm_switch("bypass", self.switch_file)
+        self.radio("vhf")
+        self.tty = FakeTty(["n"])
+        with self.assertRaises(SystemExit):
+            self.radio("js8")
+        self.assertIn("not switched; still on vhf", self._last_err[1])
+        self.assertEqual((self.up(), self.r.active(), self.switch_position()),
+                         ("rxd@vhf.service", "vhf", "bypass"))
+
+    def test_no_terminal_refuses_plainly(self):
+        self.r.station_conf.confirm_switch("bypass", self.switch_file)
+        self.radio("vhf")
+        self.clear_log()
+        self.tty = FakeTty(tty=False)
+        with self.assertRaises(SystemExit):
+            self.radio("js8")
+        err = self._last_err[1]
+        self.assertIn("not switched: js8 needs the Ham It Up on UPCONVERT, and it's on BYPASS", err)
+        self.assertIn("rxd's web UI or rxd-tui", err)
+        self.assertEqual(self.tty.asked, 0)
+        self.assertEqual((self.up(), self.r.active(), self.switch_position()),
+                         ("rxd@vhf.service", "vhf", "bypass"))
+        self.assertFalse([ln for ln in self.systemctl_log() if " stop " in ln])
+        # the same side needs no terminal
+        self.radio("noaa")
+        self.assertEqual(self.up(), "rxd@noaa.service")
+
+    def test_resume_asks_nothing(self):
+        # after a reboot nobody knows the switch, but resuming changes no side
+        self.r.set_active("js8")
+        self.tty = FakeTty(tty=False)
+        self.radio("resume")
+        self.assertEqual((self.up(), self.tty.asked, self.switch_position()),
+                         ("rxd@js8.service", 0, "unknown"))
+
+    def test_no_switch_asks_nothing(self):
+        station = os.path.join(self.tmp, "station.json")
+        with open(station, "w") as fh:
+            json.dump({"upconverter": {"name": "Ham It Up", "switch": False}}, fh)
+        old = os.environ.get("RXD_STATION")
+        os.environ["RXD_STATION"] = station
+        try:
+            r = load_radio(self.home)
+        finally:
+            os.environ["RXD_STATION"] = old
+        r.RXD_URL, r.RXD_START_SECS = self.rxd.url, 2
+        r.check_clock = lambda *a: None
+        self.r = r
+        self.tty = FakeTty(tty=False)
+        self.radio("vhf")
+        self.radio("js8")
+        self.assertEqual((self.up(), self.tty.asked), ("rxd@js8.service", 0))
 
     def test_capture_keeps_offset_mode(self):
         self.radio("js8")

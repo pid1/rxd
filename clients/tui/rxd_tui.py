@@ -452,8 +452,42 @@ def manual_switch(st):
     return bool(u and u.get("switch"))
 
 
+def switch_state(st):
+    """The upconverter switch's confirmed position as rxd reports it
+    ({"position": "upconvert", "bypass" or "unknown", "confirmed_at", "needs",
+    "ok"}), or None: no switch a person flips, or an rxd too old to say."""
+    u = (st or {}).get("upconverter")
+    return u if isinstance(u, dict) and u.get("switch") and u.get("position") else None
+
+
+def side_of(p):
+    """The switch position profile p needs."""
+    return "upconvert" if p.get("upconvert") else "bypass"
+
+
+def side_word(position):
+    return {"upconvert": "UPCONVERT", "bypass": "BYPASS"}.get(position, "not confirmed")
+
+
+def switch_words(st, g):
+    """(the readout, its role): "✓ BYPASS (confirmed 14:02)", "? not confirmed",
+    or "▲ BYPASS (confirmed 14:02): this needs UPCONVERT". Local 24-hour time."""
+    u = switch_state(st)
+    if u["position"] not in ("upconvert", "bypass"):
+        return "%s not confirmed: u says which way it is" % g.unknown, "warn"
+    when = local_time(u.get("confirmed_at"), seconds=False) if u.get("confirmed_at") else "?"
+    text = "%s (confirmed %s)" % (side_word(u["position"]), when)
+    if u.get("ok"):
+        return "%s %s" % (g.check, text), "upconv" if u["position"] == "upconvert" else "value"
+    return "%s %s: this needs %s" % (g.drop, text, side_word(u.get("needs"))), "warn"
+
+
 def flip_needed(p, st):
-    """Whether switching to profile p means flipping the upconverter's switch."""
+    """Whether switching to profile p means flipping the upconverter's switch:
+    from the position confirmed, or with an older rxd, the side it's on now."""
+    u = switch_state(st)
+    if u:
+        return u["position"] in ("upconvert", "bypass") and side_of(p) != u["position"]
     if not manual_switch(st) or st.get("upconverter_hz") is None:
         return False
     return bool(p.get("upconvert")) != (st["upconverter_hz"] > 0)
@@ -639,11 +673,12 @@ def band_plan_words(bp, g):
     mode = "WSPR" if bp.get("mode") == "wspr" else "JS8"
     head = "Band plan Auto %s %s" % (g.dot, mode) if auto else "Band plan Manual"
     phase = bp.get("phase")
-    sym = g.stop if not auto else g.wait if phase == "scan" else g.drop if phase == "idle" else g.rx
+    stopped = phase in ("idle", "paused")
+    sym = g.stop if not auto else g.wait if phase == "scan" else g.drop if stopped else g.rx
     reason = bp.get("reason") or ""
     if reason.startswith("Manual: "):
         reason = reason[len("Manual: "):]
-    role = "warn" if auto and phase == "idle" else "ok" if auto else "label"
+    role = "warn" if auto and stopped else "ok" if auto else "label"
     return "%s %s: %s" % (sym, head, reason), role
 
 
@@ -673,6 +708,8 @@ def band_plan_extra(bp, g):
         text = "SFI %s %s K %s (%s)" % (c.get("sfi"), g.dot, c.get("k"), who)
     else:
         text = "No band conditions (offline?)"
+    if bp.get("side_limit"):   # "Only BYPASS bands: 6 m, 2 m"
+        text = "%s   %s" % (bp["side_limit"], text)
     if words:
         text += "   %s" % words
     if bp.get("plan") == "auto" and bp.get("phase") == "hold" and bp.get("next_at"):
@@ -798,6 +835,7 @@ class Glyphs:
             self.dial, self.band, self.left, self.right = "^", "=", "<", ">"
             self.rx, self.drop, self.bad, self.stop, self.wait = "*", "!", "x", "#", "~"
             self.unknown, self.mine, self.cursor, self.dot = "?", ">", ">", "/"
+            self.check = "OK"
             self.keys = {"left": "<-", "right": "->", "up": "Up", "down": "Dn", "sep": "/",
                          "updown": "Up/Dn"}
             self.ellipsis = "..."
@@ -808,6 +846,7 @@ class Glyphs:
             self.dial, self.band, self.left, self.right = "▲", "━", "◀", "▶"
             self.rx, self.drop, self.bad, self.stop, self.wait = "●", "▲", "✕", "■", "…"
             self.unknown, self.mine, self.cursor, self.dot = "?", "◆", "▸", "·"
+            self.check = "✓"
             self.keys = {"left": "←", "right": "→", "up": "↑", "down": "↓", "sep": "",
                          "updown": "↑↓"}
             self.ellipsis = "…"
@@ -817,7 +856,8 @@ class Glyphs:
         if not self.ascii:
             return s
         for a, b in (("·", "/"), ("…", "..."), ("●", "*"), ("▲", "!"), ("✕", "x"),
-                     ("■", "#"), ("◆", ">"), ("▸", ">"), ("↑↓", "Up/Dn"), ("—", "-")):
+                     ("■", "#"), ("◆", ">"), ("▸", ">"), ("↑↓", "Up/Dn"), ("—", "-"),
+                     ("✓", "OK")):
             s = s.replace(a, b)
         return s
 
@@ -1160,8 +1200,10 @@ class Poller:
         self.want_profiles = True
         self.profiles_asked_for = None
         self.profiles_retry_at = 0.0
-        self.switch_req = None
+        self.switch_req = None     # (name, the switch's position confirmed, or None)
         self.switch_acks = []      # (name, error or None)
+        self.position_req = None   # a POST /api/switch position, for the side thread
+        self.position_acks = []    # (position, error or None)
         self.bands_req = None      # a POST /api/bands body, for the side thread
         self.bands_acks = []       # (body, error or None)
         # The decoder's feed: one of these fills at a time, the other is empty.
@@ -1189,10 +1231,23 @@ class Poller:
             acks, self.acks = self.acks, []
         return acks
 
-    def switch(self, name):
+    def switch(self, name, confirm=None):
+        """Switch to profile name; confirm: the upconverter switch's position,
+        when the person has just flipped it for this profile."""
         with self.lock:
-            self.switch_req = name
+            self.switch_req = (name, confirm)
         self.side_wake.set()
+
+    def confirm_switch(self, position):
+        """Tell rxd which way the upconverter's switch is."""
+        with self.lock:
+            self.position_req = position
+        self.side_wake.set()
+
+    def take_position_acks(self):
+        with self.lock:
+            acks, self.position_acks = self.position_acks, []
+        return acks
 
     def take_switch_acks(self):
         with self.lock:
@@ -1329,12 +1384,16 @@ class Poller:
             with self.lock:
                 name, self.switch_req = self.switch_req, None
                 breq, self.bands_req = self.bands_req, None
+                preq, self.position_req = self.position_req, None
                 st, reachable = dict(self.status), self.reachable
+            if preq:
+                self._position(preq)
+                continue
             if breq:
                 self._bands(breq)
                 continue
             if name:
-                self._switch(name)
+                self._switch(*name)
                 continue
             if reachable and self._profiles_due(st):
                 self._load_profiles(st)
@@ -1386,9 +1445,23 @@ class Poller:
                 self.profiles_retry_at = self.clock() + PROFILES_RETRY
         self.changed.set()
 
-    def _switch(self, name):
+    def _position(self, position):
         try:
-            code, doc = self.link.post("/api/v1/profile", {"name": name}, timeout=SLOW_TIMEOUT)
+            code, doc = self.link.post("/api/v1/switch", {"position": position}, timeout=SLOW_TIMEOUT)
+            err = None if code == 200 else \
+                "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
+        except OSError as e:
+            err, doc = "Not sent: can't reach rxd (%s)" % reason(e), {}
+        with self.lock:
+            self.position_acks.append((position, err))
+            if err is None and isinstance(doc.get("upconverter"), dict):
+                self.status = dict(self.status, upconverter=doc["upconverter"])
+        self.changed.set()
+
+    def _switch(self, name, confirm=None):
+        body = {"name": name} if confirm is None else {"name": name, "switch": confirm}
+        try:
+            code, doc = self.link.post("/api/v1/profile", body, timeout=SLOW_TIMEOUT)
             err = None if code in (200, 202) else \
                 "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
         except OSError as e:
@@ -1806,6 +1879,10 @@ class App:
         self.js8_seen = None    # (profile, matching lines) at the last draw
         self.js8_page = 10      # rows on screen, for PgUp and PgDn
         self.want_listen = listen  # --listen: start once rxd says which mode
+        # the upconverter switch's question: None, "position" (which way is
+        # it?) or ("flip", profile) before a profile on the other side
+        self.ask = None
+        self.asked = False      # asked since the position was last known (answered or Esc)
 
     # ---- state
     def snap(self):
@@ -1862,6 +1939,10 @@ class App:
         for body, err in (self.p.take_bands_acks() if hasattr(self.p, "take_bands_acks") else ()):
             if err:
                 self.say(err, "err")
+        for pos, err in (self.p.take_position_acks() if hasattr(self.p, "take_position_acks") else ()):
+            if err:
+                self.ask = "position"
+                self.say(err, "err")
 
     def update(self):
         """Everything that follows from rxd's state: views, switches, the audio rate."""
@@ -1880,6 +1961,13 @@ class App:
                     "rxd is still on %s." % st.get("profile") if s["reachable"]
                     else "rxd has not come back after %d seconds." % SWITCH_TIMEOUT), "err")
                 self.p.reload_profiles()
+        sw = switch_state(st) if s["reachable"] else None
+        if sw and sw["position"] != "unknown":
+            self.asked = False      # known: should it be forgotten (a start-up), ask again
+        elif sw and self.ask is None and not self.asked and not self.switching:
+            self.ask, self.asked = "position", True   # after a start-up: ask once
+        if self.ask == "position" and not sw:
+            self.ask = None
         if s["profiles_state"] == "missing":
             self.view = "manual"  # an rxd that can't switch profiles: the instrument only
         elif self.pinned:
@@ -1905,7 +1993,7 @@ class App:
     def finish_switch(self, st):
         sw, self.switching = self.switching, None
         up = (st.get("upconverter_hz") or 0) > 0
-        if up != sw["prev_up"] and sw["manual"]:
+        if up != sw["prev_up"] and sw["manual"] and not switch_state(st):
             self.say("%s Flip the %s to %s for %s; the wrong way is silent."
                      % (self.g.drop, sw["up_name"], hiu_word(up), sw["desc"]), "warn")
         else:
@@ -1942,10 +2030,18 @@ class App:
             return True
         if self.entry is not None:
             return self.entry_key(ch)
+        if self.ask is not None:
+            return self.ask_key(ch, s)
         if ch in (ord("q"), ord("Q")):
             return False
         self.say("")
-        if ch == ord("?"):
+        if ch == ord("u"):
+            if switch_state(s["status"]):
+                self.ask = "position"
+            else:
+                self.say("u says which way the upconverter's switch is; this station's has "
+                         "none to confirm")
+        elif ch == ord("?"):
             self.show_help = True
         elif ch in (ord("1"), ord("2"), ord("3")):
             self.pick_view(VIEWS[ch - ord("1")][0], s)
@@ -1960,6 +2056,74 @@ class App:
         elif s["reachable"] is not True:
             self.say(WAITING)
         return True
+
+    def ask_key(self, ch, s):
+        """A key while the switch's question is up."""
+        st = s["status"]
+        name = up_name(st)
+        if self.ask == "position":
+            if ch in (ord("u"), ord("U"), ord("b"), ord("B")):
+                pos = "upconvert" if ch in (ord("u"), ord("U")) else "bypass"
+                self.ask = None
+                self.p.confirm_switch(pos)
+                self.say("%s %s confirmed on %s" % (self.g.check, name, side_word(pos)), "ok")
+            elif ch in (27, 7):
+                sw = switch_state(st)
+                self.ask = None
+                if sw and sw["position"] == "unknown":
+                    self.say("%s %s not confirmed: the band plan waits. u asks again." % (
+                        self.g.unknown, name), "warn")
+            elif ch in (ord("q"), ord("Q")):
+                return False
+            return True
+        p = self.ask[1]
+        self.ask = None
+        if ch in (ord("y"), ord("Y")):
+            self.do_switch(p, s, confirm=side_of(p))
+        else:
+            self.say("Not switched; still on %s" % (self.active_name(s) or "this profile"))
+        return True
+
+    def ask_lines(self, s):
+        st = s["status"]
+        name = up_name(st)
+        if self.ask == "position":
+            sw = switch_state(st) or {}
+            below = format_hz(st.get("upconvert_below_hz") or 30e6)
+            known = sw.get("position") in ("upconvert", "bypass")
+            return [
+                "Is the %s on UPCONVERT or BYPASS?" % name,
+                "",
+            ] + ([
+                "rxd can't see the switch: it's confirmed on %s." % side_word(sw["position"]),
+                "Say which way it is now; the band plan keeps to it.",
+            ] if known else [
+                "rxd can't see the switch, and it may have been",
+                "flipped while the receiver was off. Until you say,",
+                "rxd keeps receiving, but the band plan waits and",
+                "learns nothing.",
+            ]) + [
+                "",
+                "u   UPCONVERT   below %s" % below,
+                "b   BYPASS      %s and up" % below,
+                "",
+                "Esc asks later" if not known else "Esc: it hasn't changed",
+            ]
+        p = self.ask[1]
+        sw = switch_state(st) or {}
+        word = side_word(side_of(p))
+        return [
+            "%s Flip the %s to %s" % (self.g.drop, name, word),
+            "",
+            "%s needs it on %s." % (p.get("description") or p["name"], word),
+            "It's on %s now." % side_word(sw.get("position"))
+            if sw.get("position") in ("upconvert", "bypass") else
+            "Nobody has said which way it is now.",
+            "Flip the switch, then press y to switch.",
+            "",
+            "y   It's on %s: switch" % word,
+            "Any other key cancels and stays on %s." % (self.active_name(s) or "this profile"),
+        ]
 
     def pick_view(self, v, s):
         if v != "manual" and s["profiles_state"] == "missing":
@@ -2014,18 +2178,23 @@ class App:
             self.say("Already on %s" % p.get("name"))
         elif not s["reachable"]:
             self.say("Not switched: can't reach rxd", "err")
+        elif switch_state(st) and side_of(p) != switch_state(st)["position"]:
+            self.ask = ("flip", p)   # the person flips it and says so first
         else:
             self.do_switch(p, s)
 
-    def do_switch(self, p, s):
+    def do_switch(self, p, s, confirm=None):
         st = s["status"]
         self.switching = {"name": p["name"], "desc": p.get("description") or p["name"],
                           "prev_up": (st.get("upconverter_hz") or 0) > 0,
                           "want_up": bool(p.get("upconvert")), "since": self.clock(),
-                          "manual": manual_switch(st), "up_name": up_name(st),
-                          "muted": self.mute_prev}
+                          "manual": manual_switch(st) and not switch_state(st),
+                          "up_name": up_name(st), "muted": self.mute_prev}
         self.say("")
-        self.p.switch(p["name"])
+        if confirm:
+            self.p.switch(p["name"], confirm)
+        else:
+            self.p.switch(p["name"])
 
     def toggle_audio(self, s):
         if self.audio is None:
@@ -2313,6 +2482,8 @@ class App:
             x += len(text)
         if self.show_help:
             self.draw_box(scr, self.help_lines())
+        elif self.ask is not None:
+            self.draw_box(scr, self.ask_lines(s))
 
     def draw_bar(self, scr, s):
         g, w = self.g, scr.w
@@ -2365,7 +2536,7 @@ class App:
             sw = self.switching
             text = "%s Switching to %s%s rxd restarts, which takes a few seconds." % (
                 g.stop, sw["name"], g.ellipsis)
-            if sw["want_up"] != sw["prev_up"] and sw["manual"]:
+            if sw["want_up"] != sw["prev_up"] and sw["manual"]:  # an older rxd
                 text = "%s Switching to %s%s  %s Flip the %s to %s" % (
                     g.stop, sw["name"], g.ellipsis, g.drop, sw["up_name"], hiu_word(sw["want_up"]))
             scr.put(y, 1, clip(text, w - 2, g), "warn")
@@ -2481,6 +2652,8 @@ class App:
                  (hiu_word(up > 0) if up is not None else "---",
                   "upconv" if up else "value"),
                  ("   ", "")] if upconverter(st) else []
+        if switch_state(st):
+            parts = [(up_name(st) + " ", "label"), switch_words(st, g), ("   ", "")]
         parts += [("%s %s" % (sym, word), role), ("   Signal ", "label")]
         lvl = st.get("level_dbfs")
         parts.append(("%.1f dBFS" % lvl if lvl is not None else "--- dBFS", "value"))
@@ -2641,11 +2814,16 @@ class App:
             up = st.get("upconverter_hz")
             label = up_name(st) + " " if upconverter(st) else ""
             hiu = label + (hiu_word(up > 0) if up is not None else "---") if label else ""
+            hrole = "upconv" if up else "value"
+            if switch_state(st):
+                words, hrole = switch_words(st, g)
+                hiu = label + words
             barw = clamp(w - 20 - len(hiu) - 4, 4, 40)
             scr.put(y, 20, level_bar(lvl, barw, g), "spec")
             if label:
                 scr.put(y, 20 + barw + 3, label, "label")
-                scr.put(y, 20 + barw + 3 + len(label), hiu[len(label):], "upconv" if up else "value")
+                scr.put(y, 20 + barw + 3 + len(label),
+                        clip(g.text(hiu[len(label):]), max(w - 24 - barw - len(label), 4), g), hrole)
             y += 1
             # gain, bandwidth, speaker
             gain = st.get("gain_db")
@@ -2748,7 +2926,10 @@ class App:
             label = "%s%s:" % (up_name(st), " switch" if manual_switch(st) else "")
             scr.put(y, x, label, "label")
             x += len(label) + 1
-            if up is None:
+            if switch_state(st):
+                sw, srole = switch_words(st, g)
+                sw = clip(g.text(sw), max(w - x - 2, 4), g)
+            elif up is None:
                 sw, srole = "---", "value"
             elif up > 0:
                 sw, srole = "UPCONVERT (%s)" % format_hz(up), "upconv"
@@ -2897,9 +3078,12 @@ class App:
             "?         this help",
             "q         quit (Ctrl-C works too)",
             "",
+            "u         say which way the upconverter's switch is",
+            "",
             "An upconverter's UPCONVERT/BYPASS switch (a Ham It Up's)",
-            "may be physical. rxd only says which way it should be;",
-            "the wrong way gives silence.",
+            "may be physical, and rxd can't see it: you say which way",
+            "it is, and picking a profile on the other side asks you",
+            "to flip it first. The wrong way gives silence.",
             "",
             "Any key closes this.",
         ]

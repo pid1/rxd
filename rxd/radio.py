@@ -26,6 +26,11 @@ Every amateur band has a JS8 and a WSPR profile on its standard dial:
 js8-160m ... js8-2m and wspr-2190m ... wspr-2m. On 40 m they keep their old
 names, js8 and wspr (js8-40m and wspr-40m mean the same). With an
 upconverter that has a switch (a Ham It Up), 6 m and 2 m need it on BYPASS.
+
+Such a switch only a person can flip, so radio asks: switching to a profile
+on the other side from the one last confirmed (or with none confirmed since
+the machine started) says which way to flip it and waits for a yes, which
+confirms the new position. Without a terminal to ask at, it doesn't switch.
 rxd's band plan (Auto in its Digital view) picks among them by band
 conditions, time of day and what it has heard.
 
@@ -440,10 +445,39 @@ def save_running(name):
     return True
 
 
+def switch_side(name, target, prev, resume):
+    """For a profile on the other side of a switch only a person can flip, ask
+    the person to flip it and confirm (which records the new position), or
+    stop. Resuming, or re-running the profile already up, asks nothing: that
+    changes no side, and rxd's clients ask for a position nobody has confirmed."""
+    if resume or name == prev or not STATION.manual_switch:
+        return
+    needs = station_conf.side(upconverting(target))
+    pos = station_conf.read_switch()["position"]
+    if pos == needs:
+        return
+    up, word = STATION.upconverter_name, station_conf.side_word(needs)
+    was = "it's on %s" % station_conf.side_word(pos) if pos != "unknown" else \
+        "its switch isn't confirmed"
+    if not sys.stdin.isatty():
+        die("not switched: %s needs the %s on %s, and %s. Run radio %s in a terminal, "
+            "or pick it in rxd's web UI or rxd-tui, to confirm the switch" % (name, up, word, was, name))
+    sys.stderr.write("radio: %s needs the %s on %s, and %s.\n"
+                     "radio: flip it to %s, then press y and Enter (anything else cancels): "
+                     % (name, up, word, was, word))
+    sys.stderr.flush()
+    answer = sys.stdin.readline().strip().lower()
+    if answer not in ("y", "yes"):
+        die("not switched; still on %s" % (prev or "nothing"))
+    station_conf.confirm_switch(needs)
+    say("the %s's switch confirmed on %s" % (up, word))
+
+
 def switch(name, resume=False):
     prev = active()
     target = profile(name)
     unit_name(name)  # a name rxd cannot be started on fails before anything stops
+    switch_side(name, target, prev, resume)
 
     # Re-running the profile already playing changes nothing: a restart would
     # throw away tuning done live over HTTP. rxd's own idea of its profile
@@ -469,13 +503,6 @@ def switch(name, resume=False):
         check_clock("WSPR")
 
     print(summary(name, target))
-    # The one setting no file can change.
-    if prev and prev != name and STATION.manual_switch:
-        was = upconverting(profile(prev))
-        now = upconverting(target)
-        if was != now:
-            say("flip the %s to %s" % (STATION.upconverter_name,
-                                       "UPCONVERT" if now else "BYPASS"), "warning")
 
 
 # ------------------------------------------------------------- extensions

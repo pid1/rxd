@@ -46,7 +46,7 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
 | `upconverter.name` | string | `upconverter` | What to call it: "Flip the Ham It Up to BYPASS". |
 | `upconverter.hz` | number | 125000000 | Its offset, Hz. 0 is the same as no upconverter. |
 | `upconverter.below_hz` | number | 30000000 | Profiles with `"offset": "auto"` go through it below this frequency, and straight to the dongle at and above it. |
-| `upconverter.switch` | bool | true | It has an UPCONVERT/BYPASS switch that only a person can flip (a Ham It Up's is physical). Then `radio` and the clients say when to flip it, and the band plan keeps Auto to the side it's on unless `cross_side` is set. false: an upconverter that switches itself, or a diplexer. |
+| `upconverter.switch` | bool | true | It has an UPCONVERT/BYPASS switch that only a person can flip (a Ham It Up's is physical). Then a person confirms which way it is, and rxd keeps to that side: [the switch](#the-switch), below. false: an upconverter that switches itself, or a diplexer; nothing to confirm. |
 | `sink` | string or null | null | The PipeWire or PulseAudio sink the speaker plays to, by name. `"Built-in Audio"` and null both mean the default sink. |
 | `profiles` | object | `{}` | This station's own profiles, name to profile: local repeaters, broadcast stations. Below. |
 | `gps` | object or false | on | Take the grid from a GPS, through gpsd. Below. false is the same as `{"enabled": false}`. |
@@ -55,6 +55,35 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
 
 `$RXD_CALL` and `$RXD_GRID`, when set (in rxd.env, say), win over `call` and
 `grid`, and `$RXD_GPSD` (`HOST:PORT`, or `off`) over `gps`.
+
+## The switch
+
+An upconverter with `"switch": true` has an UPCONVERT/BYPASS switch rxd
+can't see. With `"offset": "auto"`, profiles below `below_hz` need it on
+UPCONVERT and the rest on BYPASS, and the wrong way hears nothing. So:
+
+- **A person says which way it is.** rxd keeps the position in
+  `~/.local/state/rxd/switch.json` (`$RXD_SWITCH`), with when it was
+  confirmed and the boot it was confirmed in:
+  `{"position": "bypass", "confirmed_at": 1794146520.0, "boot_id": "..."}`.
+- **After a start-up nobody knows:** someone may have flipped it while the
+  machine was off. A position from another boot (Linux's
+  `/proc/sys/kernel/random/boot_id`, or the file `$RXD_BOOT_ID` names) reads
+  as `unknown`. A plain rxd restart or a profile switch keeps it. Where
+  there's no boot ID, a position lasts until it's changed.
+- **While it's unknown** the web UI (every view) and rxd-tui ask once: "Is
+  the Ham It Up on UPCONVERT or BYPASS?". rxd keeps receiving meanwhile;
+  only the band plan waits, and learns nothing.
+- **A profile on the other side** from the one confirmed (or with none
+  confirmed) asks you to flip the switch and confirm first: in the web
+  picker, in rxd-tui, and in `radio NAME` at a terminal (`y` confirms;
+  without a terminal it doesn't switch, and says why). The confirmation is
+  the new position. `radio resume`, and `radio NAME` for the profile already
+  up, ask nothing.
+- **The band plan** uses only bands on the confirmed side, and learns only
+  while the tuning needs the side confirmed.
+- **The API:** `POST /api/v1/switch`, the status's `upconverter`, and
+  `POST /api/v1/profile`'s `switch` ([API.md](API.md)).
 
 ## The grid and the GPS
 

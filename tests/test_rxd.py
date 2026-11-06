@@ -467,6 +467,11 @@ class Clients(Control):
                 rxd.RADIO = self.fake_radio(d)
                 rxd._profiles["doc"] = None
                 rxd.spawn_switch = spawned.append
+                # the Ham It Up's switch confirmed on BYPASS, the side 105.3 needs
+                old_sw = os.environ["RXD_SWITCH"]
+                os.environ["RXD_SWITCH"] = os.path.join(d, "switch.json")
+                self.addCleanup(os.environ.__setitem__, "RXD_SWITCH", old_sw)
+                rxd.station_conf.confirm_switch("bypass")
                 code, doc = self.api("GET", "/api/profiles")
                 self.assertEqual((code, doc["active"], len(doc["profiles"])), (200, "js8", 2))
                 code, doc = self.api("POST", "/api/profile", {"name": "fm-105.3"})
