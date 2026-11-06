@@ -335,6 +335,7 @@ class GpsLocation:
         self.nmea_fake_t = None      # when the raw NMEA last held a placeholder
         self.source = None           # "ubx" or "tpv": what the steady fixes come from
         self._said = None            # the last state logged
+        self.since = None            # when the connection was made
 
     # --------------------------------------------------------- the stream
 
@@ -349,6 +350,8 @@ class GpsLocation:
                     s.sendall(b'?WATCH={"enable":true,"json":true,"raw":2};\n')
                     with self.lock:
                         self.connected, self.conn_error, self.buf = True, None, b""
+                        self.heard = self.clock()   # a grace period before "sending nothing"
+                        self.since = self.heard
                     self._say()
                     s.settimeout(GAP_S)
                     while not self.stop.is_set():
@@ -562,7 +565,10 @@ class GpsLocation:
     def _say(self):
         """Log the state when it changes (never a position)."""
         with self.lock:
-            st = self._status(self.clock())
+            now = self.clock()
+            if self.connected and self.since is not None and now - self.since < 2 * FRESH_S:
+                return  # the first epochs: let every source be heard before saying anything
+            st = self._status(now)
         key = (st["state"], st["reason"].split(":")[0] if st["reason"] else None)
         if key != self._said:
             self._said = key
