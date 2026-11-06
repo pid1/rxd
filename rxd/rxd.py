@@ -580,6 +580,8 @@ class Receiver:
         self.error = None
         self.cpu = 0.0
         self.offset = 0.0
+        self.spectrum = None
+        self.spectrum_at = 0.0
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -673,6 +675,39 @@ class Receiver:
             dt = time.thread_time() - t0
             self.cpu += (dt / (len(x) / self.chain.rate) - self.cpu) * 0.05
             self.blocks += 1
+            now = time.monotonic()
+            if now - self.spectrum_at >= self.SPECTRUM_EVERY:
+                self.spectrum_at = now
+                self.spectrum = self.make_spectrum(x, snap)
+
+    SPECTRUM_EVERY = 0.2   # seconds: about 5 a second for the clients
+    SPECTRUM_BINS = 512
+
+    def make_spectrum(self, x, snap):
+        """The whole captured band, averaged over a few FFTs, on the dial's scale."""
+        n = 2 * self.SPECTRUM_BINS
+        segs = min(len(x) // n, 4)
+        if not segs:
+            return self.spectrum
+        w = np.hanning(n).astype(np.float32)
+        p = (np.abs(np.fft.fft(x[: segs * n].reshape(segs, n) * w, axis=1)) ** 2).mean(axis=0)
+        p = np.fft.fftshift(p) / (n * float(np.sum(w ** 2)) / n)
+        p = p.reshape(self.SPECTRUM_BINS, -1).mean(axis=1)
+        db = 10 * np.log10(p + 1e-12)
+        rate = self.chain.rate
+        # RF -> dial scale: take off the upconverter, put back the calibration.
+        to_dial = -snap["upconverter"] + snap["cal"]
+        center = self.src.center + to_dial
+        dial, bw, mode = snap["dial"], snap["bandwidth"], snap["mode"]
+        if mode == "USB":
+            band = [dial + 200, dial + 200 + bw]
+        elif mode == "LSB":
+            band = [dial - 200 - bw, dial - 200]
+        else:
+            band = [dial - bw / 2, dial + bw / 2]
+        return {"bins": [round(float(v), 1) for v in db], "start_hz": center - rate / 2,
+                "stop_hz": center + rate / 2, "dial_hz": dial, "passband": band,
+                "seq": (self.spectrum or {}).get("seq", 0) + 1}
 
     def status(self):
         snap = self.s.snapshot()
@@ -686,7 +721,7 @@ class Receiver:
                 "sample_rate": self.chain.rate if self.chain else None,
                 "dsp_cpu": round(self.cpu, 3), "blocks": self.blocks,
                 "dropped": self.dropped, "error": self.error,
-                "running": not self.stop.is_set()}
+                "running": not self.stop.is_set(), "gains": self.src.gains()}
 
 
 # ----------------------------------------------------------- Hamlib rigctl
@@ -792,6 +827,20 @@ class RigctlServer(socketserver.ThreadingTCPServer):
 
 # ---------------------------------------------------------------------- HTTP
 
+# The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
+# a checkout. Read on every request so a reinstall needs no restart.
+WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
+             os.path.join(os.path.dirname(os.path.abspath(__file__)), "web", "index.html"))
+
+
+def web_page():
+    for path in WEB_PATHS:
+        if path and os.path.isfile(path):
+            with open(path, "rb") as fh:
+                return fh.read()
+    return None
+
+
 class Api(BaseHTTPRequestHandler):
     server_version = "rxd/0.1"
 
@@ -807,8 +856,23 @@ class Api(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path == "/api/status":
+        path = self.path.split("?", 1)[0]
+        if path == "/api/status":
             return self.send(200, self.server.rx.status())
+        if path == "/api/spectrum":
+            spec = self.server.rx.spectrum
+            return self.send(200, spec) if spec else self.send(503, {"error": "no spectrum yet"})
+        if path in ("/", "/index.html"):
+            page = web_page()
+            if page is None:
+                return self.send(404, {"error": "no web UI at " + ", ".join(p for p in WEB_PATHS if p)})
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(page)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(page)
+            return
         self.send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -835,7 +899,7 @@ def hostport(text, default_port):
     return (host or "127.0.0.1", int(port or default_port))
 
 
-def main(argv=None):
+def parse_args(argv=None):
     ap = argparse.ArgumentParser(prog="rxd", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("profile")
@@ -844,10 +908,17 @@ def main(argv=None):
                     help="tuner frequency the IQ file was recorded at")
     ap.add_argument("--audio", default="pulse",
                     help="pulse, pulse:SINK, stdout or null (default: the profile's sink)")
-    ap.add_argument("--rigctl", default="127.0.0.1:4532", help="HOST:PORT, or off")
-    ap.add_argument("--http", default="127.0.0.1:8073", help="HOST:PORT, or off")
-    a = ap.parse_args(argv)
+    # Defaults from the environment, so the systemd unit's EnvironmentFile
+    # (/etc/rx/rxd.env) can open HTTP to the LAN without editing the unit.
+    ap.add_argument("--rigctl", default=os.environ.get("RXD_RIGCTL", "127.0.0.1:4532"),
+                    help="HOST:PORT, or off (default $RXD_RIGCTL or 127.0.0.1:4532)")
+    ap.add_argument("--http", default=os.environ.get("RXD_HTTP", "127.0.0.1:8073"),
+                    help="HOST:PORT, or off (default $RXD_HTTP or 127.0.0.1:8073)")
+    return ap.parse_args(argv)
 
+
+def main(argv=None):
+    a = parse_args(argv)
     p, path = load_profile(a.profile)
     try:
         settings = Settings(p, os.path.basename(path)[:-5])

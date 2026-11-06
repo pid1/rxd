@@ -10,8 +10,13 @@ two control ports on 127.0.0.1:
 - **8073, HTTP JSON.** `GET /api/status`, and `POST /api/tune` with any of
   `freq`, `mode`, `bandwidth`, `gain_db` and `volume`. Status also reports
   `profile`, `vfo_hz` (the carrier, which is what a profile's `frequency`
-  means) and `cal_hz`. This is what `radio save` reads, and what a TUI or
-  browser client would use.
+  means), `cal_hz` and `gains` (the dongle's gain steps in dB). This is what
+  `radio save` reads. `GET /api/spectrum` gives the whole captured band
+  about 5 times a second: 512 dB bins with `start_hz`, `stop_hz`, `dial_hz`
+  and the demodulated `passband`, all on the dial's scale. `GET /` serves the
+  browser UI from `$RXD_WEB`, `/usr/local/share/rxd/index.html` or
+  `web/index.html` beside rxd.py. Listen addresses default to `$RXD_HTTP` and
+  `$RXD_RIGCTL` when there's no `--http` or `--rigctl` flag.
 
 Modes: USB, LSB, AM, FM and WFM (mono, no RDS). Needs only `python3-numpy` and
 `python3-scipy`, already on the uConsole; librtlsdr and libpulse-simple are

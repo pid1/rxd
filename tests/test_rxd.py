@@ -204,6 +204,22 @@ class Engine(unittest.TestCase):
         self.assertEqual(st["mode"], "WFM")
         self.assertTrue(st["running"])
 
+    def test_spectrum_shows_the_band_on_the_dial_scale(self):
+        self.rx.start()
+        self.assertTrue(self.wait(lambda: self.rx.spectrum is not None))
+        sp = self.rx.spectrum
+        self.assertEqual(len(sp["bins"]), 512)
+        self.assertEqual(sp["stop_hz"] - sp["start_hz"], 240000)
+        self.assertEqual(sp["dial_hz"], 7078000)
+        self.assertEqual(sp["passband"], [7078200, 7081000])
+        # The synth carrier is 1500 Hz over the VFO (7077900), so 7079400 on
+        # the dial's scale once the 100 Hz calibration is put back.
+        width = (sp["stop_hz"] - sp["start_hz"]) / 512
+        peak = sp["start_hz"] + (int(np.argmax(sp["bins"])) + 0.5) * width
+        self.assertAlmostEqual(peak, 7079500, delta=width)
+        seq = sp["seq"]
+        self.assertTrue(self.wait(lambda: self.rx.spectrum["seq"] > seq))
+
     def test_test_tone_is_heard(self):
         self.rx.start()
         self.assertTrue(self.wait(lambda: len(self.sink.chunks) > 40))
@@ -286,6 +302,43 @@ class Control(unittest.TestCase):
         self.assertEqual((st["vfo_hz"], st["cal_hz"]), (7078900, 100))
         self.api("POST", "/api/tune", {"freq": 7078000})
 
+    def test_status_lists_gains(self):
+        self.assertEqual(self.api("GET", "/api/status")[1]["gains"], [0.0, 3.7, 16.6, 37.2])
+
+    def test_spectrum_endpoint(self):
+        end = time.time() + 5
+        while time.time() < end:
+            code, sp = self.api("GET", "/api/spectrum")
+            if code == 200:
+                break
+            time.sleep(0.05)
+        self.assertEqual((code, len(sp["bins"])), (200, 512))
+
+    def page(self, path="/"):
+        url = "http://%s:%d%s" % (*self.http.server_address, path)
+        try:
+            with urllib.request.urlopen(url, timeout=2) as r:
+                return r.status, r.headers.get("Content-Type"), r.read()
+        except urllib.error.HTTPError as e:
+            return e.code, e.headers.get("Content-Type"), e.read()
+
+    def test_serves_the_web_ui(self):
+        old = rxd.WEB_PATHS
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                page = os.path.join(d, "index.html")
+                with open(page, "w") as fh:
+                    fh.write("<!doctype html><title>rxd</title>")
+                rxd.WEB_PATHS = (page,)
+                code, ctype, body = self.page("/")
+                self.assertEqual((code, ctype.split(";")[0]), (200, "text/html"))
+                self.assertIn(b"<title>rxd</title>", body)
+                self.assertEqual(self.page("/index.html?x=1")[0], 200)
+            rxd.WEB_PATHS = ("/nonexistent/index.html",)
+            self.assertEqual(self.page("/")[0], 404)
+        finally:
+            rxd.WEB_PATHS = old
+
 
 class Profiles(unittest.TestCase):
     def test_load_by_path_and_name(self):
@@ -332,6 +385,24 @@ class Profiles(unittest.TestCase):
         self.assertEqual(rxd.Settings(p).snapshot()["upconverter"], 0.0)
         with self.assertRaises(ValueError):
             rxd.Settings(dict(JS8, offset="Sideways"))
+
+    def test_listen_addresses_from_the_environment(self):
+        old = {k: os.environ.get(k) for k in ("RXD_HTTP", "RXD_RIGCTL")}
+        try:
+            os.environ["RXD_HTTP"] = "0.0.0.0:8073"
+            os.environ["RXD_RIGCTL"] = "off"
+            a = rxd.parse_args(["js8"])
+            self.assertEqual((a.http, a.rigctl), ("0.0.0.0:8073", "off"))
+            self.assertEqual(rxd.parse_args(["js8", "--http", "127.0.0.1:9"]).http, "127.0.0.1:9")
+            del os.environ["RXD_HTTP"], os.environ["RXD_RIGCTL"]
+            a = rxd.parse_args(["js8"])
+            self.assertEqual((a.http, a.rigctl), ("127.0.0.1:8073", "127.0.0.1:4532"))
+        finally:
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_unsupported_mode(self):
         with self.assertRaises(ValueError):
