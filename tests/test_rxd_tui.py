@@ -38,7 +38,7 @@ PROFILES = [
     {"name": "ghostnet", "description": "Ghostnet", "freq": 7078000, "mode": "USB",
      "upconvert": True, "js8": True, "saved": True},
     {"name": "js8", "description": "JS8Call 20 m", "freq": 14078000, "mode": "USB",
-     "upconvert": True, "js8": True, "saved": True},
+     "upconvert": True, "js8": True, "decoder": "js8", "saved": True},
     {"name": "fm-105.3", "description": "WBUR Boston", "freq": 105300000, "mode": "WFM",
      "upconvert": False, "js8": False, "saved": True},
     {"name": "noaa", "description": "NOAA Weather", "freq": 162550000, "mode": "FM",
@@ -49,14 +49,36 @@ PROFILES = [
      "upconvert": True, "js8": False, "saved": True},
     {"name": "40m", "description": "40 m SSB", "freq": 7200000, "mode": "LSB",
      "upconvert": True, "js8": False, "saved": True},
+    # ghostnet has no decoder field, as from an older `radio --json`; these have one
+    {"name": "wspr", "description": "WSPR, 40 m", "freq": 7038600, "mode": "USB",
+     "upconvert": True, "js8": False, "decoder": "wspr", "saved": True},
 ]
+
+
+def setUpModule():
+    # Times are shown local; most tests read them in UTC, a few move TZ themselves.
+    global _TZ
+    _TZ = os.environ.get("TZ")
+    set_tz("UTC")
+
+
+def tearDownModule():
+    set_tz(_TZ)
+
+
+def set_tz(tz):
+    if tz is None:
+        os.environ.pop("TZ", None)
+    else:
+        os.environ["TZ"] = tz
+    time.tzset()
 BW = {"USB": 2800.0, "LSB": 2800.0, "AM": 10000.0, "FM": 12500.0, "WFM": 150000.0}
 
 
 def state_for(name):
     """The status a fake rxd on profile name reports."""
     p = next(x for x in PROFILES if x["name"] == name)
-    return {"profile": name, "freq": float(p["freq"]), "vfo_hz": p["freq"] - 100.0,
+    st = {"profile": name, "freq": float(p["freq"]), "vfo_hz": p["freq"] - 100.0,
             "cal_hz": 100.0, "mode": p["mode"], "bandwidth": BW[p["mode"]], "gain_db": 3.7,
             "volume": 0.2, "squelch": -70.0 if name == "noaa" else None,
             "squelch_open": name != "2m", "offset_mode": "auto",
@@ -69,6 +91,35 @@ def state_for(name):
             "clock": {"synced": False, "source": None, "offset_s": 3.2} if name == "ghostnet"
             else {"synced": True, "source": "GPS", "offset_s": 0.0},
             "listeners": 0}
+    if p.get("decoder"):
+        st["decoder"] = p["decoder"]
+    st["wspr"] = wspr_status() if p.get("decoder") == "wspr" else None
+    return st
+
+
+def wspr_status(state="recording", **report):
+    """rxd's status["wspr"] while recording the 12:20 UTC slot, reporting as KA1PID."""
+    r = {"enabled": True, "call": "KA1PID", "grid": "EM13lc", "sent": 12, "pending": 0,
+         "online": True, "error": None}
+    r.update(report)
+    return {"state": state, "slot": "2026-11-06T12:22:00Z" if state == "waiting"
+            else "2026-11-06T12:20:00Z",
+            "decoding": "2026-11-06T12:20:00Z" if state == "decoding" else None,
+            "last": {"slot": "2026-11-06T12:18:00Z", "spots": 3}, "error": None, "report": r}
+
+
+def wspr_lines(n=12):
+    """Spots as /api/wspr gives them: three a slot, the dial at 7.0386 MHz."""
+    spots = [("K1ABC", "FN42", 1621, -18, 37), ("W5XQQ", None, None, -24, 23),
+             ("VE3QXZ", "FN03", 1326, -9, 30)]
+    out = []
+    for i in range(n):
+        call, grid, km, snr, dbm = spots[i % 3]
+        out.append({"seq": i + 1, "time": "2026-11-06T12:%02d:00Z" % (12 + 2 * (i // 3)),
+                    "snr": snr, "dt": 0.2, "freq": 7040000 + 100 * i, "drift": 0,
+                    "call": call, "grid": grid, "dbm": dbm, "km": km,
+                    "text": " ".join(x for x in (call, grid, str(dbm)) if x)})
+    return out
 
 
 def js8_lines(n=30):
@@ -104,6 +155,7 @@ class FakeRxd:
         self.switches = []       # POST /api/profile names
         self.audio_rates = []    # each GET /api/audio's rate
         self.js8 = js8_lines()
+        self.wspr = wspr_lines()
         self.listeners = 0
         self.seq = 0
         self.gen = 0             # bumped when the server goes down, to end streams
@@ -140,6 +192,11 @@ class FakeRxd:
                     with fake.lock:
                         lines = [x for x in fake.js8 if x["seq"] > after]
                         return self.send(200, {"seq": len(fake.js8), "lines": lines})
+                if path == "/api/wspr":
+                    after = int(q.get("after", ["0"])[0])
+                    with fake.lock:
+                        lines = [x for x in fake.wspr if x["seq"] > after]
+                        return self.send(200, {"seq": len(fake.wspr), "lines": lines})
                 if path == "/api/audio":
                     return self.audio(int(q.get("rate", ["24000"])[0]))
                 self.send(404, {"error": "not found"})
@@ -191,6 +248,11 @@ class FakeRxd:
                         return self.send(400, {"error": "frequency out of range"})
                     if "mode" in doc and doc["mode"] != fake.state["mode"]:
                         fake.state["bandwidth"] = BW[doc["mode"]]
+                    doc = dict(doc)
+                    if "wspr_report" in doc:
+                        w = fake.state["wspr"]
+                        fake.state["wspr"] = dict(w, report=dict(w["report"],
+                                                                 enabled=doc.pop("wspr_report")))
                     fake.state.update(doc)
                     fake.state["upconverter_hz"] = 125e6 if fake.state["freq"] < 30e6 else 0.0
                     return self.send(200, dict(fake.state))
@@ -733,10 +795,18 @@ class Formatting(unittest.TestCase):
 class Views(unittest.TestCase):
     def test_profile_and_status_kinds(self):
         kinds = {p["name"]: t.profile_kind(p) for p in PROFILES}
-        self.assertEqual(kinds, {"ghostnet": "js8", "js8": "js8", "fm-105.3": "listen",
+        self.assertEqual(kinds, {"ghostnet": "digital", "js8": "digital", "fm-105.3": "listen",
                                  "noaa": "listen", "2m": "listen", "am-1030": "listen",
-                                 "40m": "manual"})
-        self.assertEqual(t.status_kind(state_for("ghostnet")), "js8")
+                                 "40m": "manual", "wspr": "digital"})
+        self.assertEqual(t.status_kind(state_for("ghostnet")), "digital")
+        self.assertEqual(t.status_kind(state_for("wspr")), "digital")
+        # decoder wins over the js8 flag; without it, js8 means JS8
+        self.assertEqual(t.decoder_of({"js8": True}), "js8")
+        self.assertIsNone(t.decoder_of({"js8": False}))
+        self.assertEqual(t.decoder_of({"js8": False, "decoder": "wspr"}), "wspr")
+        self.assertIsNone(t.decoder_of({"js8": True, "decoder": None}))
+        self.assertIsNone(t.decoder_of({"decoder": "ft8"}))
+        self.assertEqual(t.profile_kind({"mode": "USB", "decoder": None, "js8": True}), "manual")
         self.assertEqual(t.status_kind(state_for("noaa")), "listen")
         self.assertEqual(t.status_kind(state_for("40m")), "manual")
         self.assertIsNone(t.status_kind({}))
@@ -748,8 +818,13 @@ class Views(unittest.TestCase):
                           ("AM", ["am-1030"])])
         self.assertEqual([p["name"] for p in t.picker_list("listen", PROFILES)],
                          ["fm-105.3", "noaa", "2m", "am-1030"])
-        self.assertEqual([p["name"] for p in t.picker_list("js8", PROFILES)],
-                         ["ghostnet", "js8"])
+        self.assertEqual([p["name"] for p in t.picker_list("digital", PROFILES)],
+                         ["ghostnet", "js8", "wspr"])
+        self.assertEqual([(title, [p["name"] for p in members])
+                          for title, members in t.group_digital(PROFILES)],
+                         [("JS8", ["ghostnet", "js8"]), ("WSPR", ["wspr"])])
+        self.assertEqual([title for title, _ in t.group_digital(PROFILES[2:])], ["WSPR"])
+        self.assertEqual(t.group_digital([]), [])
         self.assertEqual(t.picker_list("manual", PROFILES), [])
         only_am = [p for p in PROFILES if p["mode"] == "AM"]
         self.assertEqual([title for title, _ in t.group_stations(only_am)], ["AM"])
@@ -830,7 +905,7 @@ class Js8Lines(unittest.TestCase):
         text, _ = t.format_js8(dict(self.LINE, snr=None), "KA1PID", 20, A)
         self.assertEqual(len(text), 20)
         self.assertTrue(text.endswith("..."))
-        self.assertTrue(t.JS8_HEADER.startswith("UTC      SNR  From"))
+        self.assertTrue(t.JS8_HEADER.startswith("Time     SNR  From"))
 
     def test_mine(self):
         self.assertTrue(t.js8_mine({"to": "ka1pid"}, "KA1PID"))
@@ -853,6 +928,86 @@ class Js8Lines(unittest.TestCase):
         self.assertEqual(t.js8_filter(lines, "NOBODY"), [])
         self.assertEqual(t.stations_heard(lines), 6)
         self.assertEqual(t.stations_heard([]), 0)
+
+
+class LocalTimes(unittest.TestCase):
+    def tearDown(self):
+        set_tz("UTC")
+
+    def test_utc_strings_become_local_24_hour(self):
+        set_tz("America/Chicago")
+        self.assertEqual(t.local_time("2026-11-05 14:03:15"), "08:03:15")     # CST
+        self.assertEqual(t.local_time("2026-07-01 14:03:15"), "09:03:15")     # CDT
+        self.assertEqual(t.local_time("2026-11-06T12:20:00Z", False), "06:20")
+        self.assertEqual(t.local_time("2026-11-06T23:58:00Z", False), "17:58")  # 24-hour
+        self.assertIsNone(t.local_time("soon"))
+        self.assertIsNone(t.local_time(None))
+        self.assertEqual(t.js8_time("2026-11-05 14:03:15"), "08:03:15")
+        self.assertEqual(t.js8_time("14:03:15"), "14:03:15")   # no date: shown as it came
+        text, _ = t.format_js8(Js8Lines.LINE, "KA1PID", 78, U)
+        self.assertTrue(text.startswith("08:03:15  -7  W1AW"), text)
+        self.assertTrue(t.format_wspr(wspr_lines()[0], 7038600, 78, U).startswith("06:12  K1ABC"))
+        set_tz("Asia/Kolkata")
+        self.assertEqual(t.local_time("2026-11-06T12:20:00Z", False), "17:50")
+        set_tz("UTC")
+        self.assertEqual(t.local_time("2026-11-06T12:20:00Z", False), "12:20")
+
+
+class WsprSpots(unittest.TestCase):
+    def test_rows(self):
+        spots = wspr_lines()
+        self.assertEqual(t.WSPR_HEADER, "Time   Call       Grid   Miles  SNR  dBm Audio Hz")
+        self.assertEqual(t.format_wspr(spots[0], 7038600, 78, U),
+                         "12:12  K1ABC      FN42    1007  -18   37     1400")
+        # no grid, so no distance; an offset from the dial in Hz
+        self.assertEqual(t.format_wspr(spots[1], 7038600.0, 78, U),
+                         "12:12  W5XQQ                    -24   23     1500")
+        self.assertEqual(t.format_wspr(dict(spots[2], snr=3), 7038600, 78, U),
+                         "12:12  VE3QXZ     FN03     824   +3   30     1600")
+        self.assertEqual(t.format_wspr(spots[0], None, 78, U),
+                         "12:12  K1ABC      FN42    1007  -18   37")
+        self.assertEqual(len(t.format_wspr(spots[0], 7038600, 20, A)), 20)
+        self.assertEqual(t.stations_heard(spots, "call"), 3)
+        self.assertEqual([x["call"] for x in t.line_filter(spots, "fn42", t.wspr_key)],
+                         ["K1ABC"] * 4)
+
+    def test_cycle_and_last_slot(self):
+        self.assertEqual(t.wspr_cycle(wspr_status("recording"), U),
+                         ("● Recording the 12:20 slot", "ok"))
+        self.assertEqual(t.wspr_cycle(wspr_status("decoding"), U)[0], "… Decoding the 12:20 slot")
+        self.assertEqual(t.wspr_cycle(wspr_status("waiting"), A)[0], "~ Next slot 12:22")
+        self.assertEqual(t.wspr_cycle({}, U)[0], "? Cycle unknown")
+        self.assertEqual(t.wspr_last(wspr_status()), "3 spots in the 12:18 slot")
+        self.assertEqual(t.wspr_last({"last": {"slot": "2026-11-06T12:18:00Z", "spots": 1}}),
+                         "1 spot in the 12:18 slot")
+        self.assertEqual(t.wspr_last({"last": {"slot": "2026-11-06T12:18:00Z", "spots": 0}}),
+                         "No spots in the 12:18 slot")
+        self.assertEqual(t.wspr_last({"last": None}), "No slot decoded yet")
+
+    def test_reporting_in_words(self):
+        def words(g=U, **r):
+            return t.wspr_report_words(wspr_status(**r), g)
+        self.assertEqual(words(), ("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", "ok"))
+        self.assertEqual(words(pending=2)[0],
+                         "● Reporting to WSPRnet as KA1PID EM13lc · 12 sent, 2 waiting")
+        self.assertEqual(words(online=False, pending=5, error="can't reach WSPRnet: x"),
+                         ("▲ Offline: 5 spots waiting", "warn"))
+        self.assertEqual(words(online=False, pending=1)[0], "▲ Offline: 1 spot waiting")
+        self.assertEqual(words(error="WSPRnet refused a spot: no"),
+                         ("✕ WSPRnet refused a spot: no", "bad"))
+        self.assertEqual(words(enabled=False)[0],
+                         "■ Not reporting to WSPRnet (r reports as KA1PID EM13lc)")
+        w = wspr_status()
+        w["report"] = {"enabled": False, "call": None, "grid": None,
+                       "reason": "no callsign and grid"}
+        self.assertEqual(t.wspr_report_words(w, U), ("■ Not reporting: no callsign and grid",
+                                                     "warn"))
+        self.assertFalse(t.wspr_can_report(w))
+        self.assertTrue(t.wspr_can_report(wspr_status(enabled=False)))
+        self.assertFalse(t.wspr_can_report(None))
+        self.assertTrue(words(A)[0].isascii())
+        self.assertTrue(t.clock_words({"synced": False}, U, "WSPR")[0].endswith(
+            "WSPR won't decode"))
 
 
 class Audio(unittest.TestCase):
@@ -947,6 +1102,8 @@ class FakePoller:
         self.profiles_error = ""
         self.js8_lines = list(js8 if js8 is not None else (js8_lines() if status.get("js8") else []))
         self.js8_state = "ok"
+        self.wspr_lines = wspr_lines() if status.get("decoder") == "wspr" else []
+        self.wspr_state = "ok"
         self.want_spectrum = True
         self.changed = threading.Event()
         self.sent = []
@@ -1013,7 +1170,8 @@ def frame(app, h=24, w=80):
 
 class Drawing(unittest.TestCase):
     def test_view_follows_the_profile(self):
-        for name, view in (("ghostnet", "js8"), ("fm-105.3", "listen"), ("noaa", "listen"),
+        for name, view in (("ghostnet", "digital"), ("wspr", "digital"),
+                           ("fm-105.3", "listen"), ("noaa", "listen"),
                            ("am-1030", "listen"), ("40m", "manual")):
             app = app_on(name)
             frame(app)
@@ -1025,7 +1183,7 @@ class Drawing(unittest.TestCase):
         text = c.text()
         lines = text.split("\n")
         self.assertEqual(len(lines), 24)
-        self.assertIn("1 ● JS8", lines[0])
+        self.assertIn("1 ● Digital", lines[0])
         self.assertIn("● RX", lines[0])
         self.assertIn("▸ ghostnet", text)
         self.assertIn("● Active", text)
@@ -1069,13 +1227,120 @@ class Drawing(unittest.TestCase):
         app.key(curses.KEY_PPAGE)
         before = frame(app).text()
         app.p.js8_lines.append(dict(js8_lines(31)[-1], seq=31, text="N0XQX: NEW LINE"))
-        self.assertEqual(frame(app).text().split("\n")[8:20], before.split("\n")[8:20])
+        def decodes(text):
+            return [x for x in text.split("\n") if re.match(r" \d\d:\d\d:\d\d", x)]
+        self.assertEqual(decodes(frame(app).text()), decodes(before))
 
     def test_js8_clock_ok_and_unknown(self):
         app = app_on("js8")
         self.assertIn("● Clock synced (GPS)", frame(app).text())
         app.p.status["clock"] = {"synced": None}
         self.assertIn("? Clock unknown", frame(app).text())
+
+    def test_wspr_80x24(self):
+        app = app_on("wspr")
+        c = frame(app)
+        text = c.text()
+        lines = text.split("\n")
+        self.assertEqual(app.view, "digital")
+        self.assertIn("1 ● Digital", lines[0])
+        self.assertEqual([x.strip() for x in lines[1:6]][::3], ["JS8", "WSPR"])  # grouped
+        self.assertIn("▸ wspr       WSPR, 40 m · 7.0386 MHz", text)
+        self.assertIn("● Active", text)
+        self.assertIn("3 stations heard", text)
+        self.assertIn("● Clock synced (GPS)", text)
+        self.assertIn("● Recording the 12:20 slot   3 spots in the 12:18 slot", text)
+        self.assertIn("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", text)
+        self.assertIn(t.WSPR_HEADER, text)
+        self.assertNotIn(t.JS8_HEADER, text)
+        self.assertIn("12:18  VE3QXZ", lines[-3])                    # newest at the bottom
+        self.assertIn("2400", [x for x in lines if "W5XQQ" in x][-1])  # 7041000 - 7038600
+        self.assertIn("r report", lines[-1])
+        self.assertIn("l listen", lines[-1])
+        self.assertTrue(all(len(x) <= 80 for x in lines))
+        for word in ("Step", "Bandwidth", "Gain", "Speaker", "Squelch"):
+            self.assertNotIn(word, text)
+
+    def test_wspr_local_times_errors_and_waiting(self):
+        set_tz("America/Chicago")
+        self.addCleanup(set_tz, "UTC")
+        app = app_on("wspr")
+        app.p.status["wspr"] = dict(wspr_status("waiting"), error="wsprd failed: exit 1")
+        app.p.status["clock"] = {"synced": False}
+        text = frame(app).text()
+        self.assertIn("… Next slot 06:22", text)
+        self.assertIn("3 spots in the 06:18 slot", text)
+        self.assertIn("✕ wsprd failed: exit 1", text)
+        self.assertIn("Clock not synced: WSPR won't decode", text)
+        self.assertIn("06:18  VE3QXZ", text)
+        self.assertNotIn("12:18", text)
+        # no status from the decoder yet, no spots yet
+        app.p.status["wspr"] = None
+        app.p.wspr_lines = []
+        text = frame(app).text()
+        self.assertIn("Waiting for the WSPR decoder", text)
+        self.assertIn("No spots yet", text)
+        # small screens still draw
+        for h, w in ((10, 30), (12, 40), (16, 50)):
+            for g in (U, A):
+                a2 = app_on("wspr", g=g)
+                c = frame(a2, h, w)
+                self.assertIn("quit", c.text().split("\n")[-1])
+
+    def test_wspr_report_toggle(self):
+        app = app_on("wspr")
+        frame(app)
+        app.key(ord("r"))
+        self.assertEqual(app.p.sent, [{"wspr_report": False}])
+        self.assertIn("Stopped reporting", app.message)
+        text = frame(app).text()                       # shown before rxd confirms it
+        self.assertIn("■ Not reporting to WSPRnet (r reports as KA1PID EM13lc)", text)
+        app.key(ord("r"))
+        self.assertEqual(app.p.sent[-1], {"wspr_report": True})
+        self.assertIn("● Reporting to WSPRnet", frame(app).text())
+        # without a callsign and grid there's nothing to toggle, and r isn't offered
+        app = app_on("wspr")
+        app.p.status["wspr"]["report"] = {"enabled": False, "call": None, "grid": None,
+                                          "reason": "no callsign and grid"}
+        lines = frame(app).text().split("\n")
+        self.assertNotIn("r report", lines[-1])
+        self.assertIn("■ Not reporting: no callsign and grid", "\n".join(lines))
+        app.key(ord("r"))
+        self.assertEqual(app.p.sent, [])
+        self.assertIn("Can't report: no callsign and grid", app.message)
+        # nor on JS8
+        app = app_on("ghostnet")
+        frame(app)
+        app.key(ord("r"))
+        self.assertEqual(app.p.sent, [])
+        self.assertIn("isn't on WSPR", app.message)
+        self.assertNotIn("r report", frame(app).text().split("\n")[-1])
+
+    def test_wspr_listen_and_switching_away(self):
+        app = app_on("wspr", audio=FakeAudio())
+        frame(app)
+        app.key(ord("l"))                         # the network listen works on WSPR
+        self.assertTrue(app.audio.on)
+        self.assertEqual(app.audio.rate, 12000)
+        app.key(ord("]"))
+        self.assertEqual(app.local_vol, 110)
+        self.assertIn("[ ] vol", frame(app).text().split("\n")[-1])
+        app.key(ord("g"))
+        self.assertIn("isn't a key in Digital", app.message)
+        self.assertEqual(app.p.sent, [])
+        # leaving WSPR for JS8 asks nothing (JS8Call isn't running); leaving JS8 asks
+        app.key(curses.KEY_UP)
+        app.key(curses.KEY_UP)
+        app.key(10)
+        self.assertIsNone(app.confirm)
+        self.assertEqual(app.p.switched, ["ghostnet"])
+        app = app_on("ghostnet")
+        frame(app)
+        app.key(curses.KEY_DOWN)
+        app.key(curses.KEY_DOWN)
+        app.key(10)
+        self.assertEqual(app.confirm["name"], "wspr")
+        self.assertIn("Leaving ghostnet closes JS8Call", frame(app).text())
 
     def test_listen_80x24(self):
         app = app_on("noaa", audio=FakeAudio())
@@ -1129,14 +1394,14 @@ class Drawing(unittest.TestCase):
         frame(app)
         app.key(ord("1"))
         text = frame(app).text()
-        self.assertEqual(app.view, "js8")
-        self.assertIn("Receiver is on fm-105.3 (WBUR Boston). Pick a JS8 frequency to switch.",
-                      text)
+        self.assertEqual(app.view, "digital")
+        self.assertIn("Receiver is on fm-105.3 (WBUR Boston). "
+                      "Pick a JS8 or WSPR frequency to switch.", text)
         self.assertIn("ghostnet", text)
         self.assertNotIn(t.JS8_HEADER, text)
         for _ in range(3):
             frame(app)
-        self.assertEqual(app.view, "js8")
+        self.assertEqual(app.view, "digital")
         self.assertEqual(app.p.switched, [])
         app.key(ord("g"))
         self.assertEqual(app.p.sent, [])                         # no tuning in JS8
@@ -1165,7 +1430,7 @@ class Drawing(unittest.TestCase):
         self.assertEqual(app.view, "listen")
         app.p.status.update(state_for("ghostnet"))
         frame(app)
-        self.assertEqual(app.view, "js8")                        # follows again
+        self.assertEqual(app.view, "digital")                        # follows again
 
     def test_no_profiles_is_manual_only(self):
         app = app_on("noaa", profiles=None)
@@ -1211,7 +1476,7 @@ class Drawing(unittest.TestCase):
 
     def test_tiny_and_odd_sizes(self):
         self.assertIn("too small", frame(app_on("40m"), 8, 20).text())
-        for name in ("ghostnet", "noaa", "fm-105.3", "40m"):
+        for name in ("ghostnet", "wspr", "noaa", "fm-105.3", "40m"):
             for h, w in ((10, 30), (16, 50), (24, 80), (30, 100), (45, 160), (60, 250)):
                 for g in (U, A):
                     app = app_on(name, g=g, audio=FakeAudio())
@@ -1299,7 +1564,7 @@ class Drawing(unittest.TestCase):
         frame(app)
         app.key(ord("l"))
         self.assertFalse(app.audio.on)
-        self.assertIn("No audio in JS8", app.message)
+        self.assertIn("No audio here on JS8", app.message)
         app.key(ord("M"))
         self.assertEqual(app.p.sent, [])                          # JS8Call's feed stays up
 
@@ -1437,6 +1702,27 @@ class AgainstFakeRxd(unittest.TestCase):
         p.switch("nope")
         self.assertTrue(self.wait(lambda: p.switch_acks, 3))
         self.assertIn("no profile 'nope'", p.take_switch_acks()[0][1])
+
+    def test_poller_wspr_feed_and_report(self):
+        fake = FakeRxd("wspr", drop=1.0)
+        self.addCleanup(fake.close)
+        p = t.Poller(t.Link(fake.url))
+        p.start()
+        self.addCleanup(p.stop)
+        self.assertTrue(self.wait(lambda: len(p.wspr_lines) == 12))
+        self.assertEqual(list(p.js8_lines), [])
+        self.assertEqual(p.wspr_state, "ok")
+        with fake.lock:
+            fake.wspr.append(dict(wspr_lines(13)[-1]))
+        self.assertTrue(self.wait(lambda: len(p.wspr_lines) == 13, 5))
+        self.assertEqual([x["seq"] for x in p.wspr_lines], list(range(1, 14)))
+        p.tune(wspr_report=False)
+        self.assertTrue(self.wait(lambda: p.status["wspr"]["report"]["enabled"] is False, 3))
+        self.assertEqual(fake.posts, [{"wspr_report": False}])
+        p.switch("ghostnet")                       # WSPR to JS8: the feed follows
+        self.assertTrue(self.wait(lambda: p.status.get("profile") == "ghostnet", 5))
+        self.assertTrue(self.wait(lambda: len(p.js8_lines) == 30, 5))
+        self.assertEqual(list(p.wspr_lines), [])
 
     def test_poller_unreachable_and_no_spectrum(self):
         fake = FakeRxd(spectrum=False)
@@ -1576,7 +1862,7 @@ class RealProgram(unittest.TestCase):
         tui = self.run_tui(fake.url)
         self.assertTrue(tui.wait_for("WB2OQX", 6), tui.vt.text())
         screen = tui.vt.text()
-        self.assertIn("1 ● JS8", screen)
+        self.assertIn("1 ● Digital", screen)
         self.assertIn("✕ Clock not synced: JS8 won't decode", screen)
         self.assertIn("◆ KA1PID", screen)
         self.assertIn("6 stations heard", screen)
@@ -1594,8 +1880,27 @@ class RealProgram(unittest.TestCase):
         self.assertNotIn("PgDn for newest", tui.vt.text())
         tui.send(b"g")
         tui.pump(0.3)
-        self.assertIn("isn't a key in JS8", tui.vt.text())
+        self.assertIn("isn't a key in Digital", tui.vt.text())
         self.assertEqual(fake.posts, [])
+        self.quit_cleanly(tui)
+
+    def test_wspr_view_local_times_and_report_toggle(self):
+        fake = self.fake("wspr")
+        tui = self.run_tui(fake.url, env={"TZ": "America/Chicago"})
+        self.assertTrue(tui.wait_for("06:18  VE3QXZ", 6), tui.vt.text())
+        screen = tui.vt.text()
+        self.assertIn("1 ● Digital", screen)
+        self.assertIn("● Recording the 06:20 slot", screen)
+        self.assertIn("3 spots in the 06:18 slot", screen)
+        self.assertIn("● Reporting to WSPRnet as KA1PID EM13lc · 12 sent", screen)
+        self.assertIn(t.WSPR_HEADER, screen)
+        self.assertNotIn("12:18", screen)
+        tui.send(b"r")
+        self.assertTrue(tui.wait_for("■ Not reporting to WSPRnet"), tui.vt.text())
+        self.assertEqual(fake.posts, [{"wspr_report": False}])
+        tui.send(b"r")
+        self.assertTrue(tui.wait_for("● Reporting to WSPRnet as"), tui.vt.text())
+        self.assertEqual(fake.posts, [{"wspr_report": False}, {"wspr_report": True}])
         self.quit_cleanly(tui)
 
     def test_listen_keys_send_the_right_posts(self):

@@ -5,20 +5,26 @@ It talks only to rxd's HTTP API, by default at http://127.0.0.1:8073, and
 has three views, like rxd's browser UI. The view follows the receiver's
 profile; 1, 2 and 3 pick one.
 
-  1 JS8     JS8Call's decodes, the clock, and a picker for the JS8
-            frequencies (Ghostnet or regular JS8Call). Nothing to tune.
-  2 Listen  a picker of broadcast FM, VHF/UHF and AM stations, with gain,
-            bandwidth, squelch (NFM) and the uConsole speaker's volume.
-  3 Manual  the full instrument: tuning, spectrum and waterfall.
+  1 Digital  the digital modes, with a picker for their profiles grouped
+             by mode (JS8: Ghostnet or regular JS8Call; WSPR). On JS8 it
+             shows JS8Call's decodes and the clock; on WSPR, rxd's own spots,
+             the two-minute cycle and the reporting to WSPRnet, which r turns
+             on and off. Nothing to tune.
+  2 Listen   a picker of broadcast FM, VHF/UHF and AM stations, with gain,
+             bandwidth, squelch (NFM) and the uConsole speaker's volume.
+  3 Manual   the full instrument: tuning, spectrum and waterfall.
 
 Picking a station or frequency switches rxd's profile; rxd restarts, which
 takes a few seconds. Leaving a JS8 profile asks first, since it closes
 JS8Call.
 
+Times are shown in this machine's time zone ($TZ), 24-hour.
+
 l plays the receiver's audio on this machine, through the first of pw-cat,
 paplay, aplay, ffplay or sox's play on PATH (or --player), so the TUI works
-as a remote listening station. [ ] set its volume here; M mutes the
-uConsole's own speaker meanwhile. --listen starts with it on.
+as a remote listening station; on JS8 the audio goes to JS8Call instead.
+[ ] set its volume here; M mutes the uConsole's own speaker meanwhile.
+--listen starts with it on.
 
 ? shows each view's keys. A typed frequency (f, in Manual) is MHz when it is
 under 2000 (7.078, 146.52), kHz under 100000 (14074) and Hz above that;
@@ -28,6 +34,7 @@ Status is shown with a symbol and a word as well as colour, and NO_COLOR is
 honoured. --ascii draws without Unicode block characters.
 """
 import argparse
+import calendar
 import collections
 import curses
 import json
@@ -62,7 +69,9 @@ GAIN_FALLBACK_MAX = 50.0               # 1 dB steps when rxd reports no gain tab
 LEVEL_LO, LEVEL_HI = -110.0, -10.0     # signal bar span, dBFS
 
 # The views, and which profiles belong to which (as in the browser UI).
-VIEWS = (("js8", "JS8"), ("listen", "Listen"), ("manual", "Manual"))
+VIEWS = (("digital", "Digital"), ("listen", "Listen"), ("manual", "Manual"))
+# The Digital view's picker groups its profiles by decoder, in this order.
+DECODERS = (("js8", "JS8"), ("wspr", "WSPR"))
 LISTEN_MODES = ("WFM", "FM", "AM")
 GROUPS = (("WFM", "Broadcast FM"), ("FM", "VHF · UHF"), ("AM", "AM"))
 # Listen's b cycles these: Narrow, Normal, Wide.
@@ -78,6 +87,7 @@ SPECTRUM_EVERY = 0.25   # about 4 a second, in Manual only
 RETRY_EVERY = 1.0       # while rxd is unreachable
 NO_SPECTRUM_EVERY = 5.0  # while rxd has no /api/spectrum
 JS8_EVERY = 2.5         # the decode feed, on a JS8 profile
+WSPR_EVERY = 3.0        # the spot feed, on a WSPR profile (spots come every 2 minutes)
 PROFILES_RETRY = 10.0   # after /api/profiles failed
 TIMEOUT = 0.8           # per request
 SLOW_TIMEOUT = 20.0     # /api/profiles and the switch run `radio --json`
@@ -220,10 +230,18 @@ def mode_label(mode):
     return "NFM" if mode == "FM" else (mode or "---")
 
 
+def decoder_of(d):
+    """What decodes a profile's (or a status's) audio: "js8", "wspr" or None.
+    An older rxd or `radio --json` has only the js8 flag."""
+    if "decoder" in d:
+        return d["decoder"] if d["decoder"] in dict(DECODERS) else None
+    return "js8" if d.get("js8") else None
+
+
 def profile_kind(p):
-    """Which view a profile belongs to: js8, listen or manual."""
-    if p.get("js8"):
-        return "js8"
+    """Which view a profile belongs to: digital, listen or manual."""
+    if decoder_of(p):
+        return "digital"
     return "listen" if p.get("mode") in LISTEN_MODES else "manual"
 
 
@@ -231,9 +249,19 @@ def status_kind(st):
     """The same for a status, when the profile list isn't available."""
     if not st or not st.get("mode"):
         return None
-    if st.get("js8"):
-        return "js8"
+    if decoder_of(st):
+        return "digital"
     return "listen" if st["mode"] in LISTEN_MODES else "manual"
+
+
+def group_digital(profiles):
+    """The Digital view's picker: [(mode title, [profiles])], JS8 then WSPR."""
+    out = []
+    for dec, title in DECODERS:
+        members = [p for p in profiles if decoder_of(p) == dec]
+        if members:
+            out.append((title, members))
+    return out
 
 
 def group_stations(profiles):
@@ -249,8 +277,8 @@ def group_stations(profiles):
 
 def picker_list(view, profiles):
     """The profiles a view's picker offers, in order."""
-    if view == "js8":
-        return [p for p in profiles if p.get("js8")]
+    if view == "digital":
+        return [p for _, members in group_digital(profiles) for p in members]
     if view == "listen":
         return [p for _, members in group_stations(profiles) for p in members]
     return []
@@ -310,8 +338,8 @@ def squelch_words(st, g):
     return "%s  %s Open (signal)" % (lvl, g.rx), "ok"
 
 
-def clock_words(clock, g):
-    """(text, role) for the clock, which JS8 needs within about a second."""
+def clock_words(clock, g, mode="JS8"):
+    """(text, role) for the clock, which JS8 and WSPR need within about a second."""
     c = clock if isinstance(clock, dict) else {}
     if c.get("synced") is True:
         src = c.get("source")
@@ -319,7 +347,7 @@ def clock_words(clock, g):
     if c.get("synced") is False:
         off = c.get("offset_s")
         extra = " (%.1f s off)" % abs(off) if isinstance(off, (int, float)) else ""
-        return "%s Clock not synced: JS8 won't decode%s" % (g.bad, extra), "bad"
+        return "%s Clock not synced: %s won't decode%s" % (g.bad, mode, extra), "bad"
     return "%s Clock unknown" % g.unknown, "warn"
 
 
@@ -359,16 +387,44 @@ def js8_key(line):
 
 def js8_filter(lines, text):
     """The lines whose callsigns or text contain text (any case)."""
-    f = (text or "").strip().upper()
-    return [x for x in lines if f in js8_key(x)] if f else list(lines)
+    return line_filter(lines, text, js8_key)
+
+
+UTC_TIME = re.compile(r"(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?")
+
+
+def utc_epoch(t):
+    """A UTC time from rxd ("2026-11-05 14:03:15" or "2026-11-06T12:20:00Z") as Unix
+    time, or None."""
+    m = UTC_TIME.match(str(t or "").strip())
+    if not m:
+        return None
+    y, mo, d, hh, mm, ss = (int(x or 0) for x in m.groups())
+    try:
+        return calendar.timegm((y, mo, d, hh, mm, ss, 0, 0, 0))
+    except (ValueError, OverflowError):
+        return None
+
+
+def local_time(t, seconds=True):
+    """A UTC time from rxd in this machine's time zone, 24-hour: 08:03:15 (or 08:03)."""
+    e = utc_epoch(t)
+    if e is None:
+        return None
+    return time.strftime("%H:%M:%S" if seconds else "%H:%M", time.localtime(e))
 
 
 def js8_time(t):
+    """A decode's time, local. A bare time of day (no date) can't be converted and is
+    shown as it came."""
+    lt = local_time(t)
+    if lt:
+        return lt
     m = re.search(r"\d\d:\d\d:\d\d", str(t or ""))
     return m.group(0) if m else str(t or "--:--:--")[:8]
 
 
-JS8_HEADER = "UTC      SNR  From      Message"
+JS8_HEADER = "Time     SNR  From      Message"
 
 
 def format_js8(line, call, width, g):
@@ -385,8 +441,95 @@ def format_js8(line, call, width, g):
     return clip(s, width, g), mine
 
 
-def stations_heard(lines):
-    return len({x.get("from") for x in lines if x.get("from")})
+def stations_heard(lines, key="from"):
+    return len({x.get(key) for x in lines if x.get(key)})
+
+
+# ---- WSPR spots
+
+KM_PER_MILE = 1.609344
+WSPR_FORMAT = "%-5s  %-10s %-6s %5s %4s %4s %8s"
+WSPR_HEADER = WSPR_FORMAT % ("Time", "Call", "Grid", "Miles", "SNR", "dBm", "Audio Hz")
+
+
+def wspr_key(line):
+    return " ".join(str(line.get(k) or "") for k in ("call", "grid", "text")).upper()
+
+
+def line_filter(lines, text, key=js8_key):
+    """The lines whose callsigns or text contain text (any case)."""
+    f = (text or "").strip().upper()
+    return [x for x in lines if f in key(x)] if f else list(lines)
+
+
+def format_wspr(line, dial, width, g):
+    """One spot: local time, call, grid, miles, SNR, dBm and the audio offset."""
+    km = line.get("km")
+    miles = "%d" % round(km / KM_PER_MILE) if isinstance(km, (int, float)) else ""
+    snr, dbm, f = line.get("snr"), line.get("dbm"), line.get("freq")
+    off = "%d" % round(f - dial) if isinstance(f, (int, float)) and \
+        isinstance(dial, (int, float)) else ""
+    s = WSPR_FORMAT % (local_time(line.get("time"), False) or "--:--",
+                       str(line.get("call") or "?"), str(line.get("grid") or ""), miles,
+                       "%+d" % snr if isinstance(snr, int) else "?",
+                       "%d" % dbm if isinstance(dbm, int) else "?", off)
+    return clip(s.rstrip(), width, g)
+
+
+def slot_time(iso):
+    return local_time(iso, False) or "--:--"
+
+
+def wspr_cycle(w, g):
+    """(text, role) for where the two-minute cycle is."""
+    state = w.get("state")
+    if state == "recording":
+        return "%s Recording the %s slot" % (g.rx, slot_time(w.get("slot"))), "ok"
+    if state == "decoding":
+        slot = slot_time(w.get("decoding") or w.get("slot"))
+        return "%s Decoding the %s slot" % (g.wait, slot), "value"
+    if state == "waiting":
+        return "%s Next slot %s" % (g.wait, slot_time(w.get("slot"))), "label"
+    return "%s Cycle unknown" % g.unknown, "warn"
+
+
+def wspr_last(w):
+    last = w.get("last")
+    if not isinstance(last, dict) or not last.get("slot"):
+        return "No slot decoded yet"
+    n = last.get("spots") or 0
+    t = slot_time(last["slot"])
+    if not n:
+        return "No spots in the %s slot" % t
+    return "%d spot%s in the %s slot" % (n, "" if n == 1 else "s", t)
+
+
+def wspr_can_report(w):
+    """Whether r can turn reporting on and off: rxd has a callsign and grid."""
+    r = (w or {}).get("report")
+    return isinstance(r, dict) and not r.get("reason")
+
+
+def wspr_report_words(w, g):
+    """(text, role) for the reporting to WSPRnet, in words as well as colour."""
+    r = w.get("report")
+    if not isinstance(r, dict):
+        return "%s Reporting unknown" % g.unknown, "warn"
+    if r.get("reason"):
+        return "%s Not reporting: %s" % (g.stop, r["reason"]), "warn"
+    who = " ".join(x for x in (r.get("call"), r.get("grid")) if x)
+    if not r.get("enabled"):
+        return "%s Not reporting to WSPRnet (r reports as %s)" % (g.stop, who), "label"
+    pending = r.get("pending") or 0
+    if r.get("online") is False:
+        return "%s Offline: %d spot%s waiting" % (g.drop, pending, "" if pending == 1 else "s"), \
+            "warn"
+    if r.get("error"):
+        return "%s %s" % (g.bad, r["error"]), "bad"
+    text = "%s Reporting to WSPRnet as %s %s %d sent" % (g.rx, who, g.dot, r.get("sent") or 0)
+    if pending:
+        text += ", %d waiting" % pending
+    return text, "ok"
 
 
 # ---- audio here
@@ -702,18 +845,27 @@ def badge(reachable, status, dropping, g, switching=None):
 
 
 SHORT_LABELS = {"bandwidth": "bw", "volume": "vol", "speaker": "spkr", "station": "pick",
-                "switch": "pick", "squelch": "sq", "listen": "listen", "filter": "filter"}
+                "switch": "pick", "squelch": "sq", "listen": "listen", "filter": "filter",
+                "reporting": "report"}
 
 
-def help_items(g, view="manual", mode=None, listening=False):
-    """[(keys, label)] for a view's bottom line; ? and q always come last."""
+def help_items(g, view="manual", mode=None, listening=False, decoder=None, report=False):
+    """[(keys, label)] for a view's bottom line; ? and q always come last.
+    In Digital, decoder is the receiver's ("js8", "wspr" or None) and report
+    whether r can switch WSPR reporting."""
     k = g.keys
     ud = k["updown"]
-    if view == "js8":
-        items = [(ud + " Enter", "switch"), ("PgUp PgDn", "scroll"), ("/", "filter"),
-                 ("1 2 3", "view")]
-        if listening:
-            items.insert(3, ("l", "stop audio"))
+    if view == "digital":
+        # When they don't all fit, the ones just before the view keys go first.
+        items = [(ud + " Enter", "switch")]
+        if decoder == "wspr" and report:
+            items.append(("r", "reporting"))
+        if decoder != "js8":
+            items += [("l", "listen")] + ([("[ ]", "volume")] if listening else [])
+        items += [("PgUp PgDn", "scroll"), ("/", "filter")]
+        if decoder == "js8" and listening:
+            items.append(("l", "stop audio"))
+        items.append(("1 2 3", "view"))
     elif view == "listen":
         items = [(ud + " Enter", "station"), ("g G", "gain"), ("b", "bandwidth")]
         if mode == "FM":
@@ -814,7 +966,7 @@ class Poller:
 
     One thread polls status (and the spectrum, in Manual) and sends tunes;
     another does the slow things: the profile list, profile switches and
-    the JS8 decode feed."""
+    the decoder's feed (JS8 decodes or WSPR spots)."""
 
     def __init__(self, link, clock=time.monotonic):
         self.link = link
@@ -842,10 +994,12 @@ class Poller:
         self.profiles_retry_at = 0.0
         self.switch_req = None
         self.switch_acks = []      # (name, error or None)
+        # The decoder's feed: one of these fills at a time, the other is empty.
         self.js8_lines = collections.deque(maxlen=JS8_KEEP)
-        self.js8_seq = 0
-        self.js8_for = None        # the profile the lines are from
-        self.js8_state = "waiting"  # waiting, ok, missing or error
+        self.wspr_lines = collections.deque(maxlen=JS8_KEEP)
+        self.js8_state = self.wspr_state = "waiting"  # waiting, ok, missing or error
+        self.feed_seq = 0
+        self.feed_for = None       # (profile, decoder) the lines are from
         self.threads = []
 
     # called from the UI thread
@@ -982,9 +1136,9 @@ class Poller:
             self._status()
         self.changed.set()
 
-    # the side thread: profiles, switches and JS8
+    # the side thread: profiles, switches and the decoder's feed
     def side(self):
-        next_js8 = 0.0
+        next_feed = 0.0
         while not self.halt.is_set():
             self.side_wake.clear()
             with self.lock:
@@ -997,17 +1151,17 @@ class Poller:
                 self._load_profiles(st)
                 continue
             now = self.clock()
-            if reachable and st.get("js8"):
-                if st.get("profile") != self.js8_for:
-                    self._js8_reset(st.get("profile"))
-                    next_js8 = 0.0
-                if now >= next_js8:
-                    self._js8()
-                    next_js8 = self.clock() + JS8_EVERY
-            elif reachable and self.js8_for is not None:
-                self._js8_reset(None)
-            self.side_wake.wait(clamp(next_js8 - self.clock(), 0.05, 0.5)
-                                if st.get("js8") else 0.5)
+            dec = decoder_of(st)
+            if reachable and dec:
+                if (st.get("profile"), dec) != self.feed_for:
+                    self._feed_reset((st.get("profile"), dec))
+                    next_feed = 0.0
+                if now >= next_feed:
+                    self._feed(dec)
+                    next_feed = self.clock() + (WSPR_EVERY if dec == "wspr" else JS8_EVERY)
+            elif reachable and self.feed_for is not None:
+                self._feed_reset(None)
+            self.side_wake.wait(clamp(next_feed - self.clock(), 0.05, 0.5) if dec else 0.5)
 
     def _profiles_due(self, st):
         with self.lock:
@@ -1054,37 +1208,41 @@ class Poller:
             self.switch_acks.append((name, err))
         self.changed.set()
 
-    def _js8_reset(self, profile):
+    def _feed_reset(self, key):
         with self.lock:
             self.js8_lines.clear()
-            self.js8_seq = 0
-            self.js8_for = profile
-            self.js8_state = "waiting"
+            self.wspr_lines.clear()
+            self.feed_seq = 0
+            self.feed_for = key
+            self.js8_state = self.wspr_state = "waiting"
         self.changed.set()
 
-    def _js8(self):
+    def _feed(self, dec):
+        """New lines from /api/js8 or /api/wspr, which number them the same way."""
+        lines = self.wspr_lines if dec == "wspr" else self.js8_lines
         try:
-            code, doc = self.link.get("/api/js8?after=%d" % self.js8_seq, timeout=3.0)
+            code, doc = self.link.get("/api/%s?after=%d" % (dec, self.feed_seq), timeout=3.0)
         except OSError:
             return  # the status thread reports rxd's absence
         with self.lock:
             if code == 200 and isinstance(doc.get("lines"), list):
-                seq = doc.get("seq") if isinstance(doc.get("seq"), int) else self.js8_seq
-                if seq < self.js8_seq:  # rxd restarted and numbers from 1 again
-                    self.js8_lines.clear()
-                    self.js8_seq = 0
+                seq = doc.get("seq") if isinstance(doc.get("seq"), int) else self.feed_seq
+                if seq < self.feed_seq:  # rxd restarted and numbers from 1 again
+                    lines.clear()
+                    self.feed_seq = 0
                     self.side_wake.set()
                     return
                 new = sorted((x for x in doc["lines"] if isinstance(x, dict)
-                              and (x.get("seq") or 0) > self.js8_seq),
+                              and (x.get("seq") or 0) > self.feed_seq),
                              key=lambda x: x.get("seq") or 0)
-                self.js8_lines.extend(new)
-                self.js8_seq = max(self.js8_seq, seq)
-                self.js8_state = "ok"
+                lines.extend(new)
+                self.feed_seq = max(self.feed_seq, seq)
+                state = "ok"
             elif code == 404:
-                self.js8_state = "missing"
+                state = "missing"
             else:
-                self.js8_state = "error: " + (doc.get("error") or "HTTP %d" % code)
+                state = "error: " + (doc.get("error") or "HTTP %d" % code)
+            setattr(self, dec + "_state", state)
         self.changed.set()
 
 
@@ -1431,7 +1589,7 @@ class App:
         self.lo = self.hi = None  # smoothed spectrum range
         self.wf_cache = {}      # waterfall rows already resampled to the screen
         # views
-        self.view = None        # js8, listen or manual; None until rxd says
+        self.view = None        # digital, listen or manual; None until rxd says
         self.view_for = None    # the profile the view was chosen for
         self.pinned = False     # Manual, chosen by the user, stays
         self.cursor = 0
@@ -1440,10 +1598,11 @@ class App:
         self.sq_level = SQUELCH_DEFAULT
         self.mute_prev = None   # the uConsole volume M will restore
         self.local_vol = 100    # percent, for audio played here
+        # the Digital view's list (JS8 decodes or WSPR spots)
         self.js8_filter = ""
         self.js8_scroll = 0     # lines back from the newest
         self.js8_seen = None    # (profile, matching lines) at the last draw
-        self.js8_page = 10      # decode rows on screen, for PgUp and PgDn
+        self.js8_page = 10      # rows on screen, for PgUp and PgDn
         self.want_listen = listen  # --listen: start once rxd says which mode
 
     # ---- state
@@ -1454,9 +1613,20 @@ class App:
                      spec_state=self.p.spec_state, profiles=self.p.profiles,
                      profiles_state=self.p.profiles_state,
                      profiles_error=getattr(self.p, "profiles_error", ""),
-                     js8=list(self.p.js8_lines), js8_state=self.p.js8_state)
-        s["status"].update(self.overrides)
+                     js8=list(self.p.js8_lines), js8_state=self.p.js8_state,
+                     wspr=list(getattr(self.p, "wspr_lines", ())),
+                     wspr_state=getattr(self.p, "wspr_state", "waiting"))
+        st = s["status"]
+        st.update(self.overrides)
+        w = st.get("wspr")
+        if "wspr_report" in self.overrides and isinstance(w, dict) and \
+                isinstance(w.get("report"), dict):  # sent, not yet confirmed
+            st["wspr"] = dict(w, report=dict(w["report"], enabled=self.overrides["wspr_report"]))
         return s
+
+    def decoder(self, s):
+        """The receiver's decoder: "js8", "wspr" or None."""
+        return decoder_of(s["status"]) if s["status"] else None
 
     def profile_list(self, s):
         return (s["profiles"] or {}).get("profiles") or []
@@ -1474,7 +1644,7 @@ class App:
 
     def mismatch(self, s):
         k = self.kind(s)
-        return self.view in ("js8", "listen") and k is not None and k != self.view
+        return self.view in ("digital", "listen") and k is not None and k != self.view
 
     def drain(self):
         for sent, err in self.p.take_acks():
@@ -1583,8 +1753,8 @@ class App:
             self.pick_view(VIEWS[ch - ord("1")][0], s)
         elif ch == ord("l"):
             self.toggle_audio(s)
-        elif self.view == "js8":
-            self.js8_key(ch, s)
+        elif self.view == "digital":
+            self.digital_key(ch, s)
         elif self.view == "listen":
             self.listen_key(ch, s)
         elif self.view == "manual":
@@ -1635,7 +1805,8 @@ class App:
             return "%s Can't list profiles: %s" % (self.g.bad, s["profiles_error"])
         if not s["profiles"]:
             return "Loading profiles from rxd" + self.g.ellipsis
-        return "No %s profiles are saved." % ("JS8" if self.view == "js8" else "station")
+        return "No %s profiles are saved." % ("JS8 or WSPR" if self.view == "digital"
+                                              else "station")
 
     def select(self, p, s):
         st = s["status"]
@@ -1647,7 +1818,7 @@ class App:
             self.say("Not switched: can't reach rxd", "err")
         else:
             cur = self.active_profile(s)
-            if st.get("js8") or (cur and cur.get("js8")):
+            if decoder_of(st) == "js8" or (cur and decoder_of(cur) == "js8"):
                 self.confirm = p
             else:
                 self.do_switch(p, s)
@@ -1667,8 +1838,8 @@ class App:
         elif self.audio.on:
             self.audio.stop()
             self.say("%s Stopped listening here" % self.g.stop)
-        elif self.view == "js8":
-            self.say("No audio in JS8: it goes to JS8Call. 2 or 3 to listen.")
+        elif self.decoder(s) == "js8":
+            self.say("No audio here on JS8: it goes to JS8Call. 2 or 3 to listen.")
         else:
             self.audio.start(rate_for(s["status"].get("mode")))
 
@@ -1685,8 +1856,8 @@ class App:
 
     def mute_key(self, s):
         st = s["status"]
-        if self.view == "js8":
-            self.say("Not in JS8: the receiver's audio feeds JS8Call")
+        if self.view == "digital" and self.decoder(s) == "js8":
+            self.say("Not on JS8: the receiver's audio feeds JS8Call")
         elif st.get("volume") is None:
             self.not_yet()
         elif self.mute_prev is not None:
@@ -1720,7 +1891,7 @@ class App:
         else:
             self.send(gain_db=g)
 
-    def js8_key(self, ch, s):
+    def digital_key(self, ch, s):
         if self.picker_key(ch, s):
             return
         if ch in (curses.KEY_PPAGE, curses.KEY_NPAGE):
@@ -1733,8 +1904,28 @@ class App:
                 self.js8_filter, self.js8_scroll = "", 0
         elif ch == ord("M"):
             self.mute_key(s)
+        elif ch == ord("r"):
+            self.report_key(s)
+        elif ch in (ord("["), ord("]")) and self.decoder(s) != "js8":
+            self.local_volume_key(ch)
         else:
             self.other_key(ch)
+
+    def report_key(self, s):
+        """r: WSPR reporting to WSPRnet on / off."""
+        st = s["status"]
+        w = st.get("wspr")
+        if self.decoder(s) != "wspr" or self.mismatch(s):
+            self.say("r turns WSPR reporting on and off; the receiver isn't on WSPR")
+        elif not isinstance(w, dict) or not isinstance(w.get("report"), dict):
+            self.not_yet()
+        elif not wspr_can_report(w):
+            self.say("%s Can't report: %s" % (self.g.stop, w["report"]["reason"]), "err")
+        else:
+            on = not w["report"].get("enabled")
+            self.send(wspr_report=on)
+            self.say("%s %s" % ((self.g.rx, "Reporting spots to WSPRnet") if on else
+                                (self.g.stop, "Stopped reporting to WSPRnet")))
 
     def listen_key(self, ch, s):
         st = s["status"]
@@ -1855,8 +2046,8 @@ class App:
         st = s["status"]
         self.draw_bar(scr, s)
         bottom = h - 2           # message line; help on h - 1
-        if self.view == "js8":
-            self.draw_js8(scr, s, 1, bottom)
+        if self.view == "digital":
+            self.draw_digital(scr, s, 1, bottom)
         elif self.view == "listen":
             self.draw_listen(scr, s, 1, bottom)
         elif self.view == "manual":
@@ -1867,7 +2058,9 @@ class App:
         self.draw_message(scr, s, bottom)
         x = 1
         listening = bool(self.audio and self.audio.on)
-        items = help_items(g, self.view or "manual", st.get("mode"), listening)
+        items = help_items(g, self.view or "manual", st.get("mode"), listening,
+                           None if self.mismatch(s) else self.decoder(s),
+                           wspr_can_report(st.get("wspr")))
         for text, r in help_line(w - 2, g, items):
             scr.put(h - 1, x, text, r)
             x += len(text)
@@ -1993,29 +2186,43 @@ class App:
         if first + n < len(rows):
             scr.put(y1 - 1, w - 2, self.g.keys["down"][:1], "label")
 
-    def draw_js8(self, scr, s, y, bottom):
+    def draw_digital(self, scr, s, y, bottom):
+        """The Digital view: the picker, the receiver and clock, then JS8's decodes
+        or WSPR's cycle, reporting and spots, whichever the receiver decodes."""
         g, w = self.g, scr.w
         st = s["status"]
         mis = self.mismatch(s)
         if mis:
-            self.draw_note(scr, s, y, "a JS8 frequency")
+            self.draw_note(scr, s, y, "a JS8 or WSPR frequency")
             y += 2
         items = self.picker(s)
         if not items:
             scr.put(y, 2, g.text(self.picker_empty(s)), "dim")
             y += 2
         else:
-            rows = []
-            for i, p in enumerate(items):
-                sub = "%s%s %s" % (p.get("description") or "", " " + g.dot if p.get("description")
-                                   else "", short_mhz(p.get("freq") or 0))
-                rows.append(self.picker_row(p, s, i, "%-10s" % p.get("name"), sub.strip()))
-            n = min(len(rows), 4 if not mis else bottom - y - 1)
+            rows, i = [], 0
+            for title, members in group_digital(self.profile_list(s)):
+                rows.append(("group", title))
+                for p in members:
+                    sub = "%s%s %s" % (p.get("description") or "",
+                                       " " + g.dot if p.get("description") else "",
+                                       short_mhz(p.get("freq") or 0))
+                    rows.append(self.picker_row(p, s, i, "%-10s" % p.get("name"), sub.strip()))
+                    i += 1
+            room = bottom - y
+            n = min(len(rows), room - 1 if mis else
+                    min(max(2, room // 3), 8 if room >= 30 else 5))
             self.draw_picker_rows(scr, rows, y, y + n)
             y += n + 1
         if mis:
             return
-        lines = s["js8"]
+        dec = self.decoder(s)
+        wspr = dec == "wspr"
+        lines = s["wspr"] if wspr else s["js8"]
+
+        def put(y, x, text, role=""):
+            if y < bottom:
+                scr.put(y, x, text, role)
         # status: Ham It Up, receiver, level, stations heard
         sym, word, role = badge(s["reachable"], st, self.p.dropping(), g, self.switching)
         x = 1
@@ -2026,7 +2233,7 @@ class App:
                  ("   ", ""), ("%s %s" % (sym, word), role), ("   Signal ", "label")]
         lvl = st.get("level_dbfs")
         parts.append(("%.1f dBFS" % lvl if lvl is not None else "--- dBFS", "value"))
-        heard = stations_heard(lines)
+        heard = stations_heard(lines, "call" if wspr else "from")
         tail = "%d station%s heard" % (heard, "" if heard == 1 else "s")
         used = sum(len(t) for t, _ in parts)
         barw = clamp(w - used - len(tail) - 8, 0, 20)
@@ -2034,21 +2241,27 @@ class App:
             parts += [(" ", ""), (level_bar(lvl, barw, g), "spec")]
         parts += [("   ", ""), (tail, "value")]
         for t, r in parts:
-            scr.put(y, x, t[:max(0, w - 1 - x)], r)
+            put(y, x, t[:max(0, w - 1 - x)], r)
             x += len(t)
         y += 1
-        ctext, crole = clock_words(st.get("clock"), g)
+        ctext, crole = clock_words(st.get("clock"), g, "WSPR" if wspr else "JS8")
         if crole == "bad":
-            scr.put(y, 0, " " * w, "bad")
-            scr.put(y, 1, clip(ctext + ". Check chrony and the GPS.", w - 2, g), "bad")
+            put(y, 0, " " * w, "bad")
+            put(y, 1, clip(ctext + ". Check chrony and the GPS.", w - 2, g), "bad")
         else:
-            scr.put(y, 1, clip(ctext, w - 2, g), crole)
+            put(y, 1, clip(ctext, w - 2, g), crole)
         y += 1
-        if self.audio and self.audio.on:
+        if wspr:
+            y = self.draw_wspr_status(scr, st.get("wspr"), y, bottom)
+        if self.audio and self.audio.on and y < bottom:
             y = self.draw_audio_row(scr, y)
         y += 1 if bottom - y > 8 else 0
-        # decodes
-        shown = js8_filter(lines, self.js8_filter)
+        # decodes or spots
+        if wspr:
+            header, key = WSPR_HEADER, wspr_key
+        else:
+            header, key = JS8_HEADER, js8_key
+        shown = line_filter(lines, self.js8_filter, key)
         area = bottom - y - 1
         self.js8_page = max(area, 1)
         prof = st.get("profile")
@@ -2056,6 +2269,8 @@ class App:
             self.js8_scroll += max(0, len(shown) - self.js8_seen[1])  # stay put as lines arrive
         self.js8_seen = (prof, len(shown))
         self.js8_scroll = clamp(self.js8_scroll, 0, max(0, len(shown) - area))
+        if y >= bottom:
+            return
         info = ""
         if self.js8_filter:
             info = "Filter %s: %d of %d  (Esc clears)" % (
@@ -2063,20 +2278,24 @@ class App:
         if self.js8_scroll:
             info = ("%s %d back, PgDn for newest" % (g.drop, self.js8_scroll)) + \
                 ("   " + info if info else "")
-        scr.put(y, 1, JS8_HEADER, "head")
+        scr.put(y, 1, clip(header, w - 2, g), "head")
         if info:
-            scr.put(y, max(len(JS8_HEADER) + 3, w - len(info) - 2),
-                    clip(info, w - len(JS8_HEADER) - 5, g), "warn" if self.js8_scroll else "label")
+            scr.put(y, max(len(header) + 3, w - len(info) - 2),
+                    clip(info, w - len(header) - 5, g), "warn" if self.js8_scroll else "label")
         y += 1
         if area <= 0:
             return
         if not shown:
-            if s["js8_state"] == "missing":
-                text = "%s This rxd has no JS8 feed." % g.bad
-            elif str(s["js8_state"]).startswith("error"):
-                text = "%s No decodes: %s" % (g.bad, s["js8_state"][7:])
+            state = s["wspr_state"] if wspr else s["js8_state"]
+            what = "spots" if wspr else "decodes"
+            if state == "missing":
+                text = "%s This rxd has no %s feed." % (g.bad, "WSPR" if wspr else "JS8")
+            elif str(state).startswith("error"):
+                text = "%s No %s: %s" % (g.bad, what, state[7:])
             elif self.js8_filter and lines:
                 text = "No lines with %s. / changes the filter, Esc clears it." % self.js8_filter
+            elif wspr:
+                text = "No spots yet. They appear here as each two-minute slot is decoded."
             else:
                 text = "No decodes yet. They appear here as JS8Call hears them."
             scr.put(y, 2, clip(text, w - 3, g), "dim")
@@ -2085,8 +2304,40 @@ class App:
         view = shown[max(0, end - area):end]
         call = st.get("js8_call")
         for i, line in enumerate(view):
+            if wspr:
+                scr.put(y + i, 1, format_wspr(line, st.get("freq"), w - 2, g))
+                continue
             text, mine = format_js8(line, call, w - 2, g)
             scr.put(y + i, 1, text.ljust(w - 2) if mine else text, "mine" if mine else "")
+
+    def draw_wspr_status(self, scr, wsp, y, bottom):
+        """WSPR's cycle, last slot, reporting and any error; returns the next row."""
+        g, w = self.g, scr.w
+
+        def put(text, role):
+            if y < bottom:
+                scr.put(y, 1, clip(g.text(text), w - 2, g), role)
+        if not isinstance(wsp, dict):
+            put("%s Waiting for the WSPR decoder" % g.wait, "dim")
+            return y + 1
+        ctext, crole = wspr_cycle(wsp, g)
+        last = wspr_last(wsp)
+        if len(ctext) + 3 + len(last) <= w - 2:
+            put(ctext, crole)
+            if y < bottom:
+                scr.put(y, 1 + len(ctext) + 3, last, "value")
+            y += 1
+        else:
+            put(ctext, crole)
+            y += 1
+            put(last, "value")
+            y += 1
+        put(*wspr_report_words(wsp, g))
+        y += 1
+        if wsp.get("error"):
+            put("%s %s" % (g.bad, wsp["error"]), "err")
+            y += 1
+        return y
 
     def draw_listen(self, scr, s, y, bottom):
         g, w, h = self.g, scr.w, scr.h
@@ -2309,21 +2560,26 @@ class App:
     def help_lines(self):
         k = self.g.keys
         ud = k["updown"]
-        views = ["1 2 3     JS8, Listen or Manual view"]
-        if self.view == "js8":
+        views = ["1 2 3     Digital, Listen or Manual view"]
+        if self.view == "digital":
             body = [
-                "rxd-tui: JS8",
+                "rxd-tui: Digital (JS8 and WSPR)",
                 "",
-                "%-9s pick a JS8 frequency; Enter switches" % ud,
-                "PgUp PgDn scroll back through the decodes / forward",
+                "%-9s pick a JS8 or WSPR frequency; Enter switches" % ud,
+                "PgUp PgDn scroll back through the decodes or spots",
+                "          / forward",
                 "/         show only lines with a callsign; Esc",
                 "          shows them all again",
-                "l         stop the audio here, if it's playing",
+                "r         WSPR: report spots to WSPRnet / stop",
+                "l         play the audio on this machine / stop",
+                "          (not on JS8: its audio goes to JS8Call)",
+                "[ ]       volume of the audio here",
             ] + views + [
                 "",
-                "%s marks lines to your callsign. JS8 needs the" % self.g.mine,
-                "clock right to about a second, so the clock's",
-                "state is shown under the receiver's.",
+                "%s marks JS8 lines to your callsign. JS8 and WSPR" % self.g.mine,
+                "need the clock right to about a second, so the",
+                "clock's state is shown under the receiver's.",
+                "Times are this machine's local time.",
             ]
         elif self.view == "listen":
             body = [
