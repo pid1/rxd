@@ -67,6 +67,7 @@ UPCONVERT_BELOW_HZ = 30e6
 # Profile sink descriptions -> PipeWire node names (None: default sink).
 SINKS = {"SDR to JS8 (virtual cable)": "SDR_to_JS8", "Built-in Audio": None}
 MODES = ("USB", "LSB", "AM", "FM", "WFM")
+DECODERS = ("js8", "wspr", None)
 DEFAULT_BW = {"USB": 2800.0, "LSB": 2800.0, "AM": 10000.0, "FM": 12500.0,
               "WFM": 150000.0}
 
@@ -131,6 +132,12 @@ class Settings:
             self.bias_t = bool(rtl.get("biasT", False))
             self.sink = SINKS.get(p.get("sink"), p.get("sink"))
             self.js8 = p.get("js8call_dial") is not None
+            # What decodes this profile's audio: JS8Call (any profile with a
+            # js8call_dial), rxd's own WSPR decoder, or nothing.
+            self.decoder = p.get("decoder") or ("js8" if self.js8 else None)
+            if self.decoder not in DECODERS:
+                raise ValueError("decoder must be one of " + ", ".join(d for d in DECODERS if d))
+            self.wspr_report = bool(p.get("wspr_report", True))
             self.version = getattr(self, "version", 0) + 1
 
     def snapshot(self):
@@ -141,7 +148,7 @@ class Settings:
                         upconvert_below=self.upconvert_below,
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
                         volume=self.volume, gain_db=self.gain_db, squelch=self.squelch,
-                        version=self.version)
+                        wspr_report=self.wspr_report, version=self.version)
 
     def upconverter(self):
         """The offset in effect for the current dial (call with the lock held)."""
@@ -152,8 +159,12 @@ class Settings:
         return 0.0
 
     def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
-               volume=None, squelch=Ellipsis):
+               volume=None, squelch=Ellipsis, wspr_report=None):
         with self.lock:
+            if wspr_report is not None:
+                if not isinstance(wspr_report, bool):
+                    raise ValueError("wspr_report must be true or false")
+                self.wspr_report = wspr_report
             if mode is not None:
                 mode = mode.upper()
                 if mode not in MODES:
@@ -603,6 +614,7 @@ class Receiver:
         self.listeners = []          # (rate, queue) per streaming client
         self.listen_lock = threading.Lock()
         self.resamplers = {}         # rate -> FirDecimator from 48 kHz
+        self.wspr = None             # a WsprDecoder, for a WSPR profile
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -691,6 +703,8 @@ class Receiver:
                     continue  # the block in hand was at the old rate
             t0 = time.thread_time()
             audio = self.chain(x, self.offset)
+            if self.wspr is not None:  # before squelch and volume
+                self.wspr.push(audio, snap["dial"])
             audio = self.gate(audio, snap["squelch"])
             pcm = np.clip(audio * snap["volume"] * 32767, -32768, 32767).astype("<i2")
             self.sink.write(pcm)
@@ -799,6 +813,8 @@ class Receiver:
                 "dropped": self.dropped, "error": self.error,
                 "running": not self.stop.is_set(), "gains": self.src.gains(),
                 "js8": self.s.js8, "js8_call": js8_mycall() if self.s.js8 else None,
+                "decoder": self.s.decoder,
+                "wspr": self.wspr.status() if self.wspr is not None else None,
                 "clock": clock_status(),
                 "listeners": len(self.listeners)}
 
@@ -1084,6 +1100,371 @@ class Js8Feed:
             return {"seq": self.seq, "lines": out}
 
 
+# --------------------------------------------------------------------- WSPR
+
+# rxd decodes WSPR itself rather than through WSJT-X: it records each
+# two-minute slot from its own audio, before the volume and squelch, and runs
+# wsprd (WSJT-X's command-line decoder, from the wsjtx package) on it. Spots
+# go to the feed at /api/wspr and, when reporting is on, to WSPRnet.
+WSPRD = os.environ.get("RXD_WSPRD") or shutil.which("wsprd") or "/usr/bin/wsprd"
+WSPR_DIR = os.path.expanduser(os.environ.get("RXD_WSPR_DIR", "~/.local/share/rxd/wspr"))
+# WSJT-X's own upload endpoint (Network/wsprnet.cpp): one form POST per spot.
+WSPRNET_URL = os.environ.get("RXD_WSPRNET", "http://wsprnet.org/post/")
+RXD_VERSION = "rxd-0.2"
+GRID = re.compile(r"^[A-Ra-r]{2}[0-9]{2}(?:[A-Xa-x]{2})?$")
+
+
+def grid_latlon(grid):
+    """A Maidenhead locator's centre as (lat, lon), or None."""
+    if not grid or not GRID.match(grid):
+        return None
+    g = grid.upper()
+    lon = (ord(g[0]) - 65) * 20 - 180 + int(g[2]) * 2
+    lat = (ord(g[1]) - 65) * 10 - 90 + int(g[3])
+    if len(g) >= 6:
+        lon += (ord(g[4]) - 65) * (2 / 24) + 1 / 24
+        lat += (ord(g[5]) - 65) * (1 / 24) + 1 / 48
+    else:
+        lon, lat = lon + 1, lat + 0.5
+    return lat, lon
+
+
+def grid_km(a, b):
+    pa, pb = grid_latlon(a), grid_latlon(b)
+    if not pa or not pb:
+        return None
+    la1, lo1, la2, lo2 = map(np.radians, (pa[0], pa[1], pb[0], pb[1]))
+    h = np.sin((la2 - la1) / 2) ** 2 + np.cos(la1) * np.cos(la2) * np.sin((lo2 - lo1) / 2) ** 2
+    return int(round(float(2 * 6371 * np.arcsin(np.sqrt(h)))))
+
+
+def station_id():
+    """(call, grid) to report as: $RXD_CALL/$RXD_GRID, else JS8Call's MyCall/MyGrid."""
+    call = os.environ.get("RXD_CALL") or js8_mycall()
+    grid = os.environ.get("RXD_GRID")
+    if not grid:
+        cp = configparser.ConfigParser(interpolation=None, strict=False, delimiters=("=",),
+                                       comment_prefixes=())
+        cp.optionxform = str
+        try:
+            cp.read(JS8_INI, encoding="utf-8")
+        except (OSError, configparser.Error):
+            pass
+        for sec in ("Configuration", "Common"):
+            if cp.has_option(sec, "MyGrid"):
+                grid = cp.get(sec, "MyGrid").strip()
+                break
+    call = call.strip().upper() if call else None
+    if grid and GRID.match(grid.strip()):
+        g = grid.strip()
+        grid = g[:4].upper() + g[4:].lower()
+    else:
+        grid = None
+    return call or None, grid
+
+
+# wspr_spots.txt, which wsprd rewrites each run: date time sync snr dt freq
+# message drift cycles jitter. WSJT-X parses it with this same expression.
+SPOT_LINE = re.compile(r"^(\d{6})\s+(\d{4})\s+(-?\d+)\s+([+-]?\d+)\s+([+-]?\d+\.\d+)\s+"
+                       r"(\d+\.\d+)\s+(\S.*\S)\s+([+-]?\d+)\s+([+-]?\d+)\s+([+-]?\d+)\s*$")
+# ALL_WSPR.TXT, wsprd's running log: date time snr dt freq message drift ...
+ALL_LINE = re.compile(r"^(\d{6})\s+(\d{4})\s+([+-]?\d+)\s+([+-]?\d+\.\d+)\s+(\d+\.\d+)\s+"
+                      r"(\S.*?\S)\s+([+-]?\d+)\s+[+-]?\d+\.\d+\s")
+
+
+def parse_wspr_message(msg):
+    """'K1ABC FN42 37', 'PJ4/K1ABC 37' or '<PJ4/K1ABC> FK52UD 37' -> (call, grid, dbm)."""
+    w = msg.split()
+    try:
+        dbm = int(w[-1])
+    except (ValueError, IndexError):
+        return None
+    if len(w) == 3 and GRID.match(w[1]):
+        call, grid = w[0].strip("<>"), w[1]
+    elif len(w) == 2:
+        call, grid = w[0].strip("<>"), None
+    else:
+        return None
+    if not call or call == "...":
+        return None
+    return call, grid, dbm
+
+
+def spot_from(date, hhmm, snr, dt, mhz, msg, drift, mygrid=None):
+    parsed = parse_wspr_message(msg)
+    if not parsed:
+        return None
+    call, grid, dbm = parsed
+    iso = "20%s-%s-%sT%s:%s:00Z" % (date[:2], date[2:4], date[4:6], hhmm[:2], hhmm[2:])
+    return {"time": iso, "snr": int(snr), "dt": float(dt), "freq": round(float(mhz) * 1e6),
+            "drift": int(drift), "call": call, "grid": grid, "dbm": dbm,
+            "km": grid_km(mygrid, grid) if grid else None, "text": msg.strip(),
+            "date": date, "hhmm": hhmm, "mhz": mhz}
+
+
+class WsprNet:
+    """Uploads spots to WSPRnet the way WSJT-X does: one form POST each, and a
+    'wsprstat' heartbeat for a slot with none, so the station shows as on air.
+
+    A spot that can't be sent (no internet) waits and goes with the next slot;
+    one the server answers without "spot(s) added" is dropped, not retried.
+    """
+
+    KEEP = 2000  # about a day of a busy band, offline
+
+    def __init__(self, call, grid, url=None, post=None):
+        self.call, self.grid = call, grid
+        self.url = url or WSPRNET_URL
+        self.post = post or self._post
+        self.pending = collections.deque(maxlen=self.KEEP)
+        self.sent = 0
+        self.error = None
+        self.online = None   # None until the first upload says either way
+
+    def _post(self, fields):
+        import urllib.request
+        body = urllib.parse.urlencode(fields).encode()
+        req = urllib.request.Request(self.url, data=body, headers={
+            "Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            return r.status, r.read(4096).decode("utf-8", "replace")
+
+    def queue_slot(self, spots, dial_hz):
+        rqrg = "%.6f" % (dial_hz / 1e6)
+        common = {"version": RXD_VERSION, "rcall": self.call, "rgrid": self.grid,
+                  "rqrg": rqrg, "mode": "2"}
+        n = 0
+        for s in spots:
+            # WSJT-X's guard against reporting a spot off the band it's on.
+            if abs(float(s["mhz"]) - dial_hz / 1e6) >= 0.01:
+                continue
+            f = {"function": "wspr", "date": s["date"], "time": s["hhmm"],
+                 "sig": str(s["snr"]), "dt": "%.1f" % s["dt"], "drift": str(s["drift"]),
+                 "tqrg": s["mhz"], "tcall": s["call"], "tgrid": s["grid"] or "",
+                 "dbm": str(s["dbm"])}
+            f.update(common)
+            self.pending.append(f)
+            n += 1
+        return n
+
+    def flush(self, dial_hz, had_spots):
+        """Send what's waiting (and a heartbeat for an empty slot)."""
+        if not had_spots:
+            beat = {"function": "wsprstat", "rcall": self.call, "rgrid": self.grid,
+                    "rqrg": "%.6f" % (dial_hz / 1e6), "tpct": "0",
+                    "tqrg": "%.6f" % (dial_hz / 1e6), "dbm": "0",
+                    "version": RXD_VERSION, "mode": "2"}
+            try:
+                self.post(beat)
+                self.online, self.error = True, None
+            except OSError as e:
+                self.online, self.error = False, "can't reach WSPRnet: %s" % e
+        while self.pending:
+            f = self.pending[0]
+            try:
+                code, text = self.post(f)
+            except OSError as e:
+                self.online, self.error = False, "can't reach WSPRnet: %s" % e
+                return
+            self.online = True
+            self.pending.popleft()
+            if code == 200 and "spot(s) added" in text:
+                self.sent += 1
+                self.error = None
+            else:
+                self.error = "WSPRnet refused a spot: %s" % (text.strip()[:120] or code)
+            time.sleep(0.2)  # WSJT-X's pace
+
+    def status(self):
+        return {"enabled": True, "call": self.call, "grid": self.grid, "sent": self.sent,
+                "pending": len(self.pending), "online": self.online, "error": self.error}
+
+
+class WsprDecoder:
+    """Two-minute slots of the receiver's audio -> wsprd -> spots.
+
+    A slot starts on an even UTC minute and a transmission 1 s into it; wsprd
+    reads 114 s at 12 kHz. A slot is joined at most 2 s late (padded with
+    silence) and dropped if the dial moves during it.
+    """
+
+    RATE = 12000
+    SLOT = 120
+    SAMPLES = 114 * 12000
+    LATE = 2.0
+    KEEP = 1000
+
+    def __init__(self, settings, datadir=None, wsprd=None, reporter=None, clock=time.time):
+        self.s = settings
+        self.dir = datadir or WSPR_DIR
+        os.makedirs(self.dir, exist_ok=True)
+        self.wsprd = wsprd or WSPRD
+        self.reporter = reporter
+        self.clock = clock
+        self.resample = FirDecimator(sps.firwin(129, 5000, fs=AUDIO_RATE).astype(np.float32),
+                                     AUDIO_RATE // self.RATE)
+        self.chunks, self.n, self.slot, self.dial = [], 0, None, None
+        self.jobs = queue.Queue(maxsize=2)
+        self.lock = threading.Lock()
+        self.lines = collections.deque(maxlen=self.KEEP)
+        self.seq = 0
+        self.decoding = None   # the slot being decoded
+        self.last = None       # {"slot", "spots"} for the last decoded slot
+        self.error = None
+        self.call, self.grid = station_id()
+        self.load_history()
+        threading.Thread(target=self.worker, name="wspr", daemon=True).start()
+
+    def iso(self, t):
+        return time.strftime("%Y-%m-%dT%H:%M:00Z", time.gmtime(t))
+
+    # -------------------------------------------------------- recording
+
+    def push(self, audio, dial, now=None):
+        """A block of 48 kHz audio that ended at now (Unix time)."""
+        a = self.resample(audio)
+        now = self.clock() if now is None else now
+        t0 = now - len(a) / self.RATE
+        if self.slot is not None and (dial != self.dial or t0 > self.slot + self.SLOT):
+            self.slot = None  # retuned, or a gap (the dongle stalled)
+        if self.slot is None:
+            slot = (t0 // self.SLOT) * self.SLOT
+            late = t0 - slot
+            if late > self.LATE:
+                return
+            self.slot, self.dial = slot, dial
+            pad = int(round(late * self.RATE))
+            self.chunks, self.n = [np.zeros(pad, np.float32)], pad
+        self.chunks.append(a)
+        self.n += len(a)
+        if self.n >= self.SAMPLES:
+            x = np.concatenate(self.chunks)[: self.SAMPLES]
+            try:
+                self.jobs.put_nowait((self.slot, self.dial, x))
+            except queue.Full:
+                self.error = "decoding is falling behind; a slot was skipped"
+                log(self.error)
+            self.slot, self.chunks, self.n = None, [], 0
+
+    # --------------------------------------------------------- decoding
+
+    def worker(self):
+        while True:
+            slot, dial, x = self.jobs.get()
+            self.decoding = slot
+            try:
+                spots = self.decode(slot, dial, x)
+                self.error = None
+            except (OSError, subprocess.SubprocessError, RuntimeError) as e:
+                self.error = "wsprd failed: %s" % e
+                log(self.error)
+                spots = None
+            finally:
+                self.decoding = None
+            if spots is None:
+                continue
+            with self.lock:
+                for sp in spots:
+                    self.seq += 1
+                    self.lines.append(dict(sp, seq=self.seq))
+                self.last = {"slot": self.iso(slot), "spots": len(spots)}
+            if self.reporter and self.s.snapshot().get("wspr_report"):
+                self.reporter.queue_slot(spots, dial)
+                self.reporter.flush(dial, bool(spots))
+
+    def decode(self, slot, dial, x):
+        import wave
+        name = time.strftime("%y%m%d_%H%M", time.gmtime(slot))
+        wav = os.path.join(self.dir, name + ".wav")
+        # The audio is AGC'd to about 0.5 peak; wsprd wants 16-bit PCM.
+        pcm = np.clip(x * 16000, -32768, 32767).astype("<i2")
+        with wave.open(wav, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(self.RATE)
+            w.writeframes(pcm.tobytes())
+        spots_file = os.path.join(self.dir, "wspr_spots.txt")
+        try:
+            os.remove(spots_file)
+        except OSError:
+            pass
+        argv = [self.wsprd, "-a", self.dir, "-f", "%.6f" % (dial / 1e6), wav]
+        if shutil.which("nice"):
+            argv = ["nice", "-n", "10"] + argv
+        try:
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=110,
+                                 cwd=self.dir)
+        finally:
+            try:
+                os.remove(wav)
+            except OSError:
+                pass
+        if "<DecodeFinished>" not in out.stdout:
+            raise RuntimeError((out.stderr or out.stdout).strip()[-200:] or
+                               "exit %d" % out.returncode)
+        spots = []
+        try:
+            with open(spots_file, encoding="utf-8", errors="replace") as fh:
+                for row in fh:
+                    m = SPOT_LINE.match(row.rstrip("\n"))
+                    if m:
+                        sp = spot_from(m[1], m[2], m[4], m[5], m[6], m[7], m[8], self.grid)
+                        if sp:
+                            spots.append(sp)
+        except FileNotFoundError:
+            pass  # no spots this slot
+        return spots
+
+    def load_history(self):
+        """The tail of ALL_WSPR.TXT, so a restart doesn't empty the feed."""
+        path = os.path.join(self.dir, "ALL_WSPR.TXT")
+        try:
+            with open(path, "rb") as fh:
+                fh.seek(0, 2)
+                size = fh.tell()
+                fh.seek(max(size - 131072, 0))
+                rows = fh.read().decode("utf-8", "replace").split("\n")
+        except OSError:
+            return
+        if size > 131072:
+            rows = rows[1:]
+        for row in rows:
+            m = ALL_LINE.match(row)
+            if m:
+                sp = spot_from(m[1], m[2], m[3], m[4], m[5], m[6], m[7], self.grid)
+                if sp:
+                    self.seq += 1
+                    self.lines.append(dict(sp, seq=self.seq))
+
+    # ----------------------------------------------------------- status
+
+    def since(self, after):
+        with self.lock:
+            out = list(self.lines)[-200:] if after <= 0 else \
+                [x for x in self.lines if x["seq"] > after]
+            return {"seq": self.seq, "lines": out}
+
+    def status(self):
+        now = self.clock()
+        if self.decoding is not None:
+            state, slot = "decoding", self.decoding
+        elif self.slot is not None:
+            state, slot = "recording", self.slot
+        else:
+            state, slot = "waiting", (now // self.SLOT + 1) * self.SLOT
+        snap = self.s.snapshot()
+        if self.reporter is None:
+            report = {"enabled": False, "call": self.call, "grid": self.grid,
+                      "reason": "no callsign and grid: set MyCall and MyGrid in JS8Call, "
+                                "or RXD_CALL and RXD_GRID in /etc/rx/rxd.env"}
+        else:
+            report = self.reporter.status()
+            report["enabled"] = bool(snap.get("wspr_report"))
+        return {"state": state, "slot": self.iso(slot),
+                "decoding": self.iso(self.decoding) if self.decoding is not None else None,
+                "last": self.last, "error": self.error, "report": report}
+
+
 # The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
 # a checkout. Read on every request so a reinstall needs no restart.
 WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
@@ -1131,6 +1512,16 @@ class Api(BaseHTTPRequestHandler):
             except ValueError:
                 return self.send(400, {"error": "after must be a number"})
             return self.send(200, self.server.js8.since(after))
+        if path == "/api/wspr":
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                after = int(q.get("after", ["0"])[0])
+            except ValueError:
+                return self.send(400, {"error": "after must be a number"})
+            wspr = self.server.rx.wspr
+            if wspr is None:
+                return self.send(200, {"seq": 0, "lines": [], "decoder": self.server.rx.s.decoder})
+            return self.send(200, wspr.since(after))
         if path == "/api/audio":
             return self.audio()
         if path in ("/", "/index.html"):
@@ -1192,7 +1583,8 @@ class Api(BaseHTTPRequestHandler):
             doc = json.loads(self.rfile.read(n) or b"{}")
             if not isinstance(doc, dict):
                 raise ValueError("body must be a JSON object")
-            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume", "squelch"}
+            unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume", "squelch",
+                                  "wspr_report"}
             if unknown:
                 raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
             self.server.rx.s.update(**doc)
@@ -1223,6 +1615,14 @@ class Api(BaseHTTPRequestHandler):
 
 
 # ---------------------------------------------------------------------- main
+
+def make_wspr(settings):
+    if not os.path.isfile(WSPRD):
+        log("no wsprd at %s (sudo apt install wsjtx): WSPR won't decode" % WSPRD)
+    call, grid = station_id()
+    reporter = WsprNet(call, grid) if call and grid else None
+    return WsprDecoder(settings, reporter=reporter)
+
 
 def hostport(text, default_port):
     host, _, port = text.rpartition(":")
@@ -1273,6 +1673,8 @@ def main(argv=None):
         sys.exit("rxd: --audio must be pulse, pulse:SINK, stdout or null")
 
     rx = Receiver(settings, src, sink)
+    if settings.decoder == "wspr":
+        rx.wspr = make_wspr(settings)
     rx.start()
     servers = []
     if a.rigctl != "off":
