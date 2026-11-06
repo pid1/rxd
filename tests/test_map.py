@@ -22,6 +22,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import rxd  # noqa: E402
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+
+
+def setUpModule():
+    # Never the machine's own callsign database: on a device that has one,
+    # it would place the stations these tests expect to stay unplaced.
+    global _CALLSIGNS_DB
+    _CALLSIGNS_DB = rxd.CALLSIGNS_DB
+    rxd.CALLSIGNS_DB = os.path.join(tempfile.gettempdir(), "rxd-test-no-callsigns.sqlite")
+
+
+def tearDownModule():
+    rxd.CALLSIGNS_DB = _CALLSIGNS_DB
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 32
 NOW = 1793967600.0  # 2026-11-06 12:20:00 UTC
 
