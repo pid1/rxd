@@ -94,3 +94,15 @@ Hamlib 4.5.4 on the device talks to rxd without errors.
 - **I/Q correction:** none yet. A strong signal mirrored around the tuner
   frequency could leak in at roughly -30 to -40 dB.
 - **Signal strength:** `l STRENGTH` is uncalibrated: dBFS + 73.
+
+## Ideas for later (Win, 2026-11-06)
+
+- **Band conditions and automatic band choice.**
+  - With internet: fetch current conditions (perhaps from a small page of our own, possibly inside Rally) and default the digital modes to the bands likely to hear the most for the time of day. The UI can override it.
+  - Without internet: auto-scan the candidate frequencies, score each from a slot or two of decodes and the noise floor, and learn what works best at each hour.
+  - Catch: the antenna is cut for 40 m today.
+- **A map in the web UI** of JS8 and WSPR stations, plotted at the grid-square centre, using the map tiles already downloaded for the mesh clients so it works offline.
+- **Auto-adjusting audio quality:**
+  - automatic RF gain on the dongle's gain steps, with a manual override;
+  - per-mode filtering, AGC and noise handling;
+  - level normalisation for listeners.
