@@ -32,6 +32,7 @@ import ctypes.util
 import json
 import os
 import queue
+import re
 import signal
 import socket
 import shutil
@@ -560,7 +561,7 @@ class Chain:
             y = self.chan(y)
         if len(y):
             p = float(np.mean(np.abs(y) ** 2))
-            self.level_db = 10 * np.log10(p + 1e-12)
+            self.level_db = float(10 * np.log10(p + 1e-12))
         if self.mode in ("USB", "LSB"):
             audio = self.agc(y.real.astype(np.float32))
         elif self.mode == "AM":
@@ -738,7 +739,8 @@ class Receiver:
             self.squelch_open = True
             return audio
         lv = self.chain.level_db
-        self.squelch_open = lv >= (level - 3 if self.squelch_open else level)
+        # bool(): lv is numpy's, and a numpy bool_ in status breaks json.dumps.
+        self.squelch_open = bool(lv >= (level - 3 if self.squelch_open else level))
         return audio if self.squelch_open else np.zeros_like(audio)
 
     # ------------------------------------------------ audio to the clients
@@ -797,6 +799,7 @@ class Receiver:
                 "dropped": self.dropped, "error": self.error,
                 "running": not self.stop.is_set(), "gains": self.src.gains(),
                 "js8": self.s.js8, "js8_call": js8_mycall() if self.s.js8 else None,
+                "clock": clock_status(),
                 "listeners": len(self.listeners)}
 
 
@@ -935,6 +938,54 @@ def spawn_switch(name):
     subprocess.Popen(argv, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                      stderr=subprocess.DEVNULL, start_new_session=True)
     _profiles["doc"] = None
+
+
+# ------------------------------------------------------------------ clock
+
+_clock = {"at": 0.0, "doc": None}
+
+
+def parse_tracking(text):
+    """chronyc -n tracking -> {"synced", "source", "offset_s"}.
+
+    JS8's 15 s slots tolerate about 2 s of error and fail silently past it,
+    so "synced" means chrony is locked (leap status Normal) and within 1 s.
+    """
+    def field(name):
+        m = re.search(r"^%s\s*:\s*(.*)$" % re.escape(name), text, re.M)
+        return m.group(1).strip() if m else None
+    ref, leap, sys_t = field("Reference ID"), field("Leap status"), field("System time")
+    offset = None
+    if sys_t:
+        m = re.match(r"([0-9.]+) seconds (fast|slow)", sys_t)
+        if m:
+            offset = float(m.group(1)) * (1 if m.group(2) == "fast" else -1)
+    name = re.search(r"\((.*)\)", ref or "")
+    name = name.group(1) if name else None
+    if name in ("PPS", "NMEA", "GPS", "GPS1", "SHM0", "SOCK"):
+        source = "GPS"
+    elif name and name not in ("", "0.0.0.0"):
+        source = "network"
+    else:
+        source = None
+    synced = leap == "Normal" and offset is not None and abs(offset) < 1.0
+    return {"synced": synced, "source": source if synced or source else None,
+            "offset_s": offset}
+
+
+def clock_status():
+    """The system clock as JS8 sees it; synced None when chrony can't say."""
+    if _clock["doc"] is not None and time.monotonic() - _clock["at"] < 10:
+        return _clock["doc"]
+    try:
+        out = subprocess.run(["chronyc", "-n", "tracking"], capture_output=True,
+                             text=True, timeout=5)
+        doc = parse_tracking(out.stdout) if out.returncode == 0 else \
+            {"synced": False, "source": None, "offset_s": None}
+    except (OSError, subprocess.SubprocessError):
+        doc = {"synced": None, "source": None, "offset_s": None}
+    _clock.update(at=time.monotonic(), doc=doc)
+    return doc
 
 
 # ----------------------------------------------------------- JS8Call's log
@@ -1100,6 +1151,9 @@ class Api(BaseHTTPRequestHandler):
         if rate not in rx.STREAM_RATES:
             return self.send(400, {"error": "rate must be one of %s" % (rx.STREAM_RATES,)})
         chunks = rx.listen(rate)
+        # A client that stops reading without closing (a phone off the Wi-Fi)
+        # would block the write forever and hold a listener slot: give up.
+        self.connection.settimeout(10)
         if chunks is None:
             return self.send(429, {"error": "%d clients are already listening" % rx.MAX_LISTENERS})
         try:

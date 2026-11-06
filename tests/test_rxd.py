@@ -237,6 +237,30 @@ JS8_LINES = [
 ]
 
 
+TRACKING_GPS = """Reference ID    : 50505300 (PPS)
+Stratum         : 1
+System time     : 0.000000017 seconds slow of NTP time
+Leap status     : Normal
+"""
+
+
+class Clock(unittest.TestCase):
+    def test_gps_locked(self):
+        c = rxd.parse_tracking(TRACKING_GPS)
+        self.assertEqual((c["synced"], c["source"]), (True, "GPS"))
+        self.assertAlmostEqual(c["offset_s"], -1.7e-8)
+
+    def test_network_and_failures(self):
+        net = TRACKING_GPS.replace("50505300 (PPS)", "C0A80001 (192.168.0.1)")
+        self.assertEqual(rxd.parse_tracking(net)["source"], "network")
+        off = TRACKING_GPS.replace("0.000000017 seconds slow", "2.5 seconds fast")
+        self.assertEqual((rxd.parse_tracking(off)["synced"], rxd.parse_tracking(off)["offset_s"]),
+                         (False, 2.5))
+        lost = TRACKING_GPS.replace("Normal", "Not synchronised").replace("50505300 (PPS)", "00000000 ()")
+        self.assertEqual(rxd.parse_tracking(lost), {"synced": False, "source": None, "offset_s": -1.7e-8})
+        self.assertEqual(rxd.parse_tracking("")["synced"], False)
+
+
 class Js8(unittest.TestCase):
     def test_parse(self):
         line = rxd.Js8Feed.parse(JS8_LINES[0])
@@ -406,6 +430,7 @@ class Clients(Control):
         self.assertEqual(self.api("GET", "/api/js8?after=x")[0], 400)
         st = self.api("GET", "/api/status")[1]
         self.assertTrue(st["js8"])
+        self.assertEqual(set(st["clock"]), {"synced", "source", "offset_s"})
 
     def fake_radio(self, d):
         path = os.path.join(d, "radio")
@@ -442,20 +467,26 @@ class Clients(Control):
             rxd._profiles["doc"] = None
 
     def test_audio_stream(self):
-        url = "http://%s:%d/api/audio?rate=12000" % self.http.server_address
-        with urllib.request.urlopen(url, timeout=5) as r:
-            self.assertEqual(r.headers["X-Audio-Rate"], "12000")
-            data = b""
-            while len(data) < 12000 * 2 * 2:  # two seconds
-                data += r.read(4096)
+        s = socket.create_connection(self.http.server_address, timeout=5)
+        s.sendall(b"GET /api/audio?rate=12000 HTTP/1.0\r\n\r\n")
+        raw = b""
+        while b"\r\n\r\n" not in raw:
+            raw += s.recv(4096)
+        head, data = raw.split(b"\r\n\r\n", 1)
+        self.assertIn(b"X-Audio-Rate: 12000", head)
+        while len(data) < 12000 * 2 * 2:  # two seconds
+            data += s.recv(4096)
         self.assertEqual(self.rx.status()["listeners"], 1)
+        s.close()  # really hang up
         a = np.frombuffer(data[: len(data) // 2 * 2], "<i2").astype(float)[6000:]
         spec = np.abs(np.fft.rfft(a))
         peak = np.fft.rfftfreq(len(a), 1 / 12000)[spec.argmax()]
         self.assertAlmostEqual(peak, 1500, delta=10)  # the synth's tone, at 12 kHz
-        deadline = time.time() + 3
+        # The server only learns the socket closed when a later write fails,
+        # which can take a few chunks once the kernel buffer has drained.
+        deadline = time.time() + 10
         while self.rx.status()["listeners"] and time.time() < deadline:
-            time.sleep(0.05)  # it notices the closed socket on its next write
+            time.sleep(0.05)
         self.assertEqual(self.rx.status()["listeners"], 0)
         for bad in ("rate=44100", "rate=x"):
             self.assertEqual(self.page("/api/audio?" + bad)[0], 400)
@@ -546,6 +577,9 @@ class Profiles(unittest.TestCase):
             rx.chain.level_db = level
             self.assertEqual(rx.gate(a, -50.0).max(), want, "at %d dBFS" % level)
         self.assertEqual(rx.gate(a, None).max(), 1)
+        rx.chain.level_db = np.float64(-40.0)  # what the chain really produces
+        rx.gate(a, -50.0)
+        json.dumps(rx.status())  # status must stay plain JSON with squelch on
 
     def test_unsupported_mode(self):
         with self.assertRaises(ValueError):
