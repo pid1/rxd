@@ -203,7 +203,7 @@ def zip_lines(path, member):
 class CensusGeocoder:
     """The Census Bureau's batch address geocoder: up to 10,000 rows a request."""
 
-    def __init__(self, url=GEOCODER_URL, timeout=900, tries=3, pause=2.0):
+    def __init__(self, url=GEOCODER_URL, timeout=300, tries=4, pause=5.0):
         self.url, self.timeout, self.tries, self.pause = url, timeout, tries, pause
 
     def __call__(self, rows):
