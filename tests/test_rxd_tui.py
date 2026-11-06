@@ -86,6 +86,10 @@ def state_for(name):
             "sample_rate": 240000, "dsp_cpu": 0.25, "blocks": 100, "dropped": 0,
             "error": None, "running": True, "gains": list(GAINS),
             "station": {"call": "KA1PID", "grid": "EM13lc", "file": "/etc/rxd/station.json",
+                        "grid_source": "gps", "default_grid": "EM13lc", "saved_grid": "EM13lc",
+                        "grid_reason": "EM13lc from GPS (10 satellites)",
+                        "gps": {"state": "fix", "reason": "GPS fix", "satellites": 10,
+                                "accuracy_m": 3, "source": "ubx", "gpsd": "127.0.0.1:2947"},
                         "upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
                                         "switch": True}, "problems": []},
             "api_version": 1, "version": "0.3.0",
@@ -902,6 +906,22 @@ class Views(unittest.TestCase):
         for c in ({"synced": True, "source": "GPS"}, {"synced": False}, None):
             self.assertTrue(t.clock_words(c, A)[0].isascii())
 
+    def test_station_words(self):
+        st = {"station": {"grid_reason": "EM13lc from GPS (10 satellites)", "grid_source": "gps",
+                          "gps": {"state": "fix"}}}
+        self.assertEqual(t.station_words(st, U), ("● Station EM13lc from GPS (10 satellites)", "ok"))
+        st["station"].update(grid_source="station", grid_reason="EM13lc from station config: "
+                             "GPS has no fix", gps={"state": "no fix"})
+        self.assertEqual(t.station_words(st, U),
+                         ("· Station EM13lc from station config: GPS has no fix", "label"))
+        st["station"]["gps"]["state"] = "rejected"
+        self.assertEqual(t.station_words(st, A)[1], "warn")
+        self.assertTrue(t.station_words(st, A)[0].startswith("! Station"))
+        st["station"].update(grid_source=None, grid_reason="No grid: GPS is off, and no grid")
+        self.assertEqual(t.station_words(st, U)[1], "bad")
+        self.assertIsNone(t.station_words({"station": {"call": "KA1PID"}}, U))  # an older rxd
+        self.assertIsNone(t.station_words(None, U))
+
     def test_flip_needed(self):
         fm = PROFILES[2]
         hiu = {"station": {"upconverter": {"name": "Ham It Up", "hz": 125e6, "below_hz": 30e6,
@@ -1271,6 +1291,7 @@ class Drawing(unittest.TestCase):
     def test_js8_clock_ok_and_unknown(self):
         app = app_on("js8")
         self.assertIn("● Clock synced (GPS)", frame(app).text())
+        self.assertIn("● Station EM13lc from GPS (10 satellites)", frame(app).text())
         app.p.status["clock"] = {"synced": None}
         self.assertIn("? Clock unknown", frame(app).text())
 
