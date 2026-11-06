@@ -153,8 +153,13 @@ class FakeRxd:
     /api/v1/ nor api_version; api=2 says it speaks version 2."""
 
     def __init__(self, profile="40m", spectrum=True, profiles=True, gains=GAINS, drop=2.0,
-                 port=0, api=1):
+                 port=0, api=1, switch=None):
         self.state = state_for(profile)
+        # switch: the Ham It Up's position, as an rxd 0.5.0 knows it (None: older)
+        self.switch = switch
+        self.positions = []      # POST /api/switch positions
+        if switch:
+            with_switch(self.state, switch)
         self.api = api
         if api == 0:
             self.state.pop("api_version")
@@ -256,13 +261,27 @@ class FakeRxd:
                 path, _ = self.route()
                 if path is None:
                     return self.send(404, {"error": "not found"})
+                if path == "/api/switch" and fake.switch:
+                    with fake.lock:
+                        fake.switch = doc["position"]
+                        fake.positions.append(doc["position"])
+                        with_switch(fake.state, fake.switch)
+                        return self.send(200, dict(fake.state))
                 if path == "/api/profile":
                     if not fake.has_profiles:
                         return self.send(404, {"error": "not found"})
                     name = doc.get("name")
                     if name not in [p["name"] for p in PROFILES]:
                         return self.send(400, {"error": "no profile '%s'" % name})
+                    p = next(x for x in PROFILES if x["name"] == name)
+                    side = "upconvert" if p["upconvert"] else "bypass"
                     with fake.lock:
+                        if fake.switch and side != fake.switch:
+                            if doc.get("switch") != side:
+                                return self.send(409, {"error": "%s needs the Ham It Up on %s"
+                                                                % (name, side.upper())})
+                            fake.switch = side
+                            fake.positions.append(side)
                         fake.switches.append(name)
                     threading.Thread(target=fake.switch_to, args=(name,), daemon=True).start()
                     return self.send(202, {"switching": name})
@@ -311,6 +330,8 @@ class FakeRxd:
             gains = self.state["gains"]
             self.state = state_for(name)
             self.state["gains"] = gains
+            if self.switch:
+                with_switch(self.state, self.switch)
             self.server = self.serve(self.port)
 
     def make_spectrum(self):
@@ -1175,12 +1196,15 @@ class FakePoller:
     def take_acks(self):
         return []
 
-    def switch(self, name):
-        self.switched.append(name)
+    def switch(self, name, confirm=None):
+        self.switched.append(name if confirm is None else (name, confirm))
 
     def take_switch_acks(self):
         acks, self.switch_acks = self.switch_acks, []
         return acks
+
+    def confirm_switch(self, position):
+        self.confirmed = getattr(self, "confirmed", []) + [position]
 
     def reload_profiles(self):
         self.reloads += 1
@@ -1892,6 +1916,161 @@ class AgainstFakeRxd(unittest.TestCase):
 
 
 @unittest.skipUnless(hasattr(pty, "openpty"), "needs a pty")
+def with_switch(st, position, at="2026-11-06T14:02:00Z"):
+    """st as an rxd that knows the Ham It Up's switch (0.5.0): confirmed at
+    14:02 UTC, or unknown."""
+    needs = "upconvert" if st["upconverter_hz"] > 0 else "bypass"
+    st["upconverter"] = {"name": "Ham It Up", "switch": True, "needs": needs,
+                         "position": position, "ok": position == needs, "why": None,
+                         "confirmed_at": None if position == "unknown" else at}
+    return st
+
+
+class UpconverterSwitch(unittest.TestCase):
+    """The Ham It Up's switch: asked at start-up, confirmed before a profile on
+    the other side, and read out in words with a symbol."""
+
+    def app(self, profile, position, **kw):
+        app = app_on(profile, **kw)
+        with_switch(app.p.status, position)
+        return app
+
+    def test_words(self):
+        st = with_switch(state_for("40m"), "upconvert")
+        self.assertEqual(t.switch_words(st, U), ("✓ UPCONVERT (confirmed 14:02)", "upconv"))
+        self.assertEqual(t.switch_words(st, A)[0], "OK UPCONVERT (confirmed 14:02)")
+        st = with_switch(state_for("noaa"), "upconvert")
+        self.assertEqual(t.switch_words(st, U),
+                         ("▲ UPCONVERT (confirmed 14:02): this needs BYPASS", "warn"))
+        st = with_switch(state_for("noaa"), "unknown")
+        self.assertEqual(t.switch_words(st, U)[1], "warn")
+        self.assertTrue(t.switch_words(st, U)[0].startswith("? not confirmed"))
+        self.assertIsNone(t.switch_state(state_for("40m")))   # an older rxd
+
+    def test_local_24_hour(self):
+        st = with_switch(state_for("40m"), "upconvert", at="2026-11-06T20:02:00Z")
+        try:
+            set_tz("America/Chicago")
+            self.assertIn("(confirmed 14:02)", t.switch_words(st, U)[0])
+        finally:
+            set_tz("UTC")
+
+    def test_asked_once_at_start_up(self):
+        app = self.app("fm-105.3", "unknown")
+        text = frame(app).text()
+        self.assertIn("Is the Ham It Up on UPCONVERT or BYPASS?", text)
+        self.assertIn("u   UPCONVERT   below 30 MHz", text)
+        self.assertIn("b   BYPASS      30 MHz and up", text)
+        self.assertIn("rxd keeps receiving", text)
+        app.key(ord("b"))
+        self.assertEqual(app.p.confirmed, ["bypass"])
+        self.assertIn("Ham It Up confirmed on BYPASS", app.message)
+        with_switch(app.p.status, "bypass")
+        text = frame(app).text()
+        self.assertNotIn("UPCONVERT or BYPASS?", text)
+        self.assertIn("Ham It Up ✓ BYPASS (confirmed 14:02)", text)
+
+    def test_later_then_u_asks_again(self):
+        app = self.app("ghostnet", "unknown")
+        frame(app)
+        self.assertEqual(app.ask, "position")
+        app.key(27)                                        # Esc: later
+        text = frame(app).text()
+        self.assertNotIn("UPCONVERT or BYPASS?", text)
+        self.assertIn("Ham It Up ? not confirmed: u says which way it is", text)
+        self.assertIsNone(app.ask)
+        app.key(ord("u"))
+        self.assertIn("UPCONVERT or BYPASS?", frame(app).text())
+        app.key(ord("u"))
+        self.assertEqual(app.p.confirmed, ["upconvert"])
+
+    def test_every_view_and_ascii_and_small(self):
+        for profile in ("ghostnet", "fm-105.3", "40m"):
+            for g in (U, A):
+                for h, w in ((24, 80), (30, 50), (40, 140)):
+                    app = self.app(profile, "unknown", g=g)
+                    text = frame(app, h, w).text()
+                    self.assertIn("UPCONVERT or BYPASS?", text, (profile, h, w))
+                    if g is A:
+                        self.assertNotRegex(text, r"[^\x00-\x7f]", (profile, h, w))
+
+    def test_readout_in_every_view(self):
+        for profile, where in (("ghostnet", "Ham It Up ✓ UPCONVERT (confirmed 14:02)"),
+                               ("fm-105.3", "Ham It Up ▲ UPCONVERT (confirmed 14:02): this needs"),
+                               ("40m", "Ham It Up switch: ✓ UPCONVERT (confirmed 14:02)")):
+            app = self.app(profile, "upconvert")
+            self.assertIn(where, frame(app, 30, 120).text(), profile)
+
+    def test_cross_side_switch_confirms_first(self):
+        app = self.app("fm-105.3", "bypass")
+        frame(app)
+        for _ in range(3):
+            app.key(curses.KEY_DOWN)
+        app.key(10)                                        # am-1030: UPCONVERT
+        self.assertEqual(app.p.switched, [])
+        text = frame(app).text()
+        self.assertIn("▲ Flip the Ham It Up to UPCONVERT", text)
+        self.assertIn("WBZ needs it on UPCONVERT.", text)
+        self.assertIn("It's on BYPASS now.", text)
+        self.assertIn("y   It's on UPCONVERT: switch", text)
+        app.key(ord("n"))                                  # cancel
+        self.assertEqual(app.p.switched, [])
+        self.assertIn("Not switched; still on fm-105.3", app.message)
+        app.key(10)
+        app.key(ord("y"))
+        self.assertEqual(app.p.switched, [("am-1030", "upconvert")])
+        self.assertTrue(app.switching)
+        # done: no "flip it" warning after, since the person already did
+        app.p.status.update(with_switch(state_for("am-1030"), "upconvert"))
+        frame(app)
+        self.assertIn("Now on WBZ", app.message)
+
+    def test_same_side_switches_at_once(self):
+        app = self.app("fm-105.3", "bypass")
+        frame(app)
+        app.key(curses.KEY_DOWN)                           # noaa: BYPASS too
+        app.key(10)
+        self.assertEqual(app.p.switched, ["noaa"])
+        self.assertIsNone(app.ask)
+
+    def test_picker_says_which_need_a_flip(self):
+        app = self.app("fm-105.3", "bypass")
+        text = frame(app, 30, 100).text()
+        self.assertRegex(text, r"WBZ .*▲ Flip Ham It Up to UPCONVERT")
+        self.assertNotRegex(text, r"NOAA Weather .*Flip")
+
+    def test_band_plan_paused_and_limited(self):
+        bp = {"plan": "auto", "mode": "wspr", "phase": "paused", "sun": {},
+              "reason": "Paused: confirm the Ham It Up's switch"}
+        self.assertEqual(t.band_plan_words(bp, U),
+                         ("▲ Band plan Auto · WSPR: Paused: confirm the Ham It Up's switch", "warn"))
+        bp = dict(bp, phase="hold", side_limit="Only BYPASS bands: 6 m, 2 m")
+        self.assertTrue(t.band_plan_extra(bp, U).startswith("Only BYPASS bands: 6 m, 2 m   "))
+
+    def test_poller_posts_the_switch(self):
+        class Link:
+            def __init__(self):
+                self.posts = []
+
+            def post(self, path, body, timeout=None):
+                self.posts.append((path, body))
+                if path == "/api/v1/switch":
+                    return 200, {"upconverter": {"position": body["position"]}}
+                return 202, {"switching": body["name"]}
+        link = Link()
+        p = t.Poller(link)
+        p.confirm_switch("bypass")
+        p._position(p.position_req)
+        p.switch("noaa", "bypass")
+        p._switch(*p.switch_req)
+        p._switch("js8")
+        self.assertEqual(link.posts, [("/api/v1/switch", {"position": "bypass"}),
+                                      ("/api/v1/profile", {"name": "noaa", "switch": "bypass"}),
+                                      ("/api/v1/profile", {"name": "js8"})])
+        self.assertEqual(p.status["upconverter"], {"position": "bypass"})
+        self.assertEqual(p.take_position_acks(), [("bypass", None)])
+
+
 class RealProgram(unittest.TestCase):
     def run_tui(self, fake_url, rows=24, cols=80, env=None, args=()):
         tui = Pty(fake_url, rows, cols, env, args)
@@ -2019,6 +2198,24 @@ class RealProgram(unittest.TestCase):
                         tui.vt.text())
         self.assertTrue(tui.wait_for("2 ● Listen"), tui.vt.text())
         self.assertEqual(fake.switches, ["js8", "fm-105.3"])
+        self.quit_cleanly(tui)
+
+    def test_switch_question_and_a_flip_through_a_real_drop(self):
+        fake = self.fake("fm-105.3", drop=1.0, switch="unknown")
+        tui = self.run_tui(fake.url)
+        self.assertTrue(tui.wait_for("Is the Ham It Up on UPCONVERT or BYPASS?", 6), tui.vt.text())
+        tui.send(b"b")
+        self.assertTrue(tui.wait_for("Ham It Up ✓ BYPASS (confirmed"), tui.vt.text())
+        self.assertNotIn("UPCONVERT or BYPASS?", tui.vt.text())
+        self.assertEqual(fake.positions, ["bypass"])
+        # a station on the other side: flip first, then it switches
+        tui.keys(KEYS["down"], KEYS["down"], KEYS["down"], KEYS["enter"])
+        self.assertTrue(tui.wait_for("Flip the Ham It Up to UPCONVERT"), tui.vt.text())
+        tui.send(b"y")
+        self.assertTrue(tui.wait_for("Now on WBZ", 8), tui.vt.text())
+        self.assertEqual(fake.switches, ["am-1030"])
+        self.assertEqual(fake.positions, ["bypass", "upconvert"])
+        self.assertTrue(tui.wait_for("✓ UPCONVERT (confirmed"), tui.vt.text())
         self.quit_cleanly(tui)
 
     def test_l_plays_through_a_player_on_path_and_quit_kills_it(self):
