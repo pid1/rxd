@@ -34,3 +34,7 @@ os.environ["RXD_LOCATION"] = os.path.join(TESTS, "fixtures", "no-location.json")
 # test confirms holds until the test says the machine started again.
 os.environ["RXD_SWITCH"] = os.path.join(TESTS, "fixtures", "no-switch.json")
 os.environ["RXD_BOOT_ID"] = os.path.join(TESTS, "fixtures", "boot_id")
+# No real nrsc5: a machine with one installed would otherwise start HD Radio
+# in every WFM test. The HD tests point rxd at tests/fixtures/fake_nrsc5.py.
+os.environ["RXD_NRSC5"] = "off"
+FAKE_NRSC5 = os.path.join(TESTS, "fixtures", "fake_nrsc5.py")

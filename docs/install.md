@@ -12,13 +12,40 @@
   profiles say so and don't decode.
 - **chrony**, if you want rxd to say when the clock is too far off for JS8
   and WSPR. Optional.
+- **nrsc5**, for HD Radio on FM broadcast (WFM) profiles. Optional: without
+  it FM is analog only, exactly as before, and the status says "HD Radio:
+  nrsc5 not installed". Below.
+
+## HD Radio (nrsc5)
+
+rxd plays HD Radio by running [nrsc5](https://github.com/theori-io/nrsc5)
+as a separate program and reading its output. nrsc5 is GPL-3, so rxd
+(BSD-3) never includes, links or ships it: build it on the machine. rxd is
+tested with v3.2.0 (commit a5c0972). On Raspberry Pi OS or Debian, as a
+user with sudo:
+
+```bash
+sudo apt install git build-essential cmake autoconf libtool pkgconf libao-dev libfftw3-dev librtlsdr-dev
+git clone https://github.com/theori-io/nrsc5 && cd nrsc5
+git checkout a5c09723b135327aeef157770caae9aebf597547   # v3.2.0
+mkdir build && cd build
+cmake -DUSE_NEON=ON -DCMAKE_BUILD_TYPE=Release ..       # NEON on a Pi; -DUSE_SSE=ON on x86
+make -j4 && sudo make install && sudo ldconfig
+```
+
+The build fetches FAAD2 2.11.2 from GitHub and patches it for HD Radio's
+codec, so it needs the network once. It takes about 2 minutes on a CM4
+and installs `/usr/local/bin/nrsc5`, which rxd finds on its own (the
+station file's `hd.nrsc5` or `$RXD_NRSC5` name another). rxd runs nrsc5
+only while a station shows HD's sidebands: on the CM4 it costs about 20%
+of a core decoding and 35% while it searches.
 
 ## From a release
 
 Each release has `rxd-X.Y.Z.tar.gz` and `rxd-X.Y.Z.tar.gz.sha256`.
 
 ```bash
-v=0.4.1
+v=0.5.0
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz
 curl -fLO https://github.com/pid1/rxd/releases/download/v$v/rxd-$v.tar.gz.sha256
 sha256sum -c rxd-$v.tar.gz.sha256
@@ -30,7 +57,7 @@ sudo python3 rxd-$v/install.py --prefix /usr/local --user "$USER"
 
 | Path | What |
 |---|---|
-| `PREFIX/lib/rxd/X.Y.Z-HASH/` | the code: rxd.py, js8.py, callsign_db.py, radio.py, station.py, rxd_tui.py, web/index.html |
+| `PREFIX/lib/rxd/X.Y.Z-HASH/` | the code: rxd.py, js8.py, callsign_db.py, radio.py, station.py, location.py, hd.py, rxd_tui.py, web/index.html |
 | `PREFIX/lib/rxd/current` | a link to the directory above |
 | `PREFIX/bin/rxd`, `radio`, `rxd-tui` | links into `current/` |
 | `PREFIX/share/bash-completion/completions/radio` | tab completion |

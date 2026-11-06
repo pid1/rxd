@@ -14,6 +14,7 @@ the default audio sink. See docs/station.md.
                       "below_hz": 30000000, "switch": true},
       "sink": "Built-in Audio",
       "gps": {"enabled": true, "gpsd": "127.0.0.1:2947"},
+      "hd": {"enabled": true, "nrsc5": "/usr/local/bin/nrsc5"},
       "profiles": {"dcara": {"description": "DCARA", "frequency": 146920000,
                              "demod": "FM", "demod_settings": {"bandwidth": 12500}}}
     }
@@ -35,6 +36,7 @@ DEFAULT_PATH = "/etc/rxd/station.json"
 GRID = re.compile(r"^[A-Ra-r]{2}[0-9]{2}(?:[A-Xa-x]{2})?$")
 HOSTPORT = re.compile(r"^(?:\[[0-9A-Fa-f:]+\]|[A-Za-z0-9_.-]+):[0-9]{1,5}$")
 GPS_DEFAULTS = {"enabled": True, "gpsd": "127.0.0.1:2947"}
+HD_DEFAULTS = {"enabled": True, "nrsc5": None}
 UPCONVERTER_DEFAULTS = {"name": "upconverter", "hz": 125e6, "below_hz": 30e6, "switch": True}
 
 
@@ -71,6 +73,7 @@ class Station:
         self.sink = sink or None
         self.profiles = self._profiles(doc.get("profiles"))
         self.gps = self._gps(doc.get("gps"))
+        self.hd = self._hd(doc.get("hd"))
 
     def _call(self, v):
         if v is None:
@@ -133,6 +136,28 @@ class Station:
                 out["gpsd"] = v["gpsd"].strip()
             else:
                 self.problems.append("gps.gpsd must be HOST:PORT, like 127.0.0.1:2947")
+        return out
+
+    def _hd(self, v):
+        """HD Radio on WFM profiles: on by default when nrsc5 is installed."""
+        out = dict(HD_DEFAULTS)
+        if v is None:
+            return out
+        if isinstance(v, bool):
+            return dict(out, enabled=v)
+        if not isinstance(v, dict):
+            self.problems.append("hd must be an object, or true or false")
+            return out
+        if "enabled" in v:
+            if isinstance(v["enabled"], bool):
+                out["enabled"] = v["enabled"]
+            else:
+                self.problems.append("hd.enabled must be true or false")
+        if v.get("nrsc5") is not None:
+            if isinstance(v["nrsc5"], str) and v["nrsc5"].strip():
+                out["nrsc5"] = v["nrsc5"].strip()
+            else:
+                self.problems.append("hd.nrsc5 must be the path to nrsc5")
         return out
 
     def _upconverter(self, v):

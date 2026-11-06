@@ -6,7 +6,7 @@
 Run it from the unpacked rxd-X.Y.Z/ directory. It installs:
 
   PREFIX/lib/rxd/X.Y.Z-HASH/       rxd.py, js8.py, callsign_db.py, radio.py,
-                                   station.py, location.py, rxd_tui.py and
+                                   station.py, location.py, hd.py, rxd_tui.py and
                                    web/index.html,
                                    in a directory named for their content
   PREFIX/lib/rxd/current           a link to that directory
@@ -56,6 +56,7 @@ FILES = (
     ("rxd/radio.py", "radio.py", 0o755),
     ("rxd/station.py", "station.py", 0o644),
     ("rxd/location.py", "location.py", 0o644),
+    ("rxd/hd.py", "hd.py", 0o644),
     ("clients/tui/rxd_tui.py", "rxd_tui.py", 0o755),
     ("clients/web/index.html", "web/index.html", 0o644),
 )

@@ -28,6 +28,7 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
   "upconverter": {"name": "Ham It Up", "hz": 125000000, "below_hz": 30000000, "switch": true},
   "sink": "Built-in Audio",
   "gps": {"enabled": true, "gpsd": "127.0.0.1:2947"},
+  "hd": {"enabled": true},
   "profiles": {
     "fm-93.3": {"description": "93.3 FM", "frequency": 93300000, "demod": "WFM",
                 "demod_settings": {"bandwidth": 150000}, "rtl": {"gain": 10}}
@@ -52,6 +53,9 @@ the speaker, and any profiles of its own. rxd and `radio` both read it.
 | `gps` | object or false | on | Take the grid from a GPS, through gpsd. Below. false is the same as `{"enabled": false}`. |
 | `gps.enabled` | bool | true | Read the GPS. When gpsd isn't there, rxd says so in its status and uses `grid`. |
 | `gps.gpsd` | string | `127.0.0.1:2947` | gpsd's HOST:PORT. |
+| `hd` | object or bool | on | HD Radio on WFM profiles, decoded by nrsc5 when it is installed. Below. A bool is the same as `{"enabled": ...}`. |
+| `hd.enabled` | bool | true | false turns HD Radio off for every profile: FM is then analog only, exactly as without nrsc5. |
+| `hd.nrsc5` | string | on PATH | The nrsc5 program to run. `$RXD_NRSC5` wins; `off` there turns HD off. |
 
 `$RXD_CALL` and `$RXD_GRID`, when set (in rxd.env, say), win over `call` and
 `grid`, and `$RXD_GPSD` (`HOST:PORT`, or `off`) over `gps`.
@@ -137,6 +141,10 @@ one, and appears in `radio`'s list after the built-in ones. Only `frequency`
 - `rtl`: gain index 20, the station's `sdr.serial`. A profile's own `rtl`
   keys win, so `"rtl": {"gain": 10}` changes only the gain.
 - `sink`: the station's.
+
+A WFM profile may also say `"hd": false` (HD Radio off for it) or
+`"hd": {"enabled": true, "program": 1}`: `program` 0 is HD1, the main
+program, and 1 is HD2. `radio save` keeps the program picked in the clients.
 
 A name is letters, digits, `.`, `-` and `_`. A station profile with the name
 of a built-in one replaces it. Saved state (`radio save`) still lives in
