@@ -132,11 +132,12 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
 .jstat{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;padding:8px 12px}
 @media (min-width:700px){.jstat{grid-template-columns:repeat(5,auto);justify-content:space-between}}
 .wrap>*{order:0}
-body[data-view=manual] #aPick,body[data-view=manual] #js8,body[data-view=manual] #listenCard{order:1}
+body[data-view=manual] #aPick,body[data-view=manual] #js8,body[data-view=manual] #wspr,body[data-view=manual] #listenCard{order:1}
+body[data-view=digital] #listenCard,body[data-view=digital] #js8,body[data-view=digital] #wspr{order:1}
 body[data-view=manual] #pmsg,#appear0{order:2}
-body[data-view=js8] .jlist{max-height:none;overflow:visible}
+body[data-view=digital] .jlist{max-height:none;overflow:visible}
 @media (min-width:900px){
-  body[data-view=listen] .wrap,body[data-view=js8] .wrap{max-width:1100px}
+  body[data-view=listen] .wrap,body[data-view=digital] .wrap{max-width:1100px}
   body[data-view=listen] .wrap{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start;grid-auto-flow:row dense}
   body[data-view=listen] .wrap>*{grid-column:1/-1}
   body[data-view=listen] #now,body[data-view=listen] .top,body[data-view=listen] #listenCard,body[data-view=listen] #qual{grid-column:1}
@@ -170,6 +171,15 @@ dialog .row2{margin-top:6px}
 .jl .jx{flex-basis:100%;font-size:17px;overflow-wrap:anywhere}
 .jl.me{background:var(--pass);border-left:5px solid var(--accent);padding-left:8px}
 @media (min-width:900px){.jl .jx{flex:1 1 300px}}
+.wst{display:grid;grid-template-columns:1fr;gap:6px 12px;padding:8px 12px}
+@media (min-width:700px){.wst{grid-template-columns:repeat(3,minmax(0,1fr))}}
+.wst .banner{grid-column:1/-1;margin:4px 0 0}
+.wrep{grid-column:1/-1;margin-top:4px}
+.wrep .lbl .val{color:var(--fg);font-size:19px}
+.wl .wc{font-size:20px;font-weight:750}
+.wl .wg{font-size:18px;font-weight:650}
+.wl .wd{font-size:18px}
+.wl .wx{flex-basis:100%;font-size:16px;font-weight:600;color:var(--dim)}
 </style>
 </head>
 <body>
@@ -212,11 +222,11 @@ dialog .row2{margin-top:6px}
   <button type="button" class="btn wide" id="mute" aria-pressed="false" disabled>Mute uConsole speaker</button>
   <p class="note">Audio may stop when the phone locks or the browser goes to the background.</p>
 </section>
-<section class="card" id="jPick" data-v="js8">
-  <div class="lbl"><span>JS8 frequency</span></div>
-  <div id="jPickL" class="plist"></div>
+<section class="card" id="jPick" data-v="digital">
+  <div class="lbl"><span>Mode and frequency</span></div>
+  <div id="jPickL"></div>
 </section>
-<section class="card jstat" id="jStat" data-v="js8" data-live>
+<section class="card jstat" id="jStat" data-v="digital" data-live>
   <div><span class="k">Ham It Up</span><span id="jHiu" class="v">—</span></div>
   <div><span class="k">Receiver</span><span id="jRx" class="v">—</span></div>
   <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
@@ -224,12 +234,28 @@ dialog .row2{margin-top:6px}
   <div><span class="k">Clock</span><span id="jClock" class="v">—</span></div>
   <p id="jClockBad" class="banner jclock" role="alert" hidden></p>
 </section>
-<section class="card" id="js8" data-v="js8 manual" data-live hidden>
+<section class="card wst" id="wStat" data-v="digital" data-live hidden>
+  <div><span class="k">Cycle</span><span id="wCycle" class="v">—</span></div>
+  <div><span class="k">Last slot</span><span id="wLast" class="v">—</span></div>
+  <div><span class="k">Reporting</span><span id="wRep" class="v">—</span></div>
+  <p id="wErr" class="banner" role="alert" hidden></p>
+  <div id="wRepSl" class="wrep" hidden><div class="lbl"><span>Report spots to WSPRnet</span><span id="wRepS" class="val">—</span></div>
+    <div class="row2" role="group" aria-label="Report spots to WSPRnet"><button type="button" class="btn" id="wRepOff">Off</button><button type="button" class="btn" id="wRepOn">On</button></div>
+    <p id="wMsg" class="msg" role="status" hidden></p></div>
+</section>
+<section class="card" id="js8" data-v="digital manual" data-live hidden>
   <div class="lbl"><span>JS8 decodes, newest first</span><span id="jCount"></span></div>
   <div class="jf"><input type="text" id="jFilter" placeholder="Filter by callsign" aria-label="Filter decodes by callsign" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
     <button type="button" class="btn" id="jClear" hidden>Clear</button></div>
   <p id="jMsg" class="jmsg" role="status"></p>
   <ol id="jList" class="jlist"></ol>
+</section>
+<section class="card" id="wspr" data-v="digital manual" data-live hidden>
+  <div class="lbl"><span>WSPR spots, newest first</span><span id="wCount"></span></div>
+  <div class="jf"><input type="text" id="wFilter" placeholder="Filter by callsign or grid" aria-label="Filter spots by callsign or grid" autocomplete="off" autocapitalize="characters" spellcheck="false" enterkeyhint="done">
+    <button type="button" class="btn" id="wClear" hidden>Clear</button></div>
+  <p id="wsMsg" class="jmsg" role="status"></p>
+  <ol id="wList" class="jlist"></ol>
 </section>
 <section class="card" id="lPick" data-v="listen">
   <div class="lbl"><span>Stations</span></div>
@@ -333,6 +359,23 @@ function fmtHz(v) {
   return [String(v), "Hz"];
 }
 function fmtBw(v) { const p = fmtHz(v); return p[0] + " " + p[1]; }
+// rxd sends UTC: "2026-11-06 10:47:03" (JS8Call) or "2026-11-06T12:20:00Z".
+// Everything shown is the browser's local time, 24 hour.
+function utcDate(t) {
+  const m = /^(\d{4})-(\d\d)-(\d\d)[ T](\d\d):(\d\d)(?::(\d\d))?/.exec(String(t || ""));
+  return m ? new Date(Date.UTC(+m[1], m[2] - 1, +m[3], +m[4], +m[5], +(m[6] || 0))) : null;
+}
+const p2 = n => String(n).padStart(2, "0");
+function hhmm(d, secs) { return p2(d.getHours()) + ":" + p2(d.getMinutes()) + (secs ? ":" + p2(d.getSeconds()) : ""); }
+// a time for a list line: the day too when it isn't today
+function lineTime(t, secs) {
+  const d = utcDate(t);
+  if (!d) return String(t || "");
+  const today = new Date().toDateString() === d.toDateString();
+  return (today ? "" : d.toLocaleDateString(undefined, {month: "short", day: "numeric"}) + " ") + hhmm(d, secs);
+}
+function slotTime(t) { const d = utcDate(t); return d ? hhmm(d) : "—"; }
+function signed(n) { return (n > 0 ? "+" : n < 0 ? "−" : "") + Math.abs(n); }
 function parseFreq(t) {
   t = t.trim().toLowerCase().replace(/[\s,_']/g, "");
   const m = t.match(/^(\d+(?:\.\d*)?|\.\d+)(mhz|m|khz|k|hz)?$/);
@@ -505,14 +548,16 @@ function applyStatus(s) {
 
   syncMute();
   autoView();
-  if (A.on && s.js8 && view === "js8") stopListen();
-  const vk = [view, curKind(), !!s.js8, profAvail, A.on].join();
+  // JS8's audio is only tones; WSPR's speaker is muted by design, so the phone may listen
+  if (A.on && pdec(s) === "js8" && view === "digital") stopListen();
+  const vk = [view, curKind(), pdec(s), profAvail, A.on].join();
   if (vk !== viewKey) { viewKey = vk; renderView(); }
   renderProfiles(); renderQual();
   renderJs8Stat(s, $("sRx").textContent, $("sRx").className);
+  renderWsprStat(s);
   if (profAvail && profiles && !switching && !profLoading && s.profile !== profiles.active && s.profile !== profAskedFor) loadProfiles();
   if (A.on && rateFor(s.mode) !== A.want) connectAudio();
-  js8Sync();
+  js8Sync(); wsprSync();
 }
 
 function renderFreq() {
@@ -863,23 +908,29 @@ const mq = window.matchMedia("(prefers-color-scheme: dark)");
 
 
 // ---------------------------------------------------------------- profiles and views
-// Views follow the active profile's kind: JS8 profiles get the decode stream,
-// WFM/FM/AM get the station picker and Listen, anything else gets Manual.
+// Views follow the active profile's kind: digital profiles (a JS8 or WSPR
+// decoder) get the decodes, WFM/FM/AM get the station picker and Listen,
+// anything else gets Manual.
 // Manual is the only view that sticks, and only because the user chose it.
 const LISTEN_MODES = ["WFM", "FM", "AM"];
 const GROUPS = [["WFM", "Broadcast FM"], ["FM", "VHF · UHF"], ["AM", "AM"]];
-const VIEWS = [["js8", "JS8"], ["listen", "Listen"], ["manual", "Manual", "tuning"]];
+const VIEWS = [["digital", "Digital"], ["listen", "Listen"], ["manual", "Manual", "tuning"]];
+const DECODERS = [["js8", "JS8"], ["wspr", "WSPR"]];
 let profiles = null, profAvail = true, profLoading = false, profAskedFor = null;
 let switching = null, switchTimer = 0, flipText = "";
 let view = load("view") === "manual" ? "manual" : null, viewFor = null;
-function pkind(p) { return p.js8 ? "js8" : LISTEN_MODES.indexOf(p.mode) >= 0 ? "listen" : "manual"; }
+// rxd and radio say "decoder"; older ones only the js8 flag
+function pdec(p) { return p.decoder !== undefined ? p.decoder || null : p.js8 ? "js8" : null; }
+function pkind(p) { return pdec(p) ? "digital" : LISTEN_MODES.indexOf(p.mode) >= 0 ? "listen" : "manual"; }
+function curDec() { if (st) return pdec(st); const p = activeProf(); return p ? pdec(p) : null; }
+function decName(d) { const x = DECODERS.find(x => x[0] === d); return x ? x[1] : "digital"; }
 function activeName() { return (st && st.profile) || (profiles && profiles.active) || null; }
 function activeProf() { const n = activeName(); return (profiles && profiles.profiles.find(p => p.name === n)) || null; }
 function curKind() {
   const p = activeProf();
   if (p) return pkind(p);
   if (!st) return null;
-  return st.js8 ? "js8" : LISTEN_MODES.indexOf(st.mode) >= 0 ? "listen" : "manual";
+  return pdec(st) ? "digital" : LISTEN_MODES.indexOf(st.mode) >= 0 ? "listen" : "manual";
 }
 function curUp() { return !!(st && st.upconverter_hz > 0); }
 function hiuWord(up) { return up ? "UPCONVERT" : "BYPASS"; }
@@ -935,10 +986,13 @@ function renderView() {
     if (el.parentElement.closest("[data-v]")) { el.hidden = el.dataset.v.split(" ").indexOf(v) < 0; continue; }
     el.hidden = !v || el.dataset.v.split(" ").indexOf(v) < 0 || (el.hasAttribute("data-live") && mis);
   }
-  // the decodes need a JS8 profile; Listen stays reachable while audio plays
-  if (!(st && st.js8)) $("js8").hidden = true;
-  $("jCount").hidden = v === "js8";
-  if (A.on && v === "js8") $("listenCard").hidden = false;
+  // each decode list needs its decoder; Listen stays reachable while audio
+  // plays, and on WSPR, where the phone is the only way to hear it
+  const dec = curDec();
+  if (!st || pdec(st) !== "js8") $("js8").hidden = true;
+  if (!st || pdec(st) !== "wspr") $("wspr").hidden = $("wStat").hidden = true;
+  $("jCount").hidden = $("wCount").hidden = v === "digital";
+  if (v === "digital" && (A.on || (dec === "wspr" && !mis))) $("listenCard").hidden = false;
   $("aPick").hidden = $("aPick").hidden || !profiles;
   $("lPick").hidden = $("lPick").hidden || !profAvail;
   $("jPick").hidden = $("jPick").hidden || !profAvail;
@@ -946,7 +1000,7 @@ function renderView() {
   if (mis && st && !switching) {
     const p = activeProf();
     nt.textContent = "Receiver is on " + st.profile + (p && p.description ? " (" + p.description + ")" : "") + ". " +
-      (v === "js8" ? "Pick a JS8 frequency to switch." : "Pick a station to switch.");
+      (v === "digital" ? "Pick a digital mode to switch." : "Pick a station to switch.");
     nt.hidden = false;
   } else nt.hidden = true;
   // RF gain and the speaker slider live in whichever view shows them
@@ -985,20 +1039,22 @@ function renderProfiles() {
     if (!list.length) { const m = document.createElement("span"); m.className = "jmsg"; m.textContent = "No profiles of this kind are saved."; box.appendChild(m); return; }
     for (const p of list) box.appendChild(f(p));
   };
-  if (view === "js8") mk("jPickL", all.filter(p => p.js8), p => profBtn(p, p.name, (p.description ? p.description + " · " : "") + fmtMHz(p.freq)));
-  if (view === "manual") mk("aPickL", all, p => profBtn(p, pdesc(p), p.name + " · " + fmtMHz(p.freq) + " · " + p.mode + (p.js8 ? " · JS8" : "")));
-  if (view === "listen") {
-    const box = $("lPickL"); box.textContent = "";
-    const ls = all.filter(p => pkind(p) === "listen");
-    if (!profiles || !ls.length) { mk("lPickL", ls, null); return; }
-    for (const [m, title] of GROUPS) {
-      const g = ls.filter(p => p.mode === m);
+  const grouped = (id, ls, groups, f) => {
+    if (!profiles || !ls.length) { mk(id, ls, null); return; }
+    const box = $(id); box.textContent = "";
+    for (const [k, title, test] of groups) {
+      const g = ls.filter(test);
       if (!g.length) continue;
       const h = document.createElement("div"); h.className = "pgroup"; h.textContent = title; box.appendChild(h);
       const l = document.createElement("div"); l.className = "plist"; box.appendChild(l);
-      for (const p of g) l.appendChild(profBtn(p, pdesc(p), fmtMHz(p.freq) + " · " + (p.mode === "FM" ? "NFM" : p.mode)));
+      for (const p of g) l.appendChild(f(p));
     }
-  }
+  };
+  if (view === "digital") grouped("jPickL", all.filter(p => pdec(p)), DECODERS.map(([d, t]) => [d, t, p => pdec(p) === d]),
+    p => profBtn(p, p.name, (p.description ? p.description + " · " : "") + fmtMHz(p.freq)));
+  if (view === "manual") mk("aPickL", all, p => profBtn(p, pdesc(p), p.name + " · " + fmtMHz(p.freq) + " · " + p.mode + (pdec(p) ? " · " + decName(pdec(p)) : "")));
+  if (view === "listen") grouped("lPickL", all.filter(p => pkind(p) === "listen"), GROUPS.map(([m, t]) => [m, t, p => p.mode === m]),
+    p => profBtn(p, pdesc(p), fmtMHz(p.freq) + " · " + (p.mode === "FM" ? "NFM" : p.mode)));
 }
 
 // switching
@@ -1008,7 +1064,7 @@ $("dlgNo").onclick = () => dlg.close();
 $("dlgYes").onclick = () => { dlg.close(); if (dlgAct) dlgAct(); };
 dlg.addEventListener("close", () => { dlgAct = null; });
 function askSwitch(p) {
-  const cur = activeProf(), leavingJs8 = !!((st && st.js8) || (cur && cur.js8));
+  const cur = activeProf(), leavingJs8 = curDec() === "js8" || !!(cur && pdec(cur) === "js8");
   if (!leavingJs8) return doSwitch(p);
   $("dlgT").textContent = "Switch to " + p.name + "?";
   const b = $("dlgB"); b.textContent = "";
@@ -1042,7 +1098,7 @@ function finishSwitch() {
     $("flip").hidden = false;
   }
   if (muted() && st.volume > 0) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
-  jKey = null;
+  jKey = null; wKey = null;
   renderConn(); renderView();
   loadProfiles();
 }
@@ -1285,7 +1341,7 @@ renderAudio();
 const JMAX = 500;
 let jOn = false, jKey = null, jSeq = 0, jTimer = 0, jHeard = new Map(), jFilt = "";
 function js8Sync() {
-  const want = !!(st && st.js8);
+  const want = !!(st && pdec(st) === "js8");
   if (want && st.profile !== jKey) {
     jKey = st.profile; jOn = true; jSeq = 0; jHeard = new Map();
     $("jList").textContent = ""; setText($("jMsg"), "Loading decodes");
@@ -1324,9 +1380,8 @@ function addJs8(lines) {
     li.dataset.k = [fr, l.to || "", l.text || ""].join(" ").toUpperCase();
     li.dataset.f = fr;
     const add = (tag, cls, t) => { const e = document.createElement(tag); e.className = cls; e.textContent = t; li.appendChild(e); };
-    const tm = /\d\d:\d\d:\d\d/.exec(String(l.time || ""));
-    add("span", "jt", (tm ? tm[0] : String(l.time || "")) + " UTC");
-    add("span", "js", typeof l.snr === "number" ? "SNR " + (l.snr > 0 ? "+" : l.snr < 0 ? "−" : "") + Math.abs(l.snr) : "SNR —");
+    add("span", "jt", lineTime(l.time, true));
+    add("span", "js", typeof l.snr === "number" ? "SNR " + signed(l.snr) : "SNR —");
     add("b", "jfr", fr);
     if (mine) add("span", "jme", "◆ " + (call || "You"));
     let text = String(l.text || "");
@@ -1362,13 +1417,13 @@ $("jFilter").oninput = () => {
 };
 $("jClear").onclick = () => { $("jFilter").value = ""; $("jFilter").oninput(); $("jFilter").focus(); };
 function renderJs8Stat(s, rxText, rxCls) {
-  if (view !== "js8") return;
+  if (view !== "digital") return;
   setText($("jHiu"), s.upconverter_hz > 0 ? "⇅ UPCONVERT" : "→ BYPASS", "v");
   setText($("jRx"), rxText, rxCls);
   const lv = s.level_dbfs;
   setText($("jLvl"), typeof lv === "number" ? (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS" : "— dBFS", "v");
-  // JS8's 15 s slots fail silently past about 2 s of clock error, so a
-  // clock that isn't synced is the first thing to say.
+  // JS8's 15 s slots and WSPR's 2 min ones fail silently past about 2 s of
+  // clock error, so a clock that isn't synced is the first thing to say.
   const c = s.clock || {};
   if (c.synced === true) setText($("jClock"), "● Synced" + (c.source ? " (" + c.source + ")" : ""), "v ok");
   else if (c.synced === false) setText($("jClock"), "✕ Not synced", "v bad");
@@ -1377,14 +1432,138 @@ function renderJs8Stat(s, rxText, rxCls) {
   bad.hidden = c.synced !== false;
   if (c.synced === false) {
     const off = typeof c.offset_s === "number" ? " It is " + Math.abs(c.offset_s).toFixed(1) + " s " + (c.offset_s > 0 ? "fast" : "slow") + "." : "";
-    setText(bad, "✕ Clock not synced: JS8 won't decode until it is." + off + " No GPS fix and no network? Check chronyc sources.");
+    setText(bad, "✕ Clock not synced: " + decName(pdec(s)) + " won't decode until it is." + off + " No GPS fix and no network? Check chronyc sources.");
   }
 }
+
+// ---------------------------------------------------------------- WSPR spots
+let wOn = false, wKey = null, wSeq = 0, wTimer = 0, wHeard = new Map(), wFilt = "", wBusy = false;
+function wsprSync() {
+  const want = !!(st && pdec(st) === "wspr");
+  if (want && st.profile !== wKey) {
+    wKey = st.profile; wOn = true; wSeq = 0; wHeard = new Map();
+    $("wList").textContent = ""; setText($("wsMsg"), "Loading spots");
+    pollWspr();
+  } else if (!want && wOn) { wOn = false; wKey = null; clearTimeout(wTimer); }
+}
+async function pollWspr() {
+  clearTimeout(wTimer);
+  if (!wOn) return;
+  if (document.hidden) { wTimer = setTimeout(pollWspr, 5000); return; }
+  const key = wKey;
+  try {
+    const r = await api("/api/wspr?after=" + wSeq);
+    if (key !== wKey) return;
+    if (r.ok && r.doc && Array.isArray(r.doc.lines)) {
+      addWspr(r.doc.lines.filter(l => l.seq > wSeq).sort((a, b) => a.seq - b.seq));
+      if (typeof r.doc.seq === "number") wSeq = Math.max(wSeq, r.doc.seq);
+      wStatus("");
+    } else wStatus(r.status === 404 ? "✕ This rxd has no WSPR feed." : "✕ No spots: " + ((r.doc && r.doc.error) || "HTTP " + r.status));
+  } catch (e) {}
+  if (wOn && key === wKey) wTimer = setTimeout(pollWspr, 5000);
+}
+function fmtPower(dbm) {
+  const w = Math.pow(10, (dbm - 30) / 10);
+  const mw = w * 1000;
+  return dbm + " dBm (" + (w >= 1 ? trim(w, 1) + " W" : (mw < 10 ? trim(mw, 1) : String(Math.round(mw))) + " mW") + ")";
+}
+function wMatch(li) { return !wFilt || li.dataset.k.indexOf(wFilt) >= 0; }
+function addWspr(lines) {
+  if (!lines.length) return wStatus("");
+  const list = $("wList"), frag = document.createDocumentFragment(), dial = st ? st.freq : null;
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i], li = document.createElement("li"), call = String(l.call || "?");
+    li.className = "jl wl";
+    li.dataset.k = [call, l.grid || ""].join(" ").toUpperCase();
+    li.dataset.f = call;
+    const add = (tag, cls, t) => { const e = document.createElement(tag); e.className = cls; e.textContent = t; li.appendChild(e); };
+    add("span", "jt", lineTime(l.time));
+    add("b", "wc", call);
+    if (l.grid) add("span", "wg", l.grid);
+    if (typeof l.km === "number") add("span", "wd", Math.round(l.km * 0.621371).toLocaleString() + " mi");
+    const x = [typeof l.snr === "number" ? "SNR " + signed(l.snr) + " dB" : "SNR —"];
+    if (typeof l.dbm === "number") x.push(fmtPower(l.dbm));
+    if (typeof l.freq === "number" && typeof dial === "number") x.push("Audio " + Math.round(l.freq - dial) + " Hz");
+    add("span", "wx", x.map(t => t.replace(/ /g, "\u00a0")).join(" · "));
+    li.hidden = !wMatch(li);
+    wHeard.set(call, (wHeard.get(call) || 0) + 1);
+    frag.appendChild(li);
+  }
+  list.insertBefore(frag, list.firstChild);
+  while (list.children.length > JMAX) {
+    const f = list.lastChild.dataset.f, n = wHeard.get(f) - 1;
+    if (n > 0) wHeard.set(f, n); else wHeard.delete(f);
+    list.removeChild(list.lastChild);
+  }
+  wStatus("");
+}
+function wStatus(err) {
+  const list = $("wList"), n = wHeard.size;
+  let shown = 0; if (wFilt) for (const li of list.children) if (!li.hidden) shown++;
+  setText($("wCount"), n + (n === 1 ? " station heard" : " stations heard"));
+  if (st && pdec(st) === "wspr") setText($("jHeard"), n + (n === 1 ? " station" : " stations"), "v");
+  if (err) setText($("wsMsg"), err);
+  else if (!list.children.length) setText($("wsMsg"), "No spots yet. They appear here after each two-minute slot is decoded.");
+  else if (wFilt) setText($("wsMsg"), shown ? "Showing " + shown + " of " + list.children.length + " spots with " + wFilt : "No spots with " + wFilt + ".");
+  else setText($("wsMsg"), "");
+}
+$("wFilter").oninput = () => {
+  wFilt = $("wFilter").value.trim().toUpperCase();
+  $("wClear").hidden = !wFilt;
+  for (const li of $("wList").children) li.hidden = !wMatch(li);
+  wStatus("");
+};
+$("wClear").onclick = () => { $("wFilter").value = ""; $("wFilter").oninput(); $("wFilter").focus(); };
+function renderWsprStat(s) {
+  const w = s.wspr;
+  if (!w || view !== "digital") return;
+  const slot = slotTime(w.decoding || w.slot);
+  if (w.state === "recording") setText($("wCycle"), "● Recording the " + slot + " slot", "v ok");
+  else if (w.state === "decoding") setText($("wCycle"), "◆ Decoding the " + slot + " slot", "v");
+  else setText($("wCycle"), "■ Next slot " + slot, "v");
+  const L = w.last;
+  if (!L) setText($("wLast"), "No slot decoded yet", "v dimc");
+  else setText($("wLast"), (L.spots ? L.spots + (L.spots === 1 ? " spot" : " spots") : "No spots") + " in the " + slotTime(L.slot) + " slot", "v");
+  const e = $("wErr");
+  e.hidden = !w.error;
+  if (w.error) setText(e, "✕ WSPR decoder: " + w.error);
+  const p = w.report || {}, id = [p.call, p.grid].filter(Boolean).join(" ");
+  if (!p.enabled) setText($("wRep"), "■ Not reporting" + (p.reason ? ": " + p.reason : ""), "v dimc");
+  else if (p.online === false) setText($("wRep"), "▲ Offline: " + (p.pending || 0) + (p.pending === 1 ? " spot" : " spots") + " waiting", "v warn");
+  else if (p.error) setText($("wRep"), "✕ " + p.error, "v bad");
+  else setText($("wRep"), "● Reporting to WSPRnet" + (id ? " as " + id : "") + " · " + (p.sent || 0) + " sent" +
+    (p.pending ? " · " + p.pending + " waiting" : ""), "v ok");
+  // the switch only where reporting can be on: a callsign and grid are set
+  $("wRepSl").hidden = !!p.reason;
+  const on = !!p.enabled, dis = wBusy || conn !== "ok" || !!switching;
+  setText($("wRepS"), on ? "On" : "Off", "val");
+  for (const [id2, v] of [["wRepOff", false], ["wRepOn", true]]) {
+    const b = $(id2);
+    b.setAttribute("aria-pressed", String(on === v));
+    setText(b, (on === v ? "● " : "") + (v ? "On" : "Off"));
+    b.disabled = dis;
+  }
+}
+async function setReport(on) {
+  if (!st || !st.wspr || wBusy) return;
+  wBusy = true; $("wMsg").hidden = true; renderWsprStat(st);
+  let msg = "";
+  try {
+    const r = await api("/api/tune", {wspr_report: on});
+    if (r.ok && r.doc && typeof r.doc.freq === "number") { wBusy = false; applyStatus(r.doc); return; }
+    msg = "rxd refused: " + ((r.doc && r.doc.error) || "HTTP " + r.status);
+  } catch (e) { msg = "Could not reach rxd. Reporting is unchanged."; }
+  wBusy = false;
+  setText($("wMsg"), "✕ " + msg); $("wMsg").hidden = false;
+  if (st) renderWsprStat(st);
+}
+$("wRepOff").onclick = () => setReport(false);
+$("wRepOn").onclick = () => setReport(true);
 
 // ---------------------------------------------------------------- start
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) {
-    pollStatus(); pollSpecSoon(); if (jOn) pollJs8();
+    pollStatus(); pollSpecSoon(); if (jOn) pollJs8(); if (wOn) pollWspr();
     if (A.on && A.ctx && A.ctx.state !== "running") A.ctx.resume().catch(() => {});
     renderAudio();
   }
