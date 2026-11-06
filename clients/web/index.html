@@ -1976,8 +1976,9 @@ $("bpScan").onclick = () => postBands({scan: true});
 // A small pan/zoom map of the stations heard, in the Digital view. Stations
 // sit at the centre of their Maidenhead grid square (from /api/stations),
 // never anywhere more precise. Tiles are rxd's own offline tiles
-// (/tiles/Z/X/Y.png); with none, or past their zoom, Maidenhead grid lines
-// still draw. Tiles load only while the map is open.
+// (/tiles/Z/X/Y.png). Maidenhead grid lines draw only when there are no
+// tiles, as the map's fallback: over tiles they only get in the way. Tiles
+// load only while the map is open.
 // map:projection begin
 const MTILE = 256;
 // Web Mercator, in pixels of a world 256 * 2^z wide.
@@ -2185,7 +2186,7 @@ function drawOverlay() {
   const g = mCan.getContext("2d"), d = dpr(), w = mCan.width / d, h = mCan.height / d;
   g.setTransform(d, 0, 0, d, 0, 0);
   g.clearRect(0, 0, w, h);
-  drawGrid(g, w, h);
+  if (!(M.tiles && M.tiles.available)) drawGrid(g, w, h);  // the no-tiles fallback
   const doc = M.doc;
   if (!doc) return;
   const me = doc.me, pts = [];
