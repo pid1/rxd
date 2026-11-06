@@ -2206,12 +2206,15 @@ def day_part(t, latlon=None):
 
 
 def sun_times(t, latlon):
-    """(sunrise, sunset) Unix times on t's local day, either None if it doesn't
+    """(sunrise, sunset) Unix times on the station's solar day holding t, either None if it doesn't
     happen (or no location)."""
     if not latlon:
         return None, None
-    lt = time.localtime(t)
-    start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    # The station's own solar day (local mean time from its longitude), not
+    # the machine's time zone: on a UTC clock, an American sunset falls after
+    # midnight and would come before that day's sunrise.
+    off = latlon[1] / 15.0 * 3600
+    start = (t + off) // 86400 * 86400 - off
     rise = sset = None
     prev = sun_elevation(latlon[0], latlon[1], start)
     for m in range(5, 24 * 60 + 1, 5):

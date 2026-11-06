@@ -264,6 +264,26 @@ class Conditions(unittest.TestCase):
 
 
 class Sun(unittest.TestCase):
+    def test_sun_times_ignore_the_machine_time_zone(self):
+        # The station's solar day, whatever zone the machine is in: on a UTC
+        # runner an American sunset is after midnight.
+        old = os.environ.get("TZ")
+        try:
+            seen = set()
+            for tz in ("UTC", "America/Chicago", "Asia/Tokyo", "Pacific/Auckland"):
+                os.environ["TZ"] = tz
+                time.tzset()
+                rise, sset = rxd.sun_times(DAY, FN42)
+                self.assertTrue(rise and sset and rise < sset, tz)
+                seen.add((rise, sset))
+            self.assertEqual(len(seen), 1)
+        finally:
+            if old is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old
+            time.tzset()
+
     def test_day_night_and_gray_line(self):
         self.assertEqual(rxd.day_part(DAY, FN42), "day")
         self.assertEqual(rxd.day_part(NIGHT, FN42), "night")
