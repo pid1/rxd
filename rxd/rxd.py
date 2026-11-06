@@ -62,7 +62,7 @@ from scipy import signal as sps  # noqa: E402
 
 # rxd's version: the one place it is set. GET /api/v1/status reports it, and
 # the release workflow refuses a tag that doesn't match it.
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 # The HTTP API's version: the N in /api/vN/. It goes up only when a client
 # written for the old one would misread the new one (docs/API.md).
 API_VERSION = 1
@@ -338,30 +338,40 @@ class RtlSource:
 
     def set_rate(self, rate):
         with self.lock:
-            if rate != self.rate:
+            if rate != self.rate and self.dev is not None:
                 self.lib.rtlsdr_set_sample_rate(self.dev, int(rate))
                 self.lib.rtlsdr_reset_buffer(self.dev)
                 self.rate = rate
 
     def set_gain(self, db):
-        self.lib.rtlsdr_set_tuner_gain(self.dev, int(round(db * 10)))
+        with self.lock:
+            if self.dev is not None:
+                self.lib.rtlsdr_set_tuner_gain(self.dev, int(round(db * 10)))
 
     def set_center(self, hz):
         with self.lock:
-            self.lib.rtlsdr_set_center_freq(self.dev, int(hz))
+            if self.dev is not None:
+                self.lib.rtlsdr_set_center_freq(self.dev, int(hz))
             self.center = float(hz)
 
     def read(self, n):
         buf = (ctypes.c_uint8 * (2 * n))()
         got = ctypes.c_int()
         with self.lock:
+            if self.dev is None:
+                raise EOFError("closed")
             r = self.lib.rtlsdr_read_sync(self.dev, buf, 2 * n, ctypes.byref(got))
         if r != 0:
             raise IOError("rtlsdr_read_sync returned %d" % r)
         return cu8_to_complex(np.frombuffer(buf, np.uint8, got.value))
 
     def close(self):
-        self.lib.rtlsdr_close(self.dev)
+        # Under the read lock: closing the device in the middle of a read
+        # fails that read, and can crash librtlsdr.
+        with self.lock:
+            if self.dev is not None:
+                self.lib.rtlsdr_close(self.dev)
+                self.dev = None
 
 
 class FileSource:
@@ -1203,6 +1213,9 @@ class Receiver:
                 self.q.put(None)
                 return
             except Exception as e:  # dongle unplugged and the like
+                if self.stop.is_set():  # shutting down: the source closing isn't a fault
+                    self.q.put(None)
+                    return
                 self.error = str(e)
                 log("read failed: %s" % e)
                 self.q.put(None)
