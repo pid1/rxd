@@ -1469,6 +1469,13 @@ class Drawing(unittest.TestCase):
         self.assertEqual(spec_rows(big), 10)
         self.assertIn("Dropped 0", big)
 
+    def test_waiting_message_goes_once_rxd_answers(self):
+        app = app_on("40m", reachable=False)
+        app.say(t.WAITING)
+        self.assertIn("Waiting for rxd", frame(app).text())
+        app.p.reachable = True
+        self.assertNotIn("Waiting for rxd", frame(app).text())
+
     def test_unreachable_says_so(self):
         text = frame(app_on("40m", reachable=False)).text()
         self.assertIn("✕ NO RXD", text)

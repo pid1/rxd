@@ -1198,6 +1198,8 @@ def spot_from(date, hhmm, snr, dt, mhz, msg, drift, mygrid=None):
     if not parsed:
         return None
     call, grid, dbm = parsed
+    if grid:  # DM33vq, as WSPRnet and everyone else writes it
+        grid = grid[:4].upper() + grid[4:].lower()
     iso = "20%s-%s-%sT%s:%s:00Z" % (date[:2], date[2:4], date[4:6], hhmm[:2], hhmm[2:])
     return {"time": iso, "snr": int(snr), "dt": float(dt), "freq": round(float(mhz) * 1e6),
             "drift": int(drift), "call": call, "grid": grid, "dbm": dbm,

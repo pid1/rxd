@@ -80,7 +80,7 @@ class Parsing(unittest.TestCase):
         self.assertEqual((a["call"], a["grid"], a["dbm"], a["snr"], a["freq"], a["time"]),
                          ("KA1PID", "EM12", 23, -10, 7040120, "2026-11-06T12:20:00Z"))
         self.assertEqual((b["call"], b["grid"], b["dbm"], b["drift"]), ("PJ4/K1ABC", None, 37, -1))
-        self.assertEqual((c["call"], c["grid"], c["dbm"]), ("PJ4/K1ABC", "FK52UD", 33))
+        self.assertEqual((c["call"], c["grid"], c["dbm"]), ("PJ4/K1ABC", "FK52ud", 33))
         self.assertIsNone(b["km"])
         self.assertTrue(0 < a["km"] < 200)  # EM12 is next door to EM13
 
