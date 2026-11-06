@@ -586,6 +586,10 @@ class FakeNrsc5(unittest.TestCase):
             with open(argv) as fh:
                 runs = [json.loads(x) for x in fh]
         self.assertEqual([r[-1] for r in runs], ["0", "2"])
+        self.assertEqual(h.blend.hold, hd.Blend.HOLD_MIN)   # a new start, not a fallback
+        # the program list stays while the new nrsc5 acquires, so HD1 can be picked back
+        self.assertEqual([p["name"] for p in h.status(3.5)["programs"]], ["HD1"])
+        self.assertNotIn("analog", h.status(3.5)["reason"].lower())
         self.assertEqual(runs[0][:6], ["-r", "-", "-o", "-", "-t", "raw"])
 
     def test_no_sidebands_no_nrsc5(self):

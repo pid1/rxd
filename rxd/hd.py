@@ -583,6 +583,7 @@ class Hd:
         self.k_cand = None        # a moved k seen once, waiting for a second look
         self.k_next = None        # a moved k confirmed, to cross over to
         self.moves = 0
+        self.programs = []        # this station's programs, kept across nrsc5 restarts
         self.lock = threading.Lock()
         self.ended = None         # why the last nrsc5 run ended
 
@@ -602,6 +603,7 @@ class Hd:
             self._stop("program changed")
             self.retry_at = None
             self.w = 0.0
+            self.blend = Blend()   # a new start, not a fallback: no longer hold
 
     def retuned(self):
         """A new station: forget this one's nrsc5, detection, alignment and delay."""
@@ -614,6 +616,7 @@ class Hd:
         self.w = 0.0
         self.lead = None
         self.ended = None
+        self.programs = []
 
     # --- per block
     def process(self, analog, raw, now):
@@ -629,6 +632,8 @@ class Hd:
             if self.program == 0:
                 self._align(now)
         running = p is not None and p.alive()
+        if p is not None and p.log.programs and len(p.log.programs) != len(self.programs):
+            self.programs = p.log.program_list()
         aligned = self._aligned()
         # The analog delay the HD would need: HD coming out behind the analog
         # needs the analog delayed to match, which happens only on the way
@@ -832,12 +837,15 @@ class Hd:
         if p is None and self.ended and self.retry_at is not None and now < self.retry_at:
             reason = "Analog only: %s; trying again later." % self.ended
         if self.program != 0:
+            why = re.sub(r"^(Analog|Back on analog|Analog only): ", "", reason)
+            if not why.startswith("nrsc5"):
+                why = why[:1].upper() + why[1:]
             reason = {"digital": "Playing HD%d." % (self.program + 1)}.get(
                 st, "HD%d is digital-only: silent until HD Radio comes in. %s"
-                % (self.program + 1, reason))
+                % (self.program + 1, why))
         mer = {"lower": log.mer[0], "upper": log.mer[1]} if log.mer else None
         return {"state": st, "available": True, "reason": reason,
-                "program": self.program, "programs": log.program_list(),
+                "program": self.program, "programs": list(self.programs),
                 "station": log.station, "slogan": log.slogan,
                 "title": log.title, "artist": log.artist, "album": log.album,
                 "mer_db": mer, "ber": log.ber, "synced": bool(p is not None and log.synced),
