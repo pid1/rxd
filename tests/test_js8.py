@@ -7,6 +7,8 @@ Signals are synthesized with the module's own encoder. Callsigns are Win's
 other stations' callsigns, so none are kept in git: point RXD_JS8_REAL at a
 directory of slot WAVs and their JS8Call ALL.TXT lines to run those too.
 """
+import contextlib
+import io
 import json
 import os
 import sys
@@ -127,6 +129,142 @@ class Frames(unittest.TestCase):
         # word 7 + (8 - 7) * 7 + 1.
         bits = [0, 0, 1, 1, 1] + [1, 0, 0, 0, 0, 0, 0, 1, 0]
         self.assertEqual(js8.jsc_decompress(bits, table), "W3 W15")
+
+
+def jsc_source(words):
+    """A made-up file in the layout of JS8Call's jsc_map.cpp: the map array
+    (with the escapes and comments the real one has), then another array."""
+    def lit(w):
+        out = ""
+        for ch in w:
+            if ch in '"\\':
+                out += "\\" + ch
+            elif ch == "\n":
+                out += "\\n"
+            elif ord(ch) > 126:
+                out += "\\x%02x" % ord(ch)
+            else:
+                out += ch
+        return '"%s"' % out
+    rows = ["/**\n * a synthetic sample\n **/\n#include \"jsc.h\"\n\n",
+            "const Tuple JSC::map[%d] = {\n    // str, len, index\n" % len(words)]
+    for i, w in enumerate(words):
+        note = " /* M-BM-! */" if ord(w[0]) > 126 else ""
+        rows.append("\t{%s%s, %d, %d},\n" % (lit(w), note, len(w), i))
+    rows.append("};\n\nconst Tuple JSC::list[2] = {\n\t{\"ZZ\", 2, 0},\n\t{\"YY\", 2, 1},\n};\n")
+    return "".join(rows)
+
+
+def jsc_bits(indices, spaces):
+    """(s,c)-dense code bits for word indices, a space flag after each."""
+    s, c = 7, 9
+    base = [0]
+    for k in range(1, 8):
+        base.append(base[-1] + s * c ** (k - 1))
+    bits = []
+    for j, sp in zip(indices, spaces):
+        k = max(n for n in range(8) if base[n] <= j)
+        rem = j - base[k]
+        stop, high = rem % s, rem // s
+        digits = []
+        for _ in range(k):
+            digits.insert(0, high % c + s)
+            high //= c
+        for d in digits + [stop]:
+            bits += [(d >> 3) & 1, (d >> 2) & 1, (d >> 1) & 1, d & 1]
+        bits.append(1 if sp else 0)
+    return bits
+
+
+def padded_frame(bits, i3):
+    bits = list(bits) + [0] + [1] * (71 - len(bits))
+    v = 0
+    for b in bits[:72]:
+        v = (v << 1) | b
+    return js8.value_frame(v), i3
+
+
+class JscTable(unittest.TestCase):
+    """The word table: imported from a copy of JS8Call's jsc_map.cpp (never
+    committed here), checked against a pinned SHA-256, kept if that fails."""
+
+    WORDS = ["E", "T", "A", '"', "\n", "\xa1", "HELLO", "WORLD", "JS8", "73"] + \
+        ["W%d" % i for i in range(10, 1200)]
+
+    def setUp(self):
+        self.d = tempfile.mkdtemp(prefix="jsc-")
+        self.src = os.path.join(self.d, "jsc_map.cpp")
+        with open(self.src, "w", encoding="latin-1") as fh:
+            fh.write(jsc_source(self.WORDS))
+        self.dest = os.path.join(self.d, "js8", "jsc_map.txt")
+        self.saved = (js8.JSC_PATHS[:], js8._JSC, js8.JS8_DIR)
+
+    def tearDown(self):
+        js8.JSC_PATHS[:], js8._JSC, js8.JS8_DIR = self.saved
+        import shutil
+        shutil.rmtree(self.d)
+
+    def sha(self, path):
+        import hashlib
+        with open(path, "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+
+    def test_import_a_sample_in_the_upstream_layout(self):
+        dest, n = js8.jsc_import(self.src, self.dest, sha256=self.sha(self.src), words=1200)
+        self.assertEqual((dest, n), (self.dest, 1200))
+        js8.JSC_PATHS[:] = [self.dest]
+        js8._JSC = None
+        self.assertEqual(js8.jsc_table(), self.WORDS)  # escapes, comments, the newline word
+        self.assertEqual(js8.jsc_installed_sha256(self.dest), self.sha(self.src))
+
+    def test_a_mismatch_keeps_the_table_there(self):
+        js8.jsc_import(self.src, self.dest, sha256=self.sha(self.src), words=1200)
+        with open(self.dest, "rb") as fh:
+            before = fh.read()
+        bad = os.path.join(self.d, "bad.cpp")
+        with open(bad, "w", encoding="latin-1") as fh:
+            fh.write(jsc_source(["X"] * 1200))
+        with self.assertRaises(ValueError):
+            js8.jsc_import(bad, self.dest, sha256=self.sha(self.src), words=1200)
+        # the command line checks against the real pin, and says so
+        js8.JS8_DIR = os.path.dirname(self.dest)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(js8.main(["--jsc-import-source", bad]), 1)
+        self.assertIn("kept", err.getvalue())
+        with open(self.dest, "rb") as fh:
+            self.assertEqual(fh.read(), before)
+        self.assertEqual(js8.jsc_installed_sha256(self.dest), self.sha(self.src))
+        self.assertFalse([f for f in os.listdir(os.path.dirname(self.dest)) if f.endswith(".new")])
+        # a truncated download doesn't get as far as the parser's count
+        with open(bad, "w") as fh:
+            fh.write(jsc_source(self.WORDS)[:5000])
+        with self.assertRaises(ValueError):
+            js8.jsc_import(bad, self.dest, sha256=None, words=1200)
+
+    def test_the_decoder_uses_the_table(self):
+        js8.jsc_import(self.src, self.dest, sha256=self.sha(self.src), words=1200)
+        js8.JSC_PATHS[:] = [self.dest]
+        js8._JSC = None
+        # fast-mode data: the whole frame is JSC; normal-mode data starts 1 1
+        fast = padded_frame(jsc_bits([6, 7, 9], [1, 1, 0]), js8.DATA | js8.LAST)
+        self.assertEqual(js8.unpack(*fast), {"kind": "data", "text": "HELLO WORLD 73"})
+        normal = padded_frame([1, 1] + jsc_bits([8, 1030], [1, 0]), js8.LAST)
+        self.assertEqual(js8.unpack(*normal)["text"], "JS8 W1030")
+        # and off the air: a synthesized slot through the whole decoder
+        rng = np.random.default_rng(13)
+        x, t0 = noise_slot("fast", rng)
+        add_signal(x, t0, fast[0], fast[1], "fast", 1200, 0.1, -8)
+        got = js8.decode_slot(x, t0, ["fast"])
+        self.assertEqual([d["unpacked"]["text"] for d in got], ["HELLO WORLD 73"])
+        # without a table those words are a gap, and nothing breaks
+        js8.JSC_PATHS[:] = [os.path.join(self.d, "none.txt")]
+        js8._JSC = None
+        self.assertEqual(js8.unpack(*fast)["kind"], "jsc")
+
+    def test_the_pin_is_a_commit_not_a_branch(self):
+        self.assertRegex(js8.JSC_SOURCE_URL, r"/js8call/js8call/[0-9a-f]{40}/jsc_map\.cpp$")
+        self.assertRegex(js8.JSC_SOURCE_SHA256, r"^[0-9a-f]{64}$")
 
 
 class Messages(unittest.TestCase):

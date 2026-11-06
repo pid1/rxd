@@ -85,17 +85,25 @@ Heartbeats, CQs, directed commands and SNR reports, callsigns (compound ones
 too), grids and uncompressed (Huffman) data frames all decode without help.
 Most free text is sent compressed with JS8's "JSC" code, which needs its
 262,144-word table. In 1,135 frames heard on 40 m, 214 (19%) needed it;
-every message with free text contains such frames. The table is JS8Call's
-(GPL-3), so rx doesn't ship it, and setup doesn't fetch it. Without it, the
-parts of a message that need it show as `……`. Given JS8Call's `jsc_map.cpp`
-(`JSC_SOURCE_URL` in js8.py, pinned by size and SHA-256),
+every message with free text contains such frames.
 
-```
-python3 js8.py --jsc-import jsc_map.cpp
-```
-
-writes it to `~/.local/share/rxd/js8/jsc_map.txt` (`$RXD_JSC` overrides),
-where rxd finds it at its next start.
+- **Origin and licence:** the table is JS8Call's, in its `jsc_map.cpp`
+  (GPL-3, © 2018 Jordan Sherer), so nothing of it is in rx.
+- **Fetched at install:** setup.sh downloads that file from the original
+  js8call repository at a fixed commit (v2.2.0-ga, `JSC_SOURCE_URL` in
+  js8.py, 6,296,397 bytes), checks its SHA-256 (`JSC_SOURCE_SHA256`), and
+  runs `js8.py --jsc-import-source FILE` as the desktop user.
+- **Imported:** the importer is rx's own code. It writes
+  `~/.local/share/rxd/js8/jsc_map.txt` (`$RXD_JSC` overrides), with the
+  source's SHA-256 beside it in `jsc_map.txt.sha256`, so a later run skips
+  the download when the table is current.
+- **Safe to fail:** a failed download, check or parse keeps whatever table
+  is already there. rxd reads the table when it starts, and works without
+  one: those words show as `……`.
+- **Same everywhere:** the same table, entry for entry, is in the js8call
+  repository's later main and in JS8Call-improved v3.0.3
+  (`JS8_JSC/JSC_map.cpp`, laid out differently), and JS8Call 2.2.0's own
+  program carries it too.
 
 ### Sources and licences
 
@@ -231,6 +239,38 @@ and on the device.
   frequency could leak in at roughly -30 to -40 dB.
 - **Signal strength:** `l STRENGTH` is uncalibrated: dBFS + 73.
 
+## Station map and the callsign database
+
+The Digital view's map plots the JS8 and WSPR stations heard, at their grid
+square's centre, on offline tiles. Nothing is looked up online while rxd
+runs.
+
+- **`GET /api/stations?hours=24`** (up to 720): one station per mode and
+  call, with `grid`, `lat`, `lon`, `km` from `RXD_GRID`, best and last SNR,
+  and `src`. That is `heard` when the station sent its grid, else the
+  callsign database's `addr`, `zip` or `country`. `me` is this station, and
+  `no_grid` counts those that couldn't be placed.
+- **Grids heard** come from WSPR spots and from JS8 heartbeats and CQs, read
+  from rxd's JS8 logs (DIRECTED.TXT and every frame in ALL.TXT). They are
+  kept in `~/.local/share/rxd/grids.json` (`$RXD_GRIDS`), so a station that
+  sent its grid once is placed when heard again.
+- **`GET /tiles/Z/X/Y.png`** serves the tiles setup.sh installs for the mesh
+  clients (`~/.portduino/default/maps/`, OpenStreetMap, zoom 1-6), or
+  `$RXD_TILES`. `GET /tiles/info.json` says what's there.
+- **The callsign database** places stations that never send a grid:
+  - US calls come from FCC licence addresses, geocoded at build time to a
+    6-character grid, with ZIP centroids as the fallback.
+  - Everyone else comes from cty.dat prefixes, at their country's centre.
+  - It keeps only call, grid, precision and state or entity.
+- **How it is built and installed:** a weekly GitHub workflow
+  (`.github/workflows/callsigns.yml`) builds it with `callsign_db.py update`
+  and publishes it as the `data-callsigns` release. On the device, setup.sh
+  (and so `maint`) runs `callsign_db.py install` as the desktop user. That
+  downloads it only when its published SHA-256 changed, checks it and
+  swaps it into `~/.local/share/rxd/callsigns.sqlite` (`$RXD_CALLSIGNS`). A
+  failure keeps the database already there.
+- **`callsign_db.py lookup CALL`** says what it knows.
+
 ## Band plan
 
 `BandPlanner` picks the JS8 or WSPR band when it's on Auto; docs/radio.md
@@ -248,6 +288,5 @@ stops it). Its URLs can be pointed elsewhere with `RXD_HAMQSL`,
 
 - **Band conditions and automatic band choice:** done as the band plan
   (above). The antenna is cut for 40 m today.
-- **A map in the web UI** of JS8 and WSPR stations, plotted at the grid-square centre, using the map tiles already downloaded for the mesh clients so it works offline.
 - **Auto-adjusting audio quality:** done 2026-11-06, see "Automatic gain and
   audio clean-up". Not done: per-mode AGC tuning.

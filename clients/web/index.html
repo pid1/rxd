@@ -200,6 +200,30 @@ body[data-view=listen] #gWhy{display:none}
 .bpstep .val{text-align:center;font-size:20px;font-weight:700}
 .bpcred{font-size:14px;color:var(--dim);margin:6px 0 0}
 .bpcred a{color:var(--accent)}
+/* ---------------------------------------------------------------- station map (map helper) */
+.mapc .btn.wide{margin-top:0}
+.mapv{position:relative;height:min(62vh,520px);margin-top:8px;border:1px solid var(--line);border-radius:10px;overflow:hidden;
+  background:var(--plot);touch-action:none;user-select:none;-webkit-user-select:none;cursor:grab}
+@media (min-width:900px){.mapv{height:min(70vh,640px)}}
+.mtiles{position:absolute;inset:0;overflow:hidden;isolation:isolate}
+.mtiles img{position:absolute;left:0;top:0;pointer-events:none;-webkit-user-drag:none;max-width:none}
+:root[data-theme=dark] .mtiles img{filter:invert(1) hue-rotate(180deg) brightness(.8) contrast(.9)}
+@media (prefers-color-scheme:dark){:root[data-theme=auto] .mtiles img{filter:invert(1) hue-rotate(180deg) brightness(.8) contrast(.9)}}
+/* Night: grey, inverted (dark land), then multiplied by pure red, so no tile pixel can be anything but red or black */
+:root[data-theme=night] .mtiles img{filter:grayscale(1) invert(1) brightness(.85) contrast(1.15)}
+:root[data-theme=night] .mtiles::after{content:"";position:absolute;inset:0;background:#f00;mix-blend-mode:multiply;z-index:1}
+.mapv canvas{position:absolute;inset:0;width:100%;height:100%;background:transparent;border-radius:0;touch-action:none;cursor:inherit}
+.mattr{position:absolute;right:0;bottom:0;font-size:13px;font-weight:600;padding:1px 6px;background:var(--panel);color:var(--dim);border-top-left-radius:6px;opacity:.9}
+.mctl{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-top:8px}
+.mctl .btn{font-size:19px;padding:2px;min-width:0}
+.mleg{display:flex;flex-wrap:wrap;gap:4px 16px;margin-top:8px;font-size:17px;font-weight:650}
+.mleg .s{font-size:20px;margin-right:4px}
+.mk-js8{color:var(--accent)}.mk-wspr{color:var(--mark)}.mk-me{color:var(--fg)}.mk-hollow{color:var(--dim)}.mleg .s.big{font-size:28px;line-height:20px}
+.minfo{margin-top:8px;border-top:1px solid var(--line);padding-top:6px;font-size:17px}
+.minfo .mi+.mi{border-top:1px solid var(--line);margin-top:6px;padding-top:6px}
+.minfo .mc{font-size:22px;font-weight:750;margin-right:8px}
+.minfo .mm{font-size:15px;font-weight:800;border:2px solid currentColor;border-radius:6px;padding:0 5px}
+.minfo .md{display:block;font-size:17px;color:var(--dim);font-weight:600}
 </style>
 </head>
 <body>
@@ -289,6 +313,25 @@ body[data-view=listen] #gWhy{display:none}
   <div id="wRepSl" class="wrep" hidden><div class="lbl"><span>Report spots to WSPRnet</span><span id="wRepS" class="val">—</span></div>
     <div class="row2" role="group" aria-label="Report spots to WSPRnet"><button type="button" class="btn" id="wRepOff">Off</button><button type="button" class="btn" id="wRepOn">On</button></div>
     <p id="wMsg" class="msg" role="status" hidden></p></div>
+</section>
+<section class="card mapc" id="mapCard" data-v="digital" data-live>
+  <button type="button" class="btn wide" id="mapTog" aria-expanded="false" aria-controls="mapBody">▸ Show map of stations</button>
+  <div id="mapBody" hidden>
+    <div class="mapv" id="mapV" role="application" aria-label="Map of stations heard. Drag to pan, pinch or use the buttons to zoom, tap a station for its details.">
+      <div class="mtiles" id="mTiles"></div>
+      <canvas id="mCan"></canvas>
+      <div class="mattr" id="mAttr" hidden></div>
+    </div>
+    <div class="mctl" role="group" aria-label="Map controls">
+      <button type="button" class="btn" id="mOut" aria-label="Zoom out">−</button>
+      <button type="button" class="btn" id="mIn" aria-label="Zoom in">+</button>
+      <button type="button" class="btn" id="mFit">Fit all</button>
+      <button type="button" class="btn" id="mPath" aria-pressed="false">Paths</button>
+    </div>
+    <div class="mleg" id="mLeg"></div>
+    <div class="minfo" id="mInfo" role="status" aria-live="polite"></div>
+    <p class="jmsg" id="mMsg"></p>
+  </div>
 </section>
 <section class="card" id="js8" data-v="digital manual" data-live hidden>
   <div class="lbl"><span>JS8 decodes, newest first</span><span id="jCount"></span></div>
@@ -1886,6 +1929,440 @@ function stepDwell(d) {
 $("bpDwDn").onclick = () => stepDwell(-1);
 $("bpDwUp").onclick = () => stepDwell(1);
 $("bpScan").onclick = () => postBands({scan: true});
+
+// ---------------------------------------------------------------- station map (map helper)
+// A small pan/zoom map of the stations heard, in the Digital view. Stations
+// sit at the centre of their Maidenhead grid square (from /api/stations),
+// never anywhere more precise. Tiles are rxd's own offline tiles
+// (/tiles/Z/X/Y.png); with none, or past their zoom, Maidenhead grid lines
+// still draw. Tiles load only while the map is open.
+// map:projection begin
+const MTILE = 256;
+// Web Mercator, in pixels of a world 256 * 2^z wide.
+function mercX(lon, z) { return (lon + 180) / 360 * MTILE * Math.pow(2, z); }
+function mercY(lat, z) {
+  const s = Math.sin(Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180);
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * MTILE * Math.pow(2, z);
+}
+function unmercY(y, z) {
+  const n = Math.PI - 2 * Math.PI * y / (MTILE * Math.pow(2, z));
+  return Math.atan(Math.sinh(n)) * 180 / Math.PI;
+}
+// n+1 points along the great circle from a to b, [[lat, lon], ...]
+function greatCircle(lat1, lon1, lat2, lon2, n) {
+  const r = Math.PI / 180, p1 = lat1 * r, l1 = lon1 * r, p2 = lat2 * r, l2 = lon2 * r;
+  const d = 2 * Math.asin(Math.sqrt(Math.pow(Math.sin((p2 - p1) / 2), 2) +
+    Math.cos(p1) * Math.cos(p2) * Math.pow(Math.sin((l2 - l1) / 2), 2)));
+  const out = [];
+  for (let i = 0; i <= n; i++) {
+    const f = i / n;
+    if (d < 1e-9) { out.push([lat1, lon1]); continue; }
+    const A = Math.sin((1 - f) * d) / Math.sin(d), B = Math.sin(f * d) / Math.sin(d);
+    const x = A * Math.cos(p1) * Math.cos(l1) + B * Math.cos(p2) * Math.cos(l2);
+    const y = A * Math.cos(p1) * Math.sin(l1) + B * Math.cos(p2) * Math.sin(l2);
+    const zz = A * Math.sin(p1) + B * Math.sin(p2);
+    out.push([Math.atan2(zz, Math.sqrt(x * x + y * y)) / r, Math.atan2(y, x) / r]);
+  }
+  return out;
+}
+// map:projection end
+
+const M = {
+  open: load("map") === "1", paths: load("mapPaths") === "1",
+  doc: null, tiles: null, z: 4, cx: 0.5, cy: 0.5, fitted: false,
+  imgs: new Map(), sel: null, timer: 0, raf: 0, col: {}, busy: false
+};
+const mapV = $("mapV"), mCan = $("mCan"), mTiles = $("mTiles");
+const MZMIN = 0, MZMAX = 10;
+const MODE = {js8: ["JS8", "●", "js8"], wspr: ["WSPR", "▲", "wspr"]};
+
+function mapShown() { return M.open && !$("mapCard").hidden && !document.hidden; }
+function mapColors() {
+  const cs = getComputedStyle(document.documentElement);
+  for (const k of ["accent", "mark", "fg", "bg", "panel", "dim", "line", "grid", "plot"]) M.col[k] = cs.getPropertyValue("--" + k).trim();
+}
+function worldW(z) { return MTILE * Math.pow(2, z); }
+// a point to screen pixels (CSS px), the copy of it nearest the centre
+function toScreen(lat, lon, w, h) {
+  const W = worldW(M.z);
+  let dx = mercX(lon, M.z) / W - M.cx;
+  dx -= Math.round(dx);
+  return [w / 2 + dx * W, h / 2 + (mercY(lat, M.z) / W - M.cy) * W];
+}
+function clampView() {
+  M.z = Math.max(MZMIN, Math.min(MZMAX, M.z));
+  M.cx -= Math.floor(M.cx);
+  const h = mapV.clientHeight / worldW(M.z) / 2;
+  M.cy = h >= 0.5 ? 0.5 : Math.max(h, Math.min(1 - h, M.cy));
+}
+function zoomAt(f, sx, sy) {
+  const w = mapV.clientWidth, h = mapV.clientHeight, W0 = worldW(M.z);
+  const wx = M.cx + (sx - w / 2) / W0, wy = M.cy + (sy - h / 2) / W0;
+  M.z = Math.max(MZMIN, Math.min(MZMAX, M.z + Math.log2(f)));
+  const W1 = worldW(M.z);
+  M.cx = wx - (sx - w / 2) / W1; M.cy = wy - (sy - h / 2) / W1;
+  clampView(); mapDraw();
+}
+function mapFit() {
+  const pts = [];
+  const d = M.doc;
+  if (d && d.me) pts.push([d.me.lat, d.me.lon]);
+  if (d) for (const s of d.stations) if (s.src !== "country") pts.push([s.lat, s.lon]);
+  const w = mapV.clientWidth || 360, h = mapV.clientHeight || 400;
+  if (pts.length < 2) {
+    M.z = pts.length ? 4 : MZMIN;
+    M.cx = pts.length ? mercX(pts[0][1], 0) / MTILE : 0.5;
+    M.cy = pts.length ? mercY(pts[0][0], 0) / MTILE : 0.5;
+  } else {
+    // longitudes around the station, so a path across the date line fits
+    const ref = pts[0][1];
+    const xs = pts.map(p => mercX(ref + ((p[1] - ref + 540) % 360 - 180), 0) / MTILE), ys = pts.map(p => mercY(p[0], 0) / MTILE);
+    const x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+    const pad = 56;
+    const zx = Math.log2((w - 2 * pad) / MTILE / Math.max(x1 - x0, 1e-6));
+    const zy = Math.log2((h - 2 * pad) / MTILE / Math.max(y1 - y0, 1e-6));
+    M.z = Math.min(zx, zy, 7);
+    M.cx = (x0 + x1) / 2; M.cy = (y0 + y1) / 2;
+  }
+  clampView(); mapDraw();
+}
+
+function mapDraw() {
+  if (M.raf) return;
+  M.raf = requestAnimationFrame(() => { M.raf = 0; drawTiles(); drawOverlay(); });
+}
+function drawTiles() {
+  const t = M.tiles, want = new Set();
+  const w = mapV.clientWidth, h = mapV.clientHeight;
+  if (t && t.available && w && h) {
+    const tz = Math.max(t.min, Math.min(t.max, Math.round(M.z)));
+    const n = Math.pow(2, tz), ts = MTILE * Math.pow(2, M.z - tz), W = worldW(M.z);
+    const ox = w / 2 - M.cx * W, oy = h / 2 - M.cy * W;  // screen position of the world's corner
+    const i0 = Math.floor(-ox / ts), i1 = Math.floor((w - ox) / ts);
+    const j0 = Math.max(0, Math.floor(-oy / ts)), j1 = Math.min(n - 1, Math.floor((h - oy) / ts));
+    for (let i = i0; i <= i1; i++) {
+      for (let j = j0; j <= j1; j++) {
+        const x = ((i % n) + n) % n, key = tz + "/" + i + "/" + j;
+        want.add(key);
+        let img = M.imgs.get(key);
+        if (!img) {
+          img = new Image();
+          img.alt = ""; img.decoding = "async";
+          img.onerror = () => { img.style.visibility = "hidden"; };
+          img.src = "/tiles/" + tz + "/" + x + "/" + j + ".png";
+          M.imgs.set(key, img); mTiles.appendChild(img);
+        }
+        const l = Math.floor(ox + i * ts), tp = Math.floor(oy + j * ts);
+        img.style.left = l + "px"; img.style.top = tp + "px";
+        img.style.width = (Math.ceil(ox + (i + 1) * ts) - l) + "px";
+        img.style.height = (Math.ceil(oy + (j + 1) * ts) - tp) + "px";
+      }
+    }
+  }
+  for (const [k, img] of M.imgs) if (!want.has(k)) { img.remove(); M.imgs.delete(k); }
+  const a = $("mAttr");
+  a.hidden = !(t && t.available && t.attribution);
+  if (!a.hidden) setText(a, t.attribution);
+}
+function fieldName(lon, lat) {
+  return String.fromCharCode(65 + Math.floor((lon + 180) / 20)) + String.fromCharCode(65 + Math.floor((lat + 90) / 10));
+}
+function drawGrid(g, w, h) {
+  const tiles = M.tiles && M.tiles.available;
+  const W = worldW(M.z);
+  const latTop = unmercY((M.cy - h / 2 / W) * W, M.z), latBot = unmercY((M.cy + h / 2 / W) * W, M.z);
+  const lonL = (M.cx - w / 2 / W) * 360 - 180, lonR = (M.cx + w / 2 / W) * 360 - 180;
+  const squares = M.z >= 5.5;
+  g.lineWidth = 1;
+  g.strokeStyle = tiles ? M.col.dim : M.col.line;
+  g.globalAlpha = tiles ? 0.35 : 1;
+  g.beginPath();
+  const dLon = squares ? 2 : 20, dLat = squares ? 1 : 10;
+  for (let lon = Math.floor(lonL / dLon) * dLon; lon <= lonR; lon += dLon) {
+    const x = Math.round(w / 2 + ((lon + 180) / 360 - M.cx) * W) + 0.5;
+    g.moveTo(x, 0); g.lineTo(x, h);
+  }
+  for (let lat = Math.max(-80, Math.floor(latBot / dLat) * dLat); lat <= Math.min(80, latTop); lat += dLat) {
+    const y = Math.round(h / 2 + (mercY(lat, M.z) / W - M.cy) * W) + 0.5;
+    g.moveTo(0, y); g.lineTo(w, y);
+  }
+  g.stroke();
+  if (squares) {  // field lines heavier over the squares
+    g.lineWidth = 2; g.beginPath();
+    for (let lon = Math.floor(lonL / 20) * 20; lon <= lonR; lon += 20) {
+      const x = Math.round(w / 2 + ((lon + 180) / 360 - M.cx) * W);
+      g.moveTo(x, 0); g.lineTo(x, h);
+    }
+    for (let lat = Math.max(-80, Math.floor(latBot / 10) * 10); lat <= Math.min(80, latTop); lat += 10) {
+      const y = Math.round(h / 2 + (mercY(lat, M.z) / W - M.cy) * W);
+      g.moveTo(0, y); g.lineTo(w, y);
+    }
+    g.stroke();
+  }
+  // labels: fields, or squares when zoomed in far enough to read them
+  g.globalAlpha = tiles ? 0.75 : 1;
+  g.fillStyle = M.col.dim;
+  g.font = "600 15px system-ui,sans-serif";
+  g.textBaseline = "top";
+  // only where a cell is wide enough for its name
+  if (dLon / 360 * W >= (squares ? 48 : 34)) {
+    for (let lon = Math.floor(lonL / dLon) * dLon; lon <= lonR; lon += dLon) {
+      for (let lat = Math.max(-90, Math.floor(latBot / dLat) * dLat); lat < Math.min(90, latTop); lat += dLat) {
+        const lo = ((lon + 180) % 360 + 360) % 360 - 180;
+        const x = w / 2 + ((lon + 180) / 360 - M.cx) * W + 4;
+        const y = h / 2 + (mercY(lat + dLat, M.z) / W - M.cy) * W + 3;
+        const name = fieldName(lo, lat) + (squares ? Math.floor(((lo + 180) % 20) / 2) + "" + Math.floor((lat + 90) % 10) : "");
+        g.fillText(name, x, Math.max(y, 3));
+      }
+    }
+  }
+  g.globalAlpha = 1;
+}
+// where a position came from: the station's own grid, or the callsign database
+const SRC = {addr: "Approx. location: licence address, to the grid square", zip: "Approx. location: licence ZIP code",
+  country: "Country only, from the callsign prefix"};
+function marker(g, mode, x, y, r, src) {
+  g.beginPath();
+  if (mode === "wspr") { g.moveTo(x, y - r * 1.25); g.lineTo(x + r * 1.15, y + r * 0.8); g.lineTo(x - r * 1.15, y + r * 0.8); g.closePath(); }
+  else if (mode === "me") g.rect(x - r, y - r, 2 * r, 2 * r);
+  else g.arc(x, y, r, 0, 2 * Math.PI);
+  const c = mode === "wspr" ? M.col.mark : mode === "me" ? M.col.fg : M.col.accent;
+  if (src && src !== "heard") {  // hollow: not the station's own grid
+    g.fillStyle = M.col.panel; g.fill();
+    g.lineWidth = 3; g.strokeStyle = c;
+    if (src === "country") g.setLineDash([3, 3]);
+    g.stroke(); g.setLineDash([]);
+    return;
+  }
+  g.fillStyle = c;
+  g.fill();
+  g.lineWidth = 2.5; g.strokeStyle = M.col.panel; g.stroke();
+}
+function drawOverlay() {
+  fit(mCan);
+  const g = mCan.getContext("2d"), d = dpr(), w = mCan.width / d, h = mCan.height / d;
+  g.setTransform(d, 0, 0, d, 0, 0);
+  g.clearRect(0, 0, w, h);
+  drawGrid(g, w, h);
+  const doc = M.doc;
+  if (!doc) return;
+  const me = doc.me, pts = [];
+  if (M.paths && me) {
+    g.lineWidth = 2; g.globalAlpha = 0.7;
+    for (const s of doc.stations) {
+      if (s.src === "country") continue;  // a country's centre isn't a path
+      g.strokeStyle = s.mode === "wspr" ? M.col.mark : M.col.accent;
+      g.setLineDash(s.mode === "wspr" ? [6, 4] : []);
+      g.beginPath();
+      let prev = null;
+      const gc = greatCircle(me.lat, me.lon, s.lat, s.lon, 48);
+      const [mx] = toScreen(me.lat, me.lon, w, h), W = worldW(M.z);
+      let base = mx - mercX(me.lon, M.z), lonPrev = me.lon;
+      for (const [la, lo] of gc) {
+        // keep the line continuous across the date line
+        let dl = lo - lonPrev; if (dl > 180) base -= W; else if (dl < -180) base += W;
+        lonPrev = lo;
+        const x = base + mercX(lo, M.z), y = h / 2 + (mercY(la, M.z) / W - M.cy) * W;
+        if (prev) g.lineTo(x, y); else g.moveTo(x, y);
+        prev = [x, y];
+      }
+      g.stroke();
+    }
+    g.setLineDash([]); g.globalAlpha = 1;
+  }
+  // oldest first, so the newest draw on top
+  const list = doc.stations.slice().reverse();
+  for (const s of list) {
+    const [x, y] = toScreen(s.lat, s.lon, w, h);
+    if (x < -20 || y < -20 || x > w + 20 || y > h + 20) continue;
+    marker(g, s.mode, x, y, 8, s.src);
+    pts.push([x, y, s]);
+  }
+  if (me) {
+    const [x, y] = toScreen(me.lat, me.lon, w, h);
+    marker(g, "me", x, y, 8);
+    pts.push([x, y, null]);
+  }
+  // call labels, newest first, skipping any that would overlap
+  g.font = "700 15px system-ui,sans-serif"; g.textBaseline = "middle";
+  const boxes = [];
+  for (const [x, y, s] of pts.slice().reverse()) {
+    const t = s ? s.call : (me.call || "You") + " (you)", tw = g.measureText(t).width;
+    const b = [x + 12, y - 9, x + 16 + tw, y + 9];
+    if (boxes.some(o => b[0] < o[2] && b[2] > o[0] && b[1] < o[3] && b[3] > o[1])) continue;
+    boxes.push(b);
+    g.lineWidth = 4; g.strokeStyle = M.col.panel; g.lineJoin = "round"; g.strokeText(t, x + 13, y);
+    g.fillStyle = M.col.fg; g.fillText(t, x + 13, y);
+  }
+  if (M.sel) {
+    g.lineWidth = 3; g.strokeStyle = M.col.fg;
+    const shown = M.sel.slice(0, 6);  // the ones the details list
+    for (const [x, y, s] of pts) if (shown.indexOf(s) >= 0) { g.beginPath(); g.arc(x, y, 15, 0, 2 * Math.PI); g.stroke(); }
+  }
+  M.pts = pts;
+}
+
+function fmtDist(km) { return typeof km === "number" ? Math.round(km * 0.621371).toLocaleString() + " mi · " + km.toLocaleString() + " km" : null; }
+function renderInfo() {
+  const box = $("mInfo");
+  box.textContent = "";
+  if (!M.sel || !M.sel.length) { box.textContent = M.doc && M.doc.stations.length ? "Tap a station for its details." : ""; return; }
+  for (const s of M.sel.slice(0, 6)) {
+    const div = document.createElement("div"); div.className = "mi";
+    const add = (cls, t, parent) => { const e = document.createElement("span"); e.className = cls; e.textContent = t; (parent || div).appendChild(e); return e; };
+    if (s === null) {
+      const me = M.doc.me;
+      add("mc", me.call || "This station");
+      add("mm mk-me", "■ You");
+      add("md", "Grid " + me.grid);
+    } else {
+      const m = MODE[s.mode] || [s.mode, "●", ""];
+      add("mc", s.call);
+      add("mm mk-" + m[2], m[1] + " " + m[0]);
+      const dist = fmtDist(s.km), approx = s.src && s.src !== "heard";
+      if (s.src === "country") add("md", (s.region || "Country") + " · " + SRC.country);
+      else add("md", "Grid " + s.grid + (dist ? " · " + (approx ? "about " : "") + dist : ""));
+      if (s.src === "addr" || s.src === "zip") add("md", SRC[s.src] + (s.region ? " (" + s.region + ")" : ""));
+      add("md", "Last heard " + lineTime(s.last) + (typeof s.last_snr === "number" ? " at " + signed(s.last_snr) + " dB" : ""));
+      const extra = [];
+      if (typeof s.snr === "number") extra.push("Best SNR " + signed(s.snr) + " dB");
+      if (typeof s.dbm === "number") extra.push(fmtPower(s.dbm));
+      if (extra.length) add("md", extra.join(" · "));
+    }
+    box.appendChild(div);
+  }
+  if (M.sel.length > 6) { const p = document.createElement("div"); p.className = "md"; p.textContent = "and " + (M.sel.length - 6) + " more here: zoom in."; box.appendChild(p); }
+}
+function mapTap(sx, sy) {
+  const hits = (M.pts || []).filter(([x, y]) => Math.hypot(x - sx, y - sy) <= 28);
+  M.sel = hits.length ? hits.sort((a, b) => Math.hypot(a[0] - sx, a[1] - sy) - Math.hypot(b[0] - sx, b[1] - sy)).map(p => p[2]) : null;
+  renderInfo(); mapDraw();
+}
+function renderLegend() {
+  const doc = M.doc, leg = $("mLeg");
+  leg.textContent = "";
+  const add = (cls, sym, text) => {
+    const e = document.createElement("span");
+    const s = document.createElement("span"); s.className = "s " + cls; s.textContent = sym;
+    e.append(s, text); leg.appendChild(e);
+  };
+  if (doc && doc.me) add("mk-me", "■", (doc.me.call || "You") + " · " + doc.me.grid);
+  const dec = doc ? doc.decoder : null;
+  for (const k of ["js8", "wspr"]) {
+    const n = doc ? doc.stations.filter(s => s.mode === k).length : 0;
+    if (n || k === dec) add("mk-" + k, MODE[k][1], MODE[k][0] + " · " + n + (n === 1 ? " station" : " stations"));
+  }
+  const nLook = doc ? doc.stations.filter(s => s.src === "addr" || s.src === "zip").length : 0;
+  const nCty = doc ? doc.stations.filter(s => s.src === "country").length : 0;
+  if (nLook) add("mk-hollow", "○", "Approx., from licence · " + nLook);
+  if (nCty) add("mk-hollow big", "◌", "Country only · " + nCty);
+  const msgs = [];
+  if (doc) {
+    for (const k of ["js8", "wspr"]) {
+      const n = doc.no_grid && doc.no_grid[k];
+      if (n) msgs.push(n + " " + MODE[k][0] + (n === 1 ? " station" : " stations") + " heard without a grid, not on the map.");
+    }
+    msgs.unshift("Stations heard in the last " + doc.hours + " hours, at the centre of their grid square." +
+      (nLook || nCty ? " Hollow markers are stations that never sent a grid, placed from the offline callsign database; country-only ones aren't counted by Fit all." : ""));
+  }
+  const t = M.tiles;
+  if (t) msgs.push(t.available ? "Map tiles: offline, zoom " + t.min + "–" + t.max + "." : "No map tiles on this rxd: grid lines only.");
+  setText($("mMsg"), msgs.join(" "));
+}
+async function mapPoll() {
+  clearTimeout(M.timer);
+  if (!M.open) return;
+  if (mapShown() && !M.busy) {
+    M.busy = true;
+    try {
+      if (!M.tiles) { const r = await api("/tiles/info.json"); if (r.ok && r.doc) M.tiles = r.doc; else if (r.status === 404) M.tiles = {available: false}; }
+      const r = await api("/api/stations");
+      if (r.ok && r.doc && Array.isArray(r.doc.stations)) {
+        M.doc = r.doc;
+        if (M.sel) {  // keep the selection on the same stations
+          const keys = new Set(M.sel.map(s => s ? s.mode + s.call : "me"));
+          M.sel = (M.doc.me && keys.has("me") ? [null] : []).concat(M.doc.stations.filter(s => keys.has(s.mode + s.call)));
+          if (!M.sel.length) M.sel = null;
+        }
+        if (!M.fitted) { M.fitted = true; mapFit(); }
+        renderLegend(); renderInfo(); mapDraw();
+      }
+    } catch (e) {}
+    M.busy = false;
+  }
+  M.timer = setTimeout(mapPoll, 15000);
+}
+function renderMapOpen() {
+  const b = $("mapTog");
+  b.setAttribute("aria-expanded", String(M.open));
+  b.textContent = M.open ? "▾ Hide map" : "▸ Show map of stations";
+  $("mapBody").hidden = !M.open;
+  $("mPath").setAttribute("aria-pressed", String(M.paths));
+  $("mPath").textContent = M.paths ? "✓ Paths" : "Paths";
+  if (!M.open) { clearTimeout(M.timer); for (const img of M.imgs.values()) img.remove(); M.imgs.clear(); }
+}
+$("mapTog").onclick = () => {
+  M.open = !M.open; store("map", M.open ? "1" : "0");
+  renderMapOpen();
+  if (M.open) { mapColors(); mapDraw(); mapPoll(); }
+};
+$("mIn").onclick = () => zoomAt(2, mapV.clientWidth / 2, mapV.clientHeight / 2);
+$("mOut").onclick = () => zoomAt(0.5, mapV.clientWidth / 2, mapV.clientHeight / 2);
+$("mFit").onclick = mapFit;
+$("mPath").onclick = () => { M.paths = !M.paths; store("mapPaths", M.paths ? "1" : "0"); renderMapOpen(); mapDraw(); };
+
+// drag to pan, pinch to zoom, tap to pick; the wheel zooms on a desktop
+const mp = new Map();
+let mTapAt = null, mPinch = null;
+function mRel(e) { const r = mapV.getBoundingClientRect(); return [e.clientX - r.left, e.clientY - r.top]; }
+mapV.addEventListener("pointerdown", e => {
+  try { mapV.setPointerCapture(e.pointerId); } catch (err) {}
+  mp.set(e.pointerId, mRel(e));
+  mTapAt = mp.size === 1 ? mRel(e) : null;
+  mPinch = null;
+});
+mapV.addEventListener("pointermove", e => {
+  if (!mp.has(e.pointerId)) return;
+  const prev = mp.get(e.pointerId), cur = mRel(e);
+  if (mTapAt && Math.hypot(cur[0] - mTapAt[0], cur[1] - mTapAt[1]) > 8) mTapAt = null;
+  if (mp.size === 1) {
+    const W = worldW(M.z);
+    M.cx -= (cur[0] - prev[0]) / W; M.cy -= (cur[1] - prev[1]) / W;
+    mp.set(e.pointerId, cur); clampView(); mapDraw();
+  } else if (mp.size === 2) {
+    mp.set(e.pointerId, cur);
+    const [a, b] = [...mp.values()];
+    const mid = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2], dist = Math.max(1, Math.hypot(a[0] - b[0], a[1] - b[1]));
+    if (mPinch) {
+      const W = worldW(M.z);
+      M.cx -= (mid[0] - mPinch.mid[0]) / W; M.cy -= (mid[1] - mPinch.mid[1]) / W;
+      zoomAt(dist / mPinch.dist, mid[0], mid[1]);
+    }
+    mPinch = {mid, dist};
+  }
+});
+function mUp(e) {
+  if (!mp.has(e.pointerId)) return;
+  mp.delete(e.pointerId);
+  if (mTapAt && e.type === "pointerup") mapTap(mTapAt[0], mTapAt[1]);
+  mTapAt = null; mPinch = null;
+}
+mapV.addEventListener("pointerup", mUp);
+mapV.addEventListener("pointercancel", mUp);
+mapV.addEventListener("wheel", e => {
+  e.preventDefault();
+  const [x, y] = mRel(e);
+  zoomAt(Math.pow(2, -e.deltaY / (e.deltaMode ? 3 : 300)), x, y);
+}, {passive: false});
+mapV.addEventListener("dblclick", e => { const [x, y] = mRel(e); zoomAt(2, x, y); });
+
+// redraw for a new size (the card shown again, a rotation) or appearance
+if (window.ResizeObserver) new ResizeObserver(() => { if (M.open && mapV.clientWidth) { clampView(); mapDraw(); mapPoll(); } }).observe(mapV);
+new MutationObserver(() => { mapColors(); if (M.open) mapDraw(); }).observe(document.documentElement, {attributes: true, attributeFilter: ["data-theme"]});
+window.matchMedia("(prefers-color-scheme: dark)").addEventListener?.("change", () => { mapColors(); if (M.open) mapDraw(); });
+document.addEventListener("visibilitychange", () => { if (!document.hidden && M.open) mapPoll(); });
+mapColors(); renderMapOpen(); renderInfo();
+if (M.open) mapPoll();
 
 // ---------------------------------------------------------------- start
 document.addEventListener("visibilitychange", () => {

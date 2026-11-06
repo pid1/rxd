@@ -41,6 +41,7 @@ import re
 import signal
 import socket
 import shutil
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -2871,6 +2872,367 @@ def make_bands(rx, js8):
     return bp
 
 
+# ---------------------------------------------------------------------- map
+# The web UI's station map. Two endpoints, both read-only:
+#   GET /tiles/Z/X/Y.png  offline raster tiles (z/x/y, Web Mercator), from
+#                         $RXD_TILES or the tree setup.sh installs for
+#                         meshtastic-ui: ~/.portduino/default/maps/<style>/
+#                         (OSM standard style, zoom 1-6 worldwide). Nothing
+#                         is ever fetched from the internet.
+#   GET /tiles/info.json  whether there are tiles, and which zooms
+#   GET /api/stations     stations heard by JS8 and WSPR that have a grid,
+#                         one per mode and call, at their grid square's centre
+# Grids for JS8 stations come from their own heartbeats and CQs ("Q1ABC: @HB
+# HEARTBEAT FN31"), in rxd's JS8 logs: DIRECTED.TXT keeps the grid of those,
+# and ALL.TXT beside it has every frame, including those of messages that
+# never finished. Learned grids are kept in $RXD_GRIDS
+# (~/.local/share/rxd/grids.json) so a station that heartbeats once stays on
+# the map when it's heard again later. No online callsign lookups.
+
+TILE_DIRS = (os.environ.get("RXD_TILES", ""), "~/.portduino/default/maps", "/maps")
+TILE_TYPES = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg", "webp": "image/webp"}
+TILE_PATH = re.compile(r"^/tiles/(\d{1,2})/(\d{1,7})/(\d{1,7})\.(png|jpg|jpeg|webp)$")
+GRIDS_FILE = os.path.expanduser(os.environ.get("RXD_GRIDS", "~/.local/share/rxd/grids.json"))
+TILE_ATTRIBUTION = "\u00a9 OpenStreetMap contributors"
+
+
+def tile_root(dirs=TILE_DIRS):
+    """The first directory holding a z/x/y tree, as (path, sorted zooms), else (None, [])."""
+    for d in dirs:
+        if not d:
+            continue
+        d = os.path.expanduser(d)
+        try:
+            names = os.listdir(d)
+        except OSError:
+            continue
+        zooms = sorted(int(n) for n in names if n.isdigit() and os.path.isdir(os.path.join(d, n)))
+        if zooms:
+            return os.path.realpath(d), zooms
+        # meshtastic-ui's layout: maps/<style>/z/x/y, OSM's style first
+        for style in sorted(names, key=lambda n: (n not in ("openstreetmap", "osm"), n)):
+            sub = os.path.join(d, style)
+            try:
+                zs = sorted(int(n) for n in os.listdir(sub) if n.isdigit())
+            except OSError:
+                continue
+            if zs:
+                return os.path.realpath(sub), zs
+    return None, []
+
+
+def tile_file(root, path):
+    """The file for /tiles/Z/X/Y.ext under root, or None for anything else."""
+    m = TILE_PATH.match(path)
+    if not root or not m:
+        return None, None
+    z, x, y = int(m[1]), int(m[2]), int(m[3])
+    if z > 22 or x >= 1 << z or y >= 1 << z:
+        return None, None
+    f = os.path.realpath(os.path.join(root, str(z), str(x), "%d.%s" % (y, m[4])))
+    if not f.startswith(root + os.sep) or not os.path.isfile(f):
+        return None, None
+    return f, TILE_TYPES[m[4]]
+
+
+def serve_tile(h, path):
+    root, zooms = getattr(h.server, "tile_root", None) or tile_root()
+    if path == "/tiles/info.json":
+        return h.send(200, {"available": bool(root), "zooms": zooms,
+                            "min": zooms[0] if zooms else None, "max": zooms[-1] if zooms else None,
+                            "attribution": TILE_ATTRIBUTION if root else None})
+    f, ctype = tile_file(root, path)
+    if not f:
+        return h.send(404, {"error": "no such tile"})
+    with open(f, "rb") as fh:
+        body = fh.read()
+    h.send_response(200)
+    h.send_header("Content-Type", ctype)
+    h.send_header("Content-Length", str(len(body)))
+    h.send_header("Cache-Control", "max-age=86400")
+    h.end_headers()
+    h.wfile.write(body)
+
+
+def js8_grid(text):
+    """(call, grid) from a JS8 heartbeat or CQ that carries one, else None."""
+    frm, _, body = (text or "").replace("\u2662", "").partition(":")
+    frm, words = frm.strip(), body.split()
+    if len(words) < 2 or not CALLSIGN.match(frm) or not GRID.match(words[-1]):
+        return None
+    if not {"HEARTBEAT", "CQ", "GRID"} & set(words[:-1]):
+        return None
+    g = words[-1]
+    return frm, g[:4].upper() + g[4:].lower()
+
+
+# ALL.TXT, one line per JS8 frame:
+# "2026-11-06 10:47:00-11  0.3  605 B  3+pVJzNoOkJW         3    WD4UQ: @HB HEARTBEAT EM88"
+JS8_ALL_LINE = re.compile(r"^(\d{4}-\d\d-\d\d \d\d:\d\d:\d\d)\s*([+-]?\d+)\s+[+-]?\d+\.\d+\s+\d+\s+"
+                          r"\S\s+\S+\s+\d+\s+(.*\S)\s*$")
+
+
+def iso_utc(t):
+    """'2026-11-06 10:47:03' or '2026-11-06T12:20:00Z' (both UTC) -> '2026-11-06T10:47:03Z'."""
+    m = re.match(r"^(\d{4}-\d\d-\d\d)[ T](\d\d:\d\d)(:\d\d)?", t or "")
+    return "%sT%s%sZ" % (m[1], m[2], m[3] or ":00") if m else None
+
+
+# The offline callsign database rxd/callsign_db.py builds (FCC licences
+# geocoded to 6-character grids, ZIP centroids, and cty.dat prefixes for
+# everyone else). Read-only here; reopened when the updater replaces it.
+CALLSIGNS_DB = os.path.expanduser(os.environ.get("RXD_CALLSIGNS", "~/.local/share/rxd/callsigns.sqlite"))
+# call suffixes that say how, not where: /P portable, /M mobile, /QRP ...
+CALL_SUFFIXES = {"P", "M", "QRP", "QRPP", "A", "LH", "R", "B", "J", "Y"}
+
+
+class CallBook:
+    """call -> {"grid", "prec": "addr" | "zip" | "country", "region"}, or None."""
+
+    def __init__(self, path=None):
+        self.path = path or CALLSIGNS_DB
+        self.con = self.stamp = None
+        self.memo = {}
+
+    def db(self):
+        try:
+            st = os.stat(self.path)
+        except OSError:
+            st = None
+        stamp = st and (st.st_ino, st.st_mtime_ns)
+        if stamp != self.stamp:
+            if self.con:
+                self.con.close()
+            self.con, self.stamp, self.memo = None, stamp, {}
+            if st:
+                try:
+                    self.con = sqlite3.connect("file:%s?mode=ro" % urllib.parse.quote(self.path),
+                                               uri=True, check_same_thread=False)
+                    self.con.execute("SELECT 1 FROM calls LIMIT 1")
+                except sqlite3.Error as e:
+                    log("callsign database %s unusable: %s" % (self.path, e))
+                    self.con = None
+        return self.con
+
+    def country(self, con, s):
+        keys = ["=" + s] + [s[:n] for n in range(len(s), 0, -1)]
+        rows = dict((k, (g, e)) for k, g, e in con.execute(
+            "SELECT prefix, grid, entity FROM prefixes WHERE prefix IN (%s)" % ",".join("?" * len(keys)),
+            keys))
+        for k in keys:
+            if k in rows:
+                return {"grid": rows[k][0], "prec": "country", "region": rows[k][1]}
+        return None
+
+    def lookup(self, call):
+        con = self.db()
+        call = (call or "").strip().upper()
+        if not con or not call:
+            return None
+        if call in self.memo:
+            return self.memo[call]
+        try:
+            self.memo[call] = r = self.find(con, call)
+        except sqlite3.Error:
+            r = None
+        return r
+
+    def find(self, con, call):
+        parts = [p for p in call.split("/") if p]
+        if not parts or any(p in ("MM", "AM") for p in parts[1:]):
+            return None  # at sea or in the air
+        r = con.execute("SELECT grid, entity FROM prefixes WHERE prefix=?", ("=" + call,)).fetchone()
+        if r:
+            return {"grid": r[0], "prec": "country", "region": r[1]}
+        full = [p for p in parts if CALLSIGN.match(p)]
+        home = max(full, key=len) if full else parts[0]
+        rest = [p for p in parts if p != home and p not in CALL_SUFFIXES]
+        if rest:  # VE3/KA1PID, EA8/K1ABC, KA1PID/4: operating away from home
+            where = rest[0]
+            if where.isdigit():
+                where = home
+            return self.country(con, where)
+        r = con.execute("SELECT grid, prec, region FROM calls WHERE call=?", (home,)).fetchone()
+        if r:
+            return {"grid": r[0], "prec": r[1], "region": r[2]}
+        return self.country(con, home)
+
+
+class StationMap:
+    """Heard stations with a grid, merged per mode and call, for /api/stations."""
+
+    ALL_TAIL = 262144
+
+    def __init__(self, js8=None, wspr=None, all_path=None, grids_path=None, clock=time.time,
+                 me=None, book=None):
+        self.js8 = js8                # a Js8Feed (or anything with since())
+        self.book = book if book is not None else CallBook()  # the offline callsign database
+        self.wspr = wspr              # a callable returning the WsprDecoder or None
+        self.all_path = all_path if all_path is not None else \
+            os.path.join(os.path.dirname(JS8_LOG), "ALL.TXT")
+        self.grids_path = grids_path if grids_path is not None else GRIDS_FILE
+        self.clock = clock
+        self.me = me if me is not None else station_id()
+        self.lock = threading.Lock()
+        self.grids = {}               # call -> {"grid", "time"}
+        self.heard = {}               # call -> JS8 frames from ALL.TXT: {"time", "snr", "freq"}
+        self.all_pos = self.all_inode = None
+        self.dirty = False
+        try:
+            with open(self.grids_path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            self.grids = {c: v for c, v in doc.items()
+                          if isinstance(v, dict) and GRID.match(str(v.get("grid", "")))}
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    @staticmethod
+    def lines(src):
+        if src is None:
+            return []
+        lk = getattr(src, "lock", None)
+        if isinstance(getattr(src, "lines", None), collections.deque) and lk is not None:
+            if hasattr(src, "refresh"):
+                src.since(1 << 62)  # reads anything new in the log
+            with lk:
+                return list(src.lines)
+        return src.since(0).get("lines", [])
+
+    def learn(self, call, grid, t):
+        old = self.grids.get(call)
+        if old and (t or "") < (old.get("time") or ""):
+            return  # an older frame: keep the newer grid
+        if not old or old["grid"] != grid:
+            self.dirty = True
+        self.grids[call] = {"grid": grid, "time": t}
+
+    def read_all(self):
+        """New heartbeat and CQ frames with grids from ALL.TXT."""
+        try:
+            st = os.stat(self.all_path)
+        except OSError:
+            return
+        if self.all_inode != st.st_ino or (self.all_pos or 0) > st.st_size:
+            self.all_inode, self.all_pos = st.st_ino, max(st.st_size - self.ALL_TAIL, 0)
+        if self.all_pos == st.st_size:
+            return
+        with open(self.all_path, "rb") as fh:
+            fh.seek(self.all_pos)
+            data = fh.read()
+        cut = data.rfind(b"\n") + 1
+        self.all_pos += cut
+        for raw in data[:cut].decode("utf-8", "replace").split("\n"):
+            m = JS8_ALL_LINE.match(raw)
+            cg = m and js8_grid(m[3])
+            if cg:
+                t = iso_utc(m[1])
+                self.learn(cg[0], cg[1], t)
+                self.heard.setdefault(cg[0], []).append({"time": t, "snr": int(m[2])})
+                del self.heard[cg[0]][:-50]
+
+    def save(self):
+        if not self.dirty:
+            return
+        self.dirty = False
+        try:
+            os.makedirs(os.path.dirname(self.grids_path), exist_ok=True)
+            tmp = self.grids_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.grids, fh, sort_keys=True)
+            os.replace(tmp, self.grids_path)
+        except OSError as e:
+            log("can't save grids to %s: %s" % (self.grids_path, e))
+
+    def snapshot(self, hours=24.0):
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(self.clock() - hours * 3600))
+        out, nogrid = {}, set()
+
+        def add(mode, call, grid, t, snr, freq=None, dbm=None):
+            if not t or t < cutoff:
+                return
+            src, region = "heard", None
+            if not grid:
+                # never heard with a grid: the callsign database, if it knows
+                found = self.book.lookup(call) if self.book else None
+                if not found:
+                    nogrid.add((mode, call))
+                    return
+                grid, src, region = found["grid"], found["prec"], found.get("region")
+            k = (mode, call)
+            s = out.get(k)
+            if s is None:
+                ll = grid_latlon(grid)
+                s = out[k] = {"call": call, "mode": mode, "grid": grid, "lat": round(ll[0], 4),
+                              "lon": round(ll[1], 4),
+                              "km": grid_km(self.me[1], grid) if src != "country" else None,
+                              "snr": snr, "last": t, "last_snr": snr, "freq": freq, "dbm": dbm,
+                              "src": src, "region": region}
+            if snr is not None and (s["snr"] is None or snr > s["snr"]):
+                s["snr"] = snr
+            if t >= s["last"]:
+                s["last"], s["last_snr"] = t, snr
+                if freq is not None:
+                    s["freq"] = freq
+                if dbm is not None:
+                    s["dbm"] = dbm
+                if grid != s["grid"] and src == "heard" == s["src"]:  # moved: plot it where it is now
+                    ll = grid_latlon(grid)
+                    s.update(grid=grid, lat=round(ll[0], 4), lon=round(ll[1], 4),
+                             km=grid_km(self.me[1], grid))
+
+        with self.lock:
+            self.read_all()
+            js8 = self.lines(self.js8)
+            for ln in js8:
+                cg = js8_grid(ln.get("text"))
+                if cg:
+                    self.learn(cg[0], cg[1], iso_utc(ln.get("time")))
+            wspr = self.wspr() if self.wspr else None
+            spots = self.lines(wspr)
+            for sp in spots:
+                if sp.get("grid") and sp.get("call"):
+                    self.learn(sp["call"], sp["grid"], sp.get("time"))
+            self.save()
+            grids = self.grids
+            for call, frames in self.heard.items():
+                for f in frames:
+                    add("js8", call, grids[call]["grid"], f["time"], f["snr"])
+            for ln in js8:
+                call = ln.get("from")
+                t = iso_utc(ln.get("time"))
+                if not call or not CALLSIGN.match(call):
+                    continue
+                g = grids.get(call)
+                add("js8", call, g and g["grid"], t, ln.get("snr"), ln.get("freq"))
+            for sp in spots:
+                call = sp.get("call")
+                g = sp.get("grid") or (grids.get(call) or {}).get("grid")
+                add("wspr", call, g, sp.get("time"), sp.get("snr"), sp.get("freq"), sp.get("dbm"))
+        stations = sorted(out.values(), key=lambda s: s["last"], reverse=True)
+        call, grid = self.me
+        ll = grid_latlon(grid)
+        me = {"call": call, "grid": grid, "lat": ll[0], "lon": ll[1]} if ll else None
+        return {"me": me, "hours": hours, "stations": stations,
+                "no_grid": {m: sum(1 for x in nogrid if x[0] == m and x not in out)
+                            for m in ("js8", "wspr")}}
+
+
+def serve_stations(h):
+    srv = h.server
+    if getattr(srv, "stations", None) is None:
+        srv.stations = StationMap(js8=getattr(srv, "js8", None), wspr=lambda: srv.rx.wspr)
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(h.path).query)
+    try:
+        hours = float(q.get("hours", ["24"])[0])
+        if not 0 < hours <= 24 * 30:
+            raise ValueError
+    except ValueError:
+        return h.send(400, {"error": "hours must be a number from 0 to 720"})
+    doc = srv.stations.snapshot(hours)
+    doc["decoder"] = srv.rx.s.decoder
+    return h.send(200, doc)
+
+
 # The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
 # a checkout. Read on every request so a reinstall needs no restart.
 WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
@@ -2932,6 +3294,10 @@ class Api(BaseHTTPRequestHandler):
             return self.audio()
         if path == "/api/bands":
             return self.bands_get()
+        if path.startswith("/tiles/"):
+            return serve_tile(self, path)
+        if path == "/api/stations":
+            return serve_stations(self)
         if path in ("/", "/index.html"):
             page = web_page()
             if page is None:
