@@ -85,6 +85,7 @@ What rxd is doing. Clients poll it, about twice a second.
 | `clock` | object | `synced` (bool, null when chrony can't say), `source` (`GPS`, `network` or null), `offset_s` |
 | `band_plan` | object or null | The band plan's status (see `GET /api/v1/bands`); null when it isn't running |
 | `listeners` | int | Audio streams open |
+| `hd` | object | HD Radio on a WFM profile, below |
 
 **`upconverter`**: `name`, `switch` (true: a person flips it), `needs`
 (`upconvert` or `bypass`: the side the tuning needs now), `position` (the
@@ -131,6 +132,42 @@ heard at.
 `last`, `error`, `skipped`, `cpu_pct`, `jsc` (the JSC word table is
 installed), `log` (the DIRECTED.TXT path).
 
+**`hd`**: HD Radio (NRSC-5), decoded by
+[nrsc5](https://github.com/theori-io/nrsc5) run as a separate program.
+
+A WFM profile plays analog at once. When the spectrum shows HD's digital
+sidebands, rxd starts nrsc5. Once nrsc5 has held sync with clean audio for a
+few seconds, rxd crossfades to HD1, lined up with the analog. Any fault fades
+straight back to analog. Each fallback doubles the wait before HD returns
+(4 s up to 64 s), so a fringe station doesn't flap. HD2 and up are
+digital-only: silent without HD. The block is always present, with `state`
+`off` when HD isn't possible.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `state` | string | `off`, `no signal`, `acquiring`, `digital` or `analog fallback` |
+| `reason` | string | One plain sentence: "Playing HD Radio.", "Analog: lining HD up with analog.", "Back on analog: nrsc5 lost sync.", "HD Radio: nrsc5 not installed" |
+| `available` | bool | HD can run on this profile (WFM, turned on, nrsc5 installed) |
+| `enabled` | bool | The profile's HD setting (`radio save` keeps it) |
+| `station_enabled` | bool | The station file's `hd` setting ([station.md](station.md)) |
+| `program` | int | The program chosen: 0 is HD1, 1 is HD2 ... (`radio save` keeps it) |
+| `programs` | list | The station's audio programs: `{"program", "name" ("HD1"), "type" (a program type such as "Jazz", or null)}`. Empty until nrsc5 has heard the list |
+| `station`, `slogan` | string or null | The station's name and slogan, as broadcast |
+| `title`, `artist`, `album` | string or null | What the chosen program is playing |
+| `mer_db` | object or null | Modulation error ratio, `{"lower", "upper"}` dB, one per sideband |
+| `ber` | number or null | nrsc5's bit error rate (before error correction) |
+| `synced` | bool | nrsc5 is in sync now |
+| `clean_s` | number | In `digital`, how long it has played; otherwise how long the signal has been clean toward the hold |
+| `hold_s` | number | How long it must stay clean before HD plays |
+| `sidebands` | object or null | The detector: `present`, `lower_db` and `upper_db` (each sideband over the floor), `floor_db` |
+| `running` | bool | nrsc5 is running |
+| `analog_delay_s` | number | How far the analog is delayed to line up with HD. 0 when HD comes out ahead, as it usually does; then the HD is held back instead |
+| `hd_lead_s` | number or null | How far nrsc5's audio runs ahead of the same audio on analog; negative is behind |
+| `dropped`, `bad_frames` | int | IQ blocks nrsc5 couldn't take, and audio frames it filled with silence |
+
+A client shows `state` in words, not by colour alone, and doesn't show
+`clean_s` as a ticking age.
+
 ## POST /api/v1/tune
 
 Changes tuning now. Any of these fields; the answer is the new status.
@@ -145,6 +182,8 @@ Changes tuning now. Any of these fields; the answer is the new status.
 | `volume` | number | 0 to 4 |
 | `squelch` | number or null | -150 to 0 dBFS; null turns it off |
 | `wspr_report` | bool | report WSPR spots to WSPRnet |
+| `hd_program` | int | 0 (HD1) to 7 (HD8): the HD Radio program; changing it restarts nrsc5 |
+| `hd_enabled` | bool | HD Radio on this profile |
 | `audio_auto`, `audio_filter`, `audio_norm`, `audio_limit`, `audio_squelch` | bool | |
 | `audio_nr` | bool or null | null: by mode (on, except WFM) |
 
@@ -208,7 +247,9 @@ WSPR spots: `{"seq": N, "lines": [...]}`, each `{"seq", "time" (ISO),
 ## GET /api/v1/audio?rate=R
 
 The demodulated audio as it plays, after squelch and clean-up but before the
-volume: a stream that runs until either side closes it.
+volume: a stream that runs until either side closes it. On a WFM profile
+playing HD Radio it is the HD audio (blended with analog, or HD2 and up),
+in mono, the same as the speaker.
 
 - **Rates:** 12000, 24000 (default) or 48000 Hz; another is `400`.
 - **Format:** raw signed 16-bit little-endian, mono, no header
@@ -284,5 +325,6 @@ curl -s -XPOST -d '{"freq": 7078000, "mode": "USB"}' 127.0.0.1:8073/api/v1/tune
 curl -s -XPOST -d '{"position": "bypass"}' 127.0.0.1:8073/api/v1/switch
 curl -s -XPOST -d '{"name": "wspr-20m", "switch": "upconvert"}' 127.0.0.1:8073/api/v1/profile
 curl -s '127.0.0.1:8073/api/v1/js8?after=0'
+curl -s -XPOST -d '{"hd_program": 1}' 127.0.0.1:8073/api/v1/tune   # HD2
 curl -s '127.0.0.1:8073/api/v1/audio?rate=24000' | aplay -f S16_LE -r 24000 -c 1
 ```

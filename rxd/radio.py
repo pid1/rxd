@@ -430,6 +430,10 @@ def capture(p, st):
             saved["nr"] = au["nr_setting"]
         if saved:
             p["audio"] = saved
+    hd = st.get("hd")
+    if isinstance(hd, dict) and isinstance(hd.get("program"), int):
+        # The profile's HD Radio choice: HD1, HD2 ... and whether HD is on for it.
+        p["hd"] = {"enabled": hd.get("enabled") is not False, "program": hd["program"]}
     report = (st.get("wspr") or {}).get("report") or {}
     if p.get("decoder") == "wspr" and "reason" not in report and "enabled" in report:
         p["wspr_report"] = bool(report["enabled"])

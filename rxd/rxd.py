@@ -73,6 +73,7 @@ STATE = os.path.expanduser("~/.config/rxd/radio")
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
 import station as station_conf  # noqa: E402
+import hd as hd_mod  # noqa: E402
 import location as location_conf  # noqa: E402
 AUDIO_RATE = 48000
 # A profile's "offset": "auto" (the default) upconverts below
@@ -154,6 +155,27 @@ def load_profile(spec):
     return p, path
 
 
+def hd_program_value(v):
+    """An HD program number: 0 is HD1 (the main program) ... 7 is HD8."""
+    if isinstance(v, bool) or not isinstance(v, int) or not 0 <= v <= 7:
+        raise ValueError("hd_program must be 0 (HD1) to 7 (HD8)")
+    return v
+
+
+def hd_profile(v):
+    """A profile's "hd": true/false, or {"enabled": bool, "program": N} -> (enabled, program)."""
+    if v is None:
+        return True, 0
+    if isinstance(v, bool):
+        return v, 0
+    if not isinstance(v, dict):
+        raise ValueError('hd must be true, false or {"enabled": ..., "program": N}')
+    enabled = v.get("enabled", True)
+    if not isinstance(enabled, bool):
+        raise ValueError("hd.enabled must be true or false")
+    return enabled, hd_program_value(v.get("program", 0))
+
+
 class Settings:
     """What to receive. Shared between the control ports and the DSP thread."""
 
@@ -204,6 +226,7 @@ class Settings:
             if self.decoder not in DECODERS:
                 raise ValueError("decoder must be one of " + ", ".join(d for d in DECODERS if d))
             self.wspr_report = bool(p.get("wspr_report", True))
+            self.hd_enabled, self.hd_program = hd_profile(p.get("hd"))
             self.version = getattr(self, "version", 0) + 1
 
     def snapshot(self):
@@ -215,7 +238,8 @@ class Settings:
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
                         volume=self.volume, gain_db=self.gain_db, squelch=self.squelch,
                         wspr_report=self.wspr_report, gain_auto=self.gain_auto,
-                        audio=dict(self.audio), version=self.version)
+                        audio=dict(self.audio), hd_enabled=self.hd_enabled,
+                        hd_program=self.hd_program, version=self.version)
 
     def upconverter(self):
         """The offset in effect for the current dial (call with the lock held)."""
@@ -226,10 +250,15 @@ class Settings:
         return 0.0
 
     def update(self, freq=None, mode=None, bandwidth=None, gain_db=None,
-               volume=None, squelch=Ellipsis, wspr_report=None, gain_auto=None, **audio):
+               volume=None, squelch=Ellipsis, wspr_report=None, gain_auto=None,
+               hd_program=None, hd_enabled=None, **audio):
         with self.lock:
             if gain_auto is not None and not isinstance(gain_auto, bool):
                 raise ValueError("gain_auto must be true or false")
+            if hd_enabled is not None and not isinstance(hd_enabled, bool):
+                raise ValueError("hd_enabled must be true or false")
+            if hd_program is not None:
+                hd_program = hd_program_value(hd_program)
             new_audio = audio_update(self.audio, audio)
             if wspr_report is not None:
                 if not isinstance(wspr_report, bool):
@@ -256,6 +285,10 @@ class Settings:
             if gain_auto is not None:
                 self.gain_auto = gain_auto
             self.audio = new_audio
+            if hd_enabled is not None:
+                self.hd_enabled = hd_enabled
+            if hd_program is not None:
+                self.hd_program = hd_program
             if volume is not None:
                 volume = float(volume)
                 if not 0 <= volume <= 4:
@@ -279,8 +312,23 @@ class Settings:
 
 # ------------------------------------------------------------------ sources
 
+_ASYNC_CB = ctypes.CFUNCTYPE(None, ctypes.POINTER(ctypes.c_ubyte), ctypes.c_uint32,
+                             ctypes.c_void_p)
+
+
 class RtlSource:
-    """An RTL-SDR dongle through librtlsdr (the library radio already uses)."""
+    """An RTL-SDR dongle through librtlsdr (the library radio already uses).
+
+    Reads run librtlsdr's async loop in a thread of their own, with 15 USB
+    transfers of 256 kB in flight (about 1.3 s at 1488375 S/s). Read one
+    block at a time with rtlsdr_read_sync, as rxd did until 0.5.0, the
+    dongle loses whatever arrives while Python is busy between reads:
+    measured on the CM4, 1.1% of the samples at 1488375 S/s. FM shrugs that
+    off as a click; HD Radio's OFDM can't sync through it.
+    """
+
+    ASYNC_BUFS, ASYNC_LEN = 15, 262144
+    PENDING_S = 2.0   # bytes waiting for read_raw beyond this: drop the oldest
 
     def __init__(self, serial):
         path = ctypes.util.find_library("rtlsdr")
@@ -318,6 +366,51 @@ class RtlSource:
         self.center = None
         self.rate = None
         self.lock = threading.Lock()
+        self.has_async = hasattr(lib, "rtlsdr_read_async") and hasattr(lib, "rtlsdr_cancel_async")
+        if self.has_async:
+            lib.rtlsdr_read_async.argtypes = [ctypes.c_void_p, _ASYNC_CB, ctypes.c_void_p,
+                                              ctypes.c_uint32, ctypes.c_uint32]
+            lib.rtlsdr_cancel_async.argtypes = [ctypes.c_void_p]
+        self.cond = threading.Condition()
+        self.pending = bytearray()
+        self.streaming = None      # the async thread, while it runs
+        self.overruns = 0          # times read_raw fell PENDING_S behind and lost the oldest
+        self._cb = _ASYNC_CB(self._on_data)  # kept: librtlsdr calls it from its thread
+
+    def _on_data(self, buf, n, _ctx):
+        data = ctypes.string_at(buf, n)
+        with self.cond:
+            self.pending += data
+            limit = int(2 * (self.rate or 2.4e6) * self.PENDING_S)
+            if len(self.pending) > limit:
+                del self.pending[:len(self.pending) - limit]
+                self.overruns += 1
+            self.cond.notify_all()
+
+    def _stream(self):
+        try:
+            r = self.lib.rtlsdr_read_async(self.dev, self._cb, None, self.ASYNC_BUFS,
+                                           self.ASYNC_LEN)
+            if r != 0:
+                log("rtlsdr_read_async returned %d" % r)
+        finally:
+            with self.cond:
+                self.streaming = None
+                self.cond.notify_all()
+
+    def _start_stream(self):
+        with self.cond:
+            if self.streaming is None and self.dev is not None:
+                self.pending = bytearray()
+                self.lib.rtlsdr_reset_buffer(self.dev)
+                self.streaming = threading.Thread(target=self._stream, name="rtlsdr", daemon=True)
+                self.streaming.start()
+
+    def _stop_stream(self):
+        t = self.streaming
+        if t is not None:
+            self.lib.rtlsdr_cancel_async(self.dev)
+            t.join(timeout=3)
 
     def gains(self):
         n = self.lib.rtlsdr_get_tuner_gains(self.dev, None)
@@ -339,8 +432,12 @@ class RtlSource:
     def set_rate(self, rate):
         with self.lock:
             if rate != self.rate and self.dev is not None:
+                # Stop streaming: nothing read at the old rate gets through.
+                self._stop_stream()
                 self.lib.rtlsdr_set_sample_rate(self.dev, int(rate))
                 self.lib.rtlsdr_reset_buffer(self.dev)
+                with self.cond:
+                    self.pending = bytearray()
                 self.rate = rate
 
     def set_gain(self, db):
@@ -355,6 +452,12 @@ class RtlSource:
             self.center = float(hz)
 
     def read(self, n):
+        return cu8_to_complex(self.read_raw(n))
+
+    def read_raw(self, n):
+        """n samples as the dongle's own cu8 bytes (what nrsc5 reads)."""
+        if self.has_async:
+            return self._read_async(n)
         buf = (ctypes.c_uint8 * (2 * n))()
         got = ctypes.c_int()
         with self.lock:
@@ -363,15 +466,38 @@ class RtlSource:
             r = self.lib.rtlsdr_read_sync(self.dev, buf, 2 * n, ctypes.byref(got))
         if r != 0:
             raise IOError("rtlsdr_read_sync returned %d" % r)
-        return cu8_to_complex(np.frombuffer(buf, np.uint8, got.value))
+        return np.frombuffer(buf, np.uint8, got.value)
+
+    def _read_async(self, n):
+        want = 2 * n
+        if self.streaming is None:
+            if self.dev is None:
+                raise EOFError("closed")
+            self._start_stream()
+        with self.cond:
+            deadline = time.monotonic() + 5.0
+            while len(self.pending) < want:
+                if self.dev is None:
+                    raise EOFError("closed")
+                if self.streaming is None:
+                    raise IOError("the dongle stopped streaming")
+                if time.monotonic() > deadline:
+                    raise IOError("no samples from the dongle for 5 s")
+                self.cond.wait(0.5)
+            out = bytes(self.pending[:want])
+            del self.pending[:want]
+        return np.frombuffer(out, np.uint8)
 
     def close(self):
-        # Under the read lock: closing the device in the middle of a read
-        # fails that read, and can crash librtlsdr.
+        # Streaming stopped first, then under the lock: closing the device
+        # in the middle of a read can crash librtlsdr.
         with self.lock:
             if self.dev is not None:
+                self._stop_stream()
                 self.lib.rtlsdr_close(self.dev)
                 self.dev = None
+        with self.cond:
+            self.cond.notify_all()
 
 
 class FileSource:
@@ -402,10 +528,13 @@ class FileSource:
             self.center = float(hz)
 
     def read(self, n):
+        return cu8_to_complex(self.read_raw(n))
+
+    def read_raw(self, n):
         raw = self.fh.read(2 * n)
         if len(raw) < 2:
             raise EOFError
-        return cu8_to_complex(np.frombuffer(raw[: len(raw) // 2 * 2], np.uint8))
+        return np.frombuffer(raw[: len(raw) // 2 * 2], np.uint8)
 
     def close(self):
         if self.fh is not sys.stdin.buffer:
@@ -459,6 +588,13 @@ class SynthSource:
 # Every (I, Q) byte pair as one little-endian uint16 -> its complex sample.
 _CU8 = (np.arange(256, dtype=np.float32) - 127.5) / 127.5
 CU8_LUT = (_CU8[np.arange(65536) & 0xFF] + 1j * _CU8[np.arange(65536) >> 8]).astype(np.complex64)
+
+
+def complex_to_cu8(x):
+    """The inverse of cu8_to_complex, for a source with no bytes of its own (synth)."""
+    v = np.empty(2 * len(x), np.float32)
+    v[0::2], v[1::2] = x.real, x.imag
+    return np.clip(np.round(v * 127.5 + 127.5), 0, 255).astype(np.uint8)
 
 
 def cu8_to_complex(b):
@@ -600,12 +736,25 @@ class Chain:
     down at the decimated rate. Mixing every input sample first costs a
     complex exponential per sample, which at WFM's 1.2 MS/s alone was more
     than the CM4 has.
+
+    hd=True (a WFM profile that may play HD Radio) runs at nrsc5's 1488375
+    S/s with the dongle centred on the station, so its raw bytes can go to
+    nrsc5 untouched. With no offset the first filter's taps are real, and
+    filtering I and Q apart costs half a complex filter: measured on the CM4
+    the whole chain then costs the same as the 1.2 MS/s one (about 22% of a
+    core). 1488375 = 5 x 297675, and 297675 / 3 x 640/1323 is exactly 48 kHz,
+    done by a polyphase resampler (hd.PolyResampler).
     """
 
-    def __init__(self, mode, bandwidth, attack, decay):
+    def __init__(self, mode, bandwidth, attack, decay, hd=False):
         self.mode = mode
         self.bandwidth = bandwidth
-        if mode == "WFM":
+        self.hd = bool(hd and mode == "WFM")
+        if self.hd:
+            self.rate, self.if_rate = hd_mod.HD_RATE, hd_mod.HD_RATE / 5
+            self.offset = 0.0
+            cutoff = min(bandwidth / 2 + 15000, 100000)
+        elif mode == "WFM":
             self.rate, self.if_rate = 1200000, 240000
             self.offset = 250000.0
             cutoff = min(bandwidth / 2 + 15000, 100000)
@@ -613,9 +762,12 @@ class Chain:
             self.rate, self.if_rate = 240000, AUDIO_RATE
             self.offset = 50000.0
             cutoff = 20000.0 if mode in ("USB", "LSB") else min(bandwidth / 2 + 2000, 20000)
-        d1 = self.rate // self.if_rate
+        d1 = int(round(self.rate / self.if_rate))
         self.proto1 = sps.firwin(16 * d1 + 1, cutoff, fs=self.rate)
         self.stage1 = FirDecimator(self.proto1.astype(np.complex64), d1)
+        if self.hd:  # I and Q apart, for no offset
+            self.stage1_re = FirDecimator(self.proto1.astype(np.float32), d1)
+            self.stage1_im = FirDecimator(self.proto1.astype(np.float32), d1)
         self.shift = None  # the offset stage1's taps are built for
         fs = self.if_rate
         if mode == "WFM":
@@ -639,10 +791,22 @@ class Chain:
             a = np.exp(-1 / (fs * tau))
             self.deemph = ([1 - a], [1, -a])
             self.deemph_zi = np.zeros(1)
-            self.stage2 = FirDecimator(sps.firwin(63, 15000, fs=fs), fs // AUDIO_RATE)
+            if self.hd:
+                self.stage2 = FirDecimator(sps.firwin(63, 15000, fs=fs).astype(np.float32), 3)
+                self.resample = hd_mod.PolyResampler(640, 1323, 15500.0, fs / 3, 32)
+            else:
+                self.stage2 = FirDecimator(sps.firwin(63, 15000, fs=fs), int(fs // AUDIO_RATE))
+                self.resample = None
         self.level_db = -120.0
 
     def shift_decimate(self, x, offset):
+        if self.hd and offset == 0:
+            # Both stay in step with stage1 so a later offset carries on cleanly.
+            y = (self.stage1_re(np.ascontiguousarray(x.real)) +
+                 1j * self.stage1_im(np.ascontiguousarray(x.imag))).astype(np.complex64)
+            self.stage1.count += len(x)
+            self.stage1.phase = self.stage1_re.phase
+            return y
         w = 2 * np.pi * offset / self.rate
         if offset != self.shift:
             n = np.arange(len(self.proto1))
@@ -677,6 +841,8 @@ class Chain:
             d = self.fm(y) * (self.if_rate / (2 * np.pi * 75000.0))
             d, self.deemph_zi = sps.lfilter(*self.deemph, d, zi=self.deemph_zi)
             audio = self.stage2(d.astype(np.float32))
+            if self.resample is not None:
+                audio = self.resample(audio)
         return audio.astype(np.float32)
 
 
@@ -1160,6 +1326,9 @@ class Receiver:
         self.clock, self.wallclock = time.monotonic, time.time  # tests run on their own
         self.bands = None            # the BandPlanner, on a live rxd
         self.js8dec = None           # a js8.SlotDecoder, for JS8 decoded by rxd
+        self.hd = None               # an hd.Hd, on a WFM profile that may play HD Radio
+        self.hd_why = None           # why not, when it doesn't
+        self.nrsc5 = hd_mod.find_nrsc5  # () -> nrsc5's path or None; tests replace it
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -1186,9 +1355,34 @@ class Receiver:
         threading.Thread(target=self.reader, name="reader", daemon=True).start()
         threading.Thread(target=self.dsp, name="dsp", daemon=True).start()
 
+    def hd_capable(self, snap):
+        """(nrsc5 command or None, why not): whether this tuning may play HD Radio."""
+        if snap["mode"] != "WFM":
+            return None, "HD Radio is for FM broadcast (WFM) profiles."
+        st = station()
+        if not st.hd["enabled"]:
+            return None, "HD Radio is off for this station."
+        if not snap["hd_enabled"]:
+            return None, "HD Radio is off for this profile."
+        path = self.nrsc5(st.hd["nrsc5"])
+        if path is None:
+            return None, hd_mod.NOT_INSTALLED
+        return (list(path) if isinstance(path, (list, tuple)) else [path]), None
+
     def build(self, snap):
+        cmd, self.hd_why = self.hd_capable(snap)
         self.chain = Chain(snap["mode"], snap["bandwidth"], snap["agc_attack"],
-                           snap["agc_decay"])
+                           snap["agc_decay"], hd=cmd is not None)
+        if self.hd is not None:
+            self.hd.close()
+            self.hd = None
+        if cmd is not None:
+            self.hd = hd_mod.Hd(cmd, snap["hd_program"], clock=self.clock)
+            log("HD Radio: %s, program HD%d" % (cmd[0], snap["hd_program"] + 1))
+
+    def close(self):
+        if self.hd is not None:
+            self.hd.close()
 
     def rf(self, snap):
         return snap["dial"] + snap["upconverter"]
@@ -1196,6 +1390,13 @@ class Receiver:
     def retune(self, snap, force=False):
         rf = self.rf(snap)
         off = rf - (self.src.center or 0.0)
+        if self.chain.hd:  # centred on the station, for nrsc5
+            if force or self.src.center is None or abs(off) > 0.5:
+                self.src.set_center(rf)
+                if self.hd is not None:
+                    self.hd.retuned()
+            self.offset = rf - self.src.center
+            return
         lo = self.MIN_OFF if self.chain.mode != "WFM" else 150000.0
         hi = self.MAX_OFF if self.chain.mode != "WFM" else 400000.0
         if force or self.src.center is None or not lo <= abs(off) <= hi:
@@ -1208,7 +1409,15 @@ class Receiver:
     def reader(self):
         while not self.stop.is_set():
             try:
-                x = self.src.read(self.block_len())
+                raw = None
+                if self.chain.hd and hasattr(self.src, "read_raw"):
+                    raw = self.src.read_raw(self.block_len())
+                    x = cu8_to_complex(raw)
+                else:
+                    x = self.src.read(self.block_len())
+                    if self.chain.hd:
+                        raw = complex_to_cu8(x)
+                x = (x, raw)
             except EOFError:
                 self.q.put(None)
                 return
@@ -1234,10 +1443,14 @@ class Receiver:
             if x is None:
                 self.stop.set()
                 return
+            x, raw = x if isinstance(x, tuple) else (x, None)
             snap = self.s.snapshot()
             if snap["version"] != self.version:
                 rebuild = (snap["mode"] != self.chain.mode or
-                           snap["bandwidth"] != self.chain.bandwidth)
+                           snap["bandwidth"] != self.chain.bandwidth or
+                           (self.hd_capable(snap)[0] is not None) != self.chain.hd)
+                if not rebuild and self.hd is not None:
+                    self.hd.set_program(snap["hd_program"])
                 if rebuild:
                     self.build(snap)
                     self.src.set_rate(self.chain.rate)
@@ -1257,6 +1470,9 @@ class Receiver:
                     continue  # the block in hand was at the old rate
             t0 = time.thread_time()
             audio = self.chain(x, self.offset)
+            if self.hd is not None:
+                # Analog, HD or a crossfade: for the speaker and the stream alike.
+                audio = self.hd.process(audio, raw, self.clock())
             self.auto_gain(x, snap)
             if self.wspr is not None:  # before squelch and volume
                 self.wspr.push(audio, snap["dial"])
@@ -1277,6 +1493,8 @@ class Receiver:
             if now - self.spectrum_at >= self.SPECTRUM_EVERY:
                 self.spectrum_at = now
                 self.spectrum = self.make_spectrum(x, snap)
+                if self.hd is not None and self.spectrum is not None:
+                    self.hd.spectrum(self.spectrum)
 
     def auto_gain(self, x, snap):
         """Feed AutoGain a block and make the step it asks for."""
@@ -1424,7 +1642,19 @@ class Receiver:
                 "clock": clock_status(),
                 "band_plan": self.bands.status() if self.bands is not None else None,
                 "listeners": len(self.listeners),
+                "hd": self.hd_status(snap),
                 "api_version": API_VERSION, "version": VERSION}
+
+    def hd_status(self, snap):
+        if self.hd is not None:
+            doc = self.hd.status(self.clock())
+        else:
+            why = self.hd_why or self.hd_capable(snap)[1] or "HD Radio is starting."
+            doc = hd_mod.off_status(why, snap["hd_program"])
+        doc["enabled"] = snap["hd_enabled"]   # the profile's settings, which radio saves
+        doc["program"] = snap["hd_program"]
+        doc["station_enabled"] = station().hd["enabled"]
+        return doc
 
 
 # ---------------------------------------------------------------------- HTTP
@@ -3596,7 +3826,8 @@ class Api(BaseHTTPRequestHandler):
             if not isinstance(doc, dict):
                 raise ValueError("body must be a JSON object")
             unknown = set(doc) - {"freq", "mode", "bandwidth", "gain_db", "volume", "squelch",
-                                  "wspr_report", "gain_auto"} - {"audio_" + k for k in AUDIO_KEYS}
+                                  "wspr_report", "gain_auto", "hd_program", "hd_enabled"} - \
+                {"audio_" + k for k in AUDIO_KEYS}
             if unknown:
                 raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
             self.server.rx.s.update(**doc)
@@ -3808,6 +4039,7 @@ def main(argv=None):
         rx.stop.set()
     for srv in servers:
         srv.shutdown()
+    rx.close()
     src.close()
     sink.close()
     return 1 if rx.error else 0
