@@ -46,6 +46,7 @@ header .id{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;font-si
 .app{color:var(--dim);font-weight:600}
 .pill{font-size:17px;font-weight:600;white-space:nowrap}
 .ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.dimc{color:var(--dim)}
+.jclock{grid-column:1/-1;margin:4px 0 0}
 .banner{border:2px solid var(--bad);color:var(--bad);background:var(--panel);border-radius:10px;padding:12px 14px;font-weight:700;font-size:19px}
 .hiu{border:2px solid var(--accent);border-radius:10px;padding:10px 14px;display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 12px;background:var(--panel)}
 .hiu b{font-size:22px}
@@ -129,7 +130,7 @@ input[type=range]::-moz-range-thumb{width:26px;height:26px;border-radius:50%;bac
 .pgroup{font-size:15px;color:var(--dim);font-weight:700;margin:12px 0 0}
 .pgroup:first-child{margin-top:4px}
 .jstat{display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;padding:8px 12px}
-@media (min-width:700px){.jstat{grid-template-columns:repeat(4,auto);justify-content:space-between}}
+@media (min-width:700px){.jstat{grid-template-columns:repeat(5,auto);justify-content:space-between}}
 .wrap>*{order:0}
 body[data-view=manual] #aPick,body[data-view=manual] #js8,body[data-view=manual] #listenCard{order:1}
 body[data-view=manual] #pmsg,#appear0{order:2}
@@ -220,6 +221,8 @@ dialog .row2{margin-top:6px}
   <div><span class="k">Receiver</span><span id="jRx" class="v">—</span></div>
   <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
   <div><span class="k">Heard</span><span id="jHeard" class="v">—</span></div>
+  <div><span class="k">Clock</span><span id="jClock" class="v">—</span></div>
+  <p id="jClockBad" class="banner jclock" role="alert" hidden></p>
 </section>
 <section class="card" id="js8" data-v="js8 manual" data-live hidden>
   <div class="lbl"><span>JS8 decodes, newest first</span><span id="jCount"></span></div>
@@ -1364,6 +1367,18 @@ function renderJs8Stat(s, rxText, rxCls) {
   setText($("jRx"), rxText, rxCls);
   const lv = s.level_dbfs;
   setText($("jLvl"), typeof lv === "number" ? (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS" : "— dBFS", "v");
+  // JS8's 15 s slots fail silently past about 2 s of clock error, so a
+  // clock that isn't synced is the first thing to say.
+  const c = s.clock || {};
+  if (c.synced === true) setText($("jClock"), "● Synced" + (c.source ? " (" + c.source + ")" : ""), "v ok");
+  else if (c.synced === false) setText($("jClock"), "✕ Not synced", "v bad");
+  else setText($("jClock"), "? Unknown", "v");
+  const bad = $("jClockBad");
+  bad.hidden = c.synced !== false;
+  if (c.synced === false) {
+    const off = typeof c.offset_s === "number" ? " It is " + Math.abs(c.offset_s).toFixed(1) + " s " + (c.offset_s > 0 ? "fast" : "slow") + "." : "";
+    setText(bad, "✕ Clock not synced: JS8 won't decode until it is." + off + " No GPS fix and no network? Check chronyc sources.");
+  }
 }
 
 // ---------------------------------------------------------------- start
