@@ -371,6 +371,35 @@ class RadioTest(unittest.TestCase):
         _, err = self._last_err
         self.assertIn("rxd@vhf.service did not start: dongle SN 57818712", err)
 
+    def test_upconverting_follows_frequency_unless_pinned(self):
+        up = self.r.upconverting
+        for name in self.r.PROFILES:
+            self.assertEqual(self.r.PROFILES[name]["offset"], "auto", name)
+        self.assertTrue(up(self.r.PROFILES["js8"]))
+        self.assertTrue(up(self.r.PROFILES["am-820"]))
+        self.assertFalse(up(self.r.PROFILES["vhf"]))
+        self.assertFalse(up({"frequency": 7e6, "offset": "None"}))  # old saved, pinned
+        self.assertTrue(up({"frequency": 146e6, "offset": "Ham-It-Up"}))
+        self.assertFalse(up({"frequency": 7e6, "offset": "auto", "upconvert_below_hz": 5e6}))
+        self.assertIn("Ham It Up bypass", self.r.summary("vhf", self.r.PROFILES["vhf"]))
+        self.assertIn("Ham It Up upconvert", self.r.summary("js8", self.r.PROFILES["js8"]))
+
+    def test_flip_warning_to_bypass(self):
+        self.radio("am-820")
+        _, err = self.radio("noaa")
+        self.assertIn("flip the Ham It Up to BYPASS", err)
+        _, err = self.radio("vhf")
+        self.assertNotIn("flip", err)
+
+    def test_capture_keeps_offset_mode(self):
+        self.radio("js8")
+        self.rxd.status = {"freq": 7078000.0, "vfo_hz": 7077900.0, "mode": "USB",
+                           "upconverter_hz": 125e6, "offset_mode": "auto"}
+        self.radio("vhf")
+        p = self.saved("js8")
+        self.assertEqual(p["offset"], "auto")
+        self.assertNotIn("upconverter_hz", p)
+
     def test_list_and_show(self):
         out, _ = self.radio()
         self.assertIn("ghostnet", out)
