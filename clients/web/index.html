@@ -57,6 +57,22 @@ header .id{flex:1;min-width:0;display:flex;align-items:baseline;gap:10px;font-si
 :root[data-theme=night] .hiu.up{background:#3d0804;color:var(--fg);border-width:3px}
 .hiu span{font-size:16px}
 .hiu.stale{opacity:.55}
+.hiu .btn{min-height:56px;font-size:18px;padding:4px 14px;margin-left:auto;color:var(--fg)}
+.hiu.up .btn{border-color:var(--accent-fg)}
+/* the upconverter switch: which way it is, asked of the person (rxd can't see it) */
+.card.ask{border:3px solid var(--warn);display:grid;gap:8px}
+.askq{margin:0;font-size:clamp(22px,6vw,28px);font-weight:800;line-height:1.15}
+.asks{margin:0;font-size:17px;font-weight:600;color:var(--dim)}
+.askb{gap:10px}
+.askbtn{min-height:72px;font-size:22px;line-height:1.1}
+.askbtn small,.dlg .btn small{display:block;font-size:14px;font-weight:600}
+.overlay{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;padding:16px}
+:root[data-theme=night] .overlay{background:rgba(0,0,0,.85)}
+.card.dlg{width:min(560px,100%);display:grid;gap:10px;border:3px solid var(--warn);box-shadow:0 8px 30px rgba(0,0,0,.4)}
+.dlg .btn{font-size:19px;line-height:1.1}
+#jHiuRow{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:2px 12px}
+#jHiuRow .k{flex-basis:100%}
+#jHiuRow .btn{min-height:56px;font-size:18px;padding:4px 14px;margin-left:auto}
 input:disabled{opacity:.45}
 .stats{display:grid;grid-template-columns:1fr;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:4px 12px}
 .stat{display:flex;justify-content:space-between;align-items:baseline;gap:10px;padding:3px 0;min-width:0}
@@ -235,6 +251,18 @@ body[data-view=listen] #gWhy{display:none}
   <div class="id"><span class="app">rxd</span><span id="profile">—</span><span id="modeTag" class="tag" hidden></span></div>
   <div id="conn" class="pill dimc" aria-live="polite">◌ Connecting</div>
 </header>
+<section id="swAsk" class="card ask" aria-labelledby="swAskQ" hidden>
+  <p id="swAskQ" class="askq">Is the <span class="upName">upconverter</span> on UPCONVERT or BYPASS?</p>
+  <p id="swAskS" class="asks"></p>
+  <div class="row2 askb" role="group" aria-labelledby="swAskQ"><button type="button" class="btn askbtn" id="swAskUp">⇅ UPCONVERT<small>below 30 MHz</small></button><button type="button" class="btn askbtn" id="swAskBy">→ BYPASS<small>30 MHz and up</small></button></div>
+  <button type="button" class="btn wide" id="swAskX" hidden>Cancel: it hasn't changed</button>
+  <p id="swAskM" class="msg" role="status" hidden></p>
+</section>
+<div id="swConf" class="overlay" hidden><div class="card dlg" role="dialog" aria-modal="true" aria-labelledby="swConfT" aria-describedby="swConfS">
+  <p id="swConfT" class="askq">Flip the switch</p>
+  <p id="swConfS" class="asks"></p>
+  <div class="row2"><button type="button" class="btn" id="swConfNo">Cancel</button><button type="button" class="btn pri" id="swConfOk">✓ Done: switch</button></div>
+</div></div>
 <nav id="views" class="views" aria-label="View" hidden></nav>
 <div id="down" class="banner" hidden>✕ Disconnected from rxd. Retrying.</div>
 <div id="err" class="banner" hidden></div>
@@ -253,7 +281,7 @@ body[data-view=listen] #gWhy{display:none}
   </div>
 </section>
 <div class="top" data-v="listen manual" data-live>
-  <div id="hiu" class="hiu" hidden><b id="hiuW">Upconverter: —</b><span id="hiuS"></span></div>
+  <div id="hiu" class="hiu" hidden><b id="hiuW">Upconverter: —</b><span id="hiuS"></span><button type="button" class="btn" id="hiuC" hidden>Change</button></div>
   <div class="stats" data-v="manual">
     <div class="stat"><span class="k">Receiver</span><span id="sRx" class="v">—</span></div>
     <div class="stat"><span class="k">DSP CPU</span><span id="sCpu" class="v">—</span></div>
@@ -272,6 +300,7 @@ body[data-view=listen] #gWhy{display:none}
 <section class="card" id="bPlan" data-v="digital" data-live hidden>
   <div class="lbl"><span>Band plan</span><span id="bpState"></span></div>
   <p id="bpWhy" class="bpwhy" role="status" aria-live="polite">—</p>
+  <p id="bpLim" class="bpsub" hidden></p>
   <p id="bpSub" class="bpsub"></p>
   <div class="row2" role="group" aria-label="Band plan"><button type="button" class="btn" id="bpAuto">Auto</button><button type="button" class="btn" id="bpMan">Manual</button></div>
   <div id="bpAutoBox">
@@ -286,8 +315,6 @@ body[data-view=listen] #gWhy{display:none}
     <p class="bpk">Bands Auto may use</p>
     <div id="bpBands" class="bgrid" role="group" aria-label="Bands Auto may use"></div>
     <button type="button" class="btn wide" id="bpDef">Use the default bands</button>
-    <p class="bpk" id="bpSideK" hidden>Other side of the <span class="upName">upconverter</span></p>
-    <div class="row2" id="bpSideRow" role="group" aria-label="Other side of the upconverter" hidden><button type="button" class="btn" id="bpSideOff">Stay on this side</button><button type="button" class="btn" id="bpSideOn">Allow, I'll flip it</button></div>
     <p class="bpk">Time on each band when scanning</p>
     <div class="bpstep"><button type="button" class="btn" id="bpDwDn" aria-label="Less time on each band">−</button><span id="bpDw" class="val">—</span><button type="button" class="btn" id="bpDwUp" aria-label="More time on each band">+</button></div>
     <p class="bpk">Check for a better band every</p>
@@ -300,7 +327,7 @@ body[data-view=listen] #gWhy{display:none}
   <div id="jPickL"></div>
 </section>
 <section class="card jstat" id="jStat" data-v="digital" data-live>
-  <div id="jHiuRow" hidden><span class="k upName">Upconverter</span><span id="jHiu" class="v">—</span></div>
+  <div id="jHiuRow" hidden><span class="k upName">Upconverter</span><span id="jHiu" class="v">—</span><button type="button" class="btn" id="jHiuC" hidden>Change</button></div>
   <div><span class="k">Receiver</span><span id="jRx" class="v">—</span></div>
   <div><span class="k">Signal</span><span id="jLvl" class="v">— dBFS</span></div>
   <div><span class="k">Heard</span><span id="jHeard" class="v">—</span></div>
@@ -501,6 +528,24 @@ function apiMismatch(r) {
 function upc() { return (st && st.station && st.station.upconverter) || null; }
 function upName() { const u = upc(); return u ? u.name : "Upconverter"; }
 function upSwitch() { const u = upc(); return !!(u && u.switch); }
+// Its switch's confirmed position (status upconverter, rxd 0.5.0 and later):
+// {"switch", "position", "confirmed_at", "needs", "ok"}, or null when it has
+// no switch to mind, or the rxd is older and only says which way it should be.
+function swPos() { const u = st && st.upconverter; return u && u.switch && u.position ? u : null; }
+// switch:words begin
+function pside(p) { return p.upconvert ? "upconvert" : "bypass"; }
+function sideWord(x) { return x === "upconvert" ? "UPCONVERT" : x === "bypass" ? "BYPASS" : "not confirmed"; }
+// "14:02", or "6 Nov 14:02" when it wasn't today: local, 24 hour
+function confTime(iso) {
+  const d = utcDate(iso); if (!d) return "";
+  return (new Date().toDateString() === d.toDateString() ? "" : d.toLocaleDateString(undefined, {month: "short", day: "numeric"}) + " ") + hhmm(d);
+}
+// "✓ BYPASS (confirmed 14:02)", "? Not confirmed", "▲ BYPASS (confirmed 14:02)" when the tuning needs the other side
+function swWords(u) {
+  if (u.position === "unknown") return "? Not confirmed";
+  return (u.ok ? "✓ " : "▲ ") + sideWord(u.position) + " (confirmed " + confTime(u.confirmed_at) + ")";
+}
+// switch:words end
 async function api(path, body) {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 4000);
@@ -601,7 +646,7 @@ function renderConn() {
   $("ctl").disabled = $("qual").disabled = $("audioCard").disabled = conn !== "ok" || !!switching;
   $("sw").hidden = !switching;
   if (switching) $("note").hidden = true;
-  renderProfiles(); renderMute();
+  renderProfiles(); renderMute(); renderAsk();
 }
 
 function applyStatus(s) {
@@ -615,17 +660,25 @@ function applyStatus(s) {
   for (const b of $("modes").children) b.setAttribute("aria-pressed", String(b.dataset.m === localMode));
 
   // the upconverter, when the station has one (station.json)
-  const up = s.upconverter_hz > 0, hiu = $("hiu");
-  hiu.className = "hiu" + (up ? " up" : "");
+  const up = s.upconverter_hz > 0, hiu = $("hiu"), sw = swPos();
+  hiu.className = "hiu" + ((sw ? sw.position === "upconvert" : up) ? " up" : "");
   hiu.hidden = !upc();
   $("jHiuRow").hidden = !upc();
-  $("bpSideK").hidden = $("bpSideRow").hidden = !upSwitch();
   for (const el of document.querySelectorAll(".upName")) setText(el, upName());
-  $("bpSideRow").setAttribute("aria-label", "Other side of the " + upName());
-  setText($("hiuW"), up ? "⇅ " + upName() + ": UPCONVERT" : "→ " + upName() + ": BYPASS");
   var below = trim((s.upconvert_below_hz || 30e6) / 1e6, 3) + " MHz";
-  setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below " + below : "")
-    : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", " + below + " and up" : ""));
+  $("hiuC").hidden = $("jHiuC").hidden = !sw || sw.position === "unknown";
+  if (sw) {
+    // the switch as a person last said it is, and whether that's the side this tuning needs
+    setText($("hiuW"), upName() + ": " + swWords(sw));
+    setText($("hiuS"), sw.position === "unknown" ? "rxd can't see the switch: say which way it is above."
+      : sw.ok ? "Right for this " + (up ? "tuning (below " + below + ")." : "tuning (" + below + " and up).")
+      : "This tuning needs " + sideWord(sw.needs) + ": flip it and press Change, or pick a " + sideWord(sw.position) + " station.");
+  } else {
+    setText($("hiuW"), up ? "⇅ " + upName() + ": UPCONVERT" : "→ " + upName() + ": BYPASS");
+    setText($("hiuS"), up ? "Set the switch to UPCONVERT (+" + trim(s.upconverter_hz / 1e6, 3) + " MHz)" + (s.offset_mode === "auto" ? ", below " + below : "")
+      : "Set the switch to BYPASS" + (s.offset_mode === "auto" ? ", " + below + " and up" : ""));
+  }
+  renderAsk();
 
   // receiver
   if (s.error) { $("err").hidden = false; setText($("err"), "✕ rxd error: " + s.error); } else $("err").hidden = true;
@@ -1140,14 +1193,15 @@ function profBtn(p, top, sub) {
   else {
     el.type = "button";
     if (switching && switching.name === p.name) add("pa", "■ Switching…");
-    else if (upSwitch() && !!p.upconvert !== curUp()) add("pw", "▲ Flip the " + upName() + " to " + hiuWord(p.upconvert));
+    else if (needsFlip(p)) add("pw", "▲ Flip the " + upName() + " to " + hiuWord(p.upconvert));
     el.disabled = conn !== "ok" || !!switching;
     el.onclick = () => doSwitch(p);
   }
   return el;
 }
 function renderProfiles() {
-  const key = JSON.stringify([profiles, activeName(), curUp(), conn === "ok", switching && switching.name, view, bandPickKey()]);
+  const sw = swPos();
+  const key = JSON.stringify([profiles, activeName(), curUp(), sw && sw.position, conn === "ok", switching && switching.name, view, bandPickKey()]);
   if (key === pickKey) return;
   pickKey = key;
   const all = profiles ? profiles.profiles : [];
@@ -1175,13 +1229,74 @@ function renderProfiles() {
 }
 
 // switching
-async function doSwitch(p) {
+// Whether picking p means flipping the upconverter's switch: against the
+// position a person confirmed, or (an older rxd) the side rxd is on now.
+function needsFlip(p) {
+  const sw = swPos();
+  if (sw) return sw.position !== "unknown" && pside(p) !== sw.position;
+  return upSwitch() && !!p.upconvert !== curUp();
+}
+let confFor = null;
+// A profile on the other side of the switch from the one confirmed (or with
+// none confirmed): the person flips it and says so first, which tells rxd.
+function askFlip(p) {
+  const sw = swPos(), w = hiuWord(p.upconvert);
+  confFor = p;
+  setText($("swConfT"), "▲ Flip the " + upName() + " to " + w);
+  setText($("swConfS"), pdesc(p) + " needs it on " + w + (sw.position === "unknown" ? "; nobody has said which way it is now."
+    : "; it's on " + sideWord(sw.position) + " now.") + " Flip the switch, then confirm. Cancel stays on " + (activeName() || "this profile") + ".");
+  setText($("swConfOk"), "✓ It's on " + w + ": switch");
+  $("swConf").hidden = false;
+  $("swConfOk").focus();
+}
+function closeFlip() { $("swConf").hidden = true; confFor = null; }
+$("swConfNo").onclick = closeFlip;
+$("swConfOk").onclick = () => { const p = confFor; closeFlip(); if (p) doSwitch(p, pside(p)); };
+$("swConf").onclick = e => { if (e.target === $("swConf")) closeFlip(); };
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("swConf").hidden) closeFlip(); });
+// Asked once while the position is unknown (after a start-up), on every view;
+// Change asks again. rxd keeps receiving meanwhile; only the band plan waits.
+let askOpen = false, askBusy = false;
+function renderAsk() {
+  const sw = swPos(), box = $("swAsk");
+  const show = !!sw && conn === "ok" && (sw.position === "unknown" || askOpen);
+  box.hidden = !show;
+  if (!show) return;
+  const below = trim(((st && st.upconvert_below_hz) || 30e6) / 1e6, 3) + " MHz";
+  setText($("swAskS"), sw.position === "unknown"
+    ? "rxd can't see the switch, and it may have been flipped while the receiver was off. Until you say, rxd keeps receiving but the band plan waits and learns nothing."
+    : "It's confirmed on " + sideWord(sw.position) + " (" + confTime(sw.confirmed_at) + "). Say which way it is now.");
+  $("swAskUp").lastChild.textContent = "below " + below; $("swAskBy").lastChild.textContent = below + " and up";
+  for (const [id, pos] of [["swAskUp", "upconvert"], ["swAskBy", "bypass"]]) {
+    const b = $(id); b.disabled = askBusy;
+    b.setAttribute("aria-pressed", String(sw.position === pos));
+  }
+  $("swAskX").hidden = sw.position === "unknown";
+}
+async function confirmSwitch(pos) {
+  if (askBusy) return;
+  askBusy = true; $("swAskM").hidden = true; renderAsk();
+  let r = null;
+  try { r = await api(API + "/switch", {position: pos}); } catch (e) {}
+  askBusy = false;
+  if (r && r.ok && r.doc && typeof r.doc.freq === "number") { askOpen = false; applyStatus(r.doc); }
+  else { $("swAskM").textContent = "✕ " + (r ? "rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status)) : "Could not reach rxd. Nothing was changed."); $("swAskM").hidden = false; }
+  renderAsk();
+}
+$("swAskUp").onclick = () => confirmSwitch("upconvert");
+$("swAskBy").onclick = () => confirmSwitch("bypass");
+$("swAskX").onclick = () => { askOpen = false; renderAsk(); };
+$("hiuC").onclick = $("jHiuC").onclick = () => { askOpen = true; renderAsk(); window.scrollTo(0, 0); $("swAskUp").focus(); };
+async function doSwitch(p, confirm) {
   showPmsg(""); $("swErr").hidden = true; $("flip").hidden = true;
+  const sw = swPos();
+  if (!confirm && sw && p.name !== activeName() && pside(p) !== sw.position) { askFlip(p); return; }
   let r;
-  try { r = await api(API + "/profile", {name: p.name}); }
+  try { r = await api(API + "/profile", confirm ? {name: p.name, switch: confirm} : {name: p.name}); }
   catch (e) { showPmsg("Could not reach rxd. Still on " + activeName() + "."); return; }
+  if (r.status === 409 && sw) { askFlip(p); return; }   // the switch changed meanwhile
   if (!r.ok) { showPmsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status))); return; }
-  switching = {name: p.name, desc: pdesc(p), prevUp: curUp(), wantUp: !!p.upconvert, manual: upSwitch(), upName: upName()};
+  switching = {name: p.name, desc: pdesc(p), prevUp: curUp(), wantUp: !!p.upconvert, manual: upSwitch() && !sw, upName: upName()};
   setText($("swT"), "■ Switching to " + p.name + "…");
   setText($("swS"), "rxd restarts on " + pdesc(p) + "; this takes a few seconds." +
     (switching.manual && switching.wantUp !== switching.prevUp ? " Flip the " + switching.upName + " to " + hiuWord(switching.wantUp) + "." : ""));
@@ -1521,7 +1636,9 @@ $("jFilter").oninput = () => {
 $("jClear").onclick = () => { $("jFilter").value = ""; $("jFilter").oninput(); $("jFilter").focus(); };
 function renderJs8Stat(s, rxText, rxCls) {
   if (view !== "digital") return;
-  setText($("jHiu"), s.upconverter_hz > 0 ? "⇅ UPCONVERT" : "→ BYPASS", "v");
+  const sw = swPos();
+  if (sw) setText($("jHiu"), swWords(sw), "v" + (sw.position === "unknown" || !sw.ok ? " warn" : ""));
+  else setText($("jHiu"), s.upconverter_hz > 0 ? "⇅ UPCONVERT" : "→ BYPASS", "v");
   setText($("jRx"), rxText, rxCls);
   const lv = s.level_dbfs;
   setText($("jLvl"), typeof lv === "number" ? (lv < 0 ? "−" : "") + Math.abs(lv).toFixed(1) + " dBFS" : "— dBFS", "v");
@@ -1810,7 +1927,7 @@ function bandBtn(p, best) {
   else {
     el.type = "button";
     if (switching && switching.name === p.name) add("ba", "■ Switching");
-    else if (upSwitch() && !!p.upconvert !== curUp()) add("bw", "▲ " + hiuWord(p.upconvert));
+    else if (needsFlip(p)) add("bw", "▲ " + hiuWord(p.upconvert));
     else if (best) add("ba", "★ Best now");
     el.setAttribute("aria-label", decName(pdec(p)) + " " + bandWord(p.band) + ", " + fmtMHz(p.freq) + (best ? ", best now" : ""));
     el.disabled = conn !== "ok" || !!switching;
@@ -1882,9 +1999,12 @@ function renderBandPlan(s) {
   if (!b) { card.hidden = true; return; }
   if (view === "digital" && !card.hidden && now() - bandsAt > 60000) loadBands();
   const auto = b.plan === "auto";
-  const sym = !auto ? "■ " : b.phase === "scan" ? "◔ " : b.phase === "idle" ? "▲ " : "● ";
-  setText($("bpState"), auto ? (b.phase === "scan" ? "Auto, scanning" : "Auto") : "Manual");
-  setText($("bpWhy"), sym + (b.reason || "—"), "bpwhy" + (b.phase === "idle" ? " warn" : ""));
+  const stop = b.phase === "idle" || b.phase === "paused";
+  const sym = !auto ? "■ " : b.phase === "scan" ? "◔ " : b.phase === "paused" ? "‖ " : stop ? "▲ " : "● ";
+  setText($("bpState"), auto ? (b.phase === "scan" ? "Auto, scanning" : b.phase === "paused" ? "Auto, paused" : "Auto") : "Manual");
+  setText($("bpWhy"), sym + (b.reason || "—"), "bpwhy" + (stop ? " warn" : ""));
+  $("bpLim").hidden = !b.side_limit;
+  if (b.side_limit) setText($("bpLim"), "⇅ " + b.side_limit + " (the " + upName() + "'s switch is on " + b.side + ")");
   const sun = b.sun || {};
   const parts = [];
   if (auto && b.phase === "hold" && b.next_at) parts.push("Next look " + localHM(b.next_at));
@@ -1929,7 +2049,7 @@ function renderBandPlan(s) {
       btn.type = "button"; btn.className = "btn bbtn"; btn.setAttribute("aria-pressed", String(on));
       const t = document.createElement("span"); t.className = "bb"; t.textContent = bandWord(band); btn.appendChild(t);
       const sub = document.createElement("span"); sub.className = "bf"; sub.textContent = on ? "✓ On" : "Off"; btn.appendChild(sub);
-      const away = upSwitch() && (up ? "UPCONVERT" : "BYPASS") !== b.side;
+      const away = upSwitch() && !!b.side && (up ? "UPCONVERT" : "BYPASS") !== b.side;
       if (away) {
         const w = document.createElement("span"); w.className = "bw"; w.textContent = "▲ " + (up ? "UPCONVERT" : "BYPASS"); btn.appendChild(w);
       }
@@ -1941,7 +2061,6 @@ function renderBandPlan(s) {
   }
   $("bpDef").hidden = !!b.default_bands;
   $("bpDef").disabled = conn !== "ok" || bandsBusy;
-  pressed("bpSideOff", !b.cross_side, "Stay on this side"); pressed("bpSideOn", b.cross_side, "Allow, I'll flip it");
   setText($("bpDw"), b.dwell_min + " min" + (b.mode === "wspr" ? ", 2 slots at least" : ""));
   const di = DWELLS.indexOf(b.dwell_min);
   $("bpDwDn").disabled = conn !== "ok" || bandsBusy || di === 0;
@@ -1960,8 +2079,6 @@ $("bpWspr").onclick = () => postBands({mode: "wspr"});
 $("bpJs8").onclick = () => postBands({mode: "js8"});
 $("bpMore").onclick = () => { bpOpen = !bpOpen; renderBandPlan(st); };
 $("bpDef").onclick = () => postBands({bands: null});
-$("bpSideOff").onclick = () => postBands({cross_side: false});
-$("bpSideOn").onclick = () => postBands({cross_side: true});
 function stepDwell(d) {
   const b = bp(); if (!b) return;
   let i = DWELLS.indexOf(b.dwell_min); if (i < 0) i = DWELLS.findIndex(x => x >= b.dwell_min);
