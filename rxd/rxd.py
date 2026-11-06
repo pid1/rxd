@@ -618,6 +618,7 @@ class Receiver:
         self.listen_lock = threading.Lock()
         self.resamplers = {}         # rate -> FirDecimator from 48 kHz
         self.wspr = None             # a WsprDecoder, for a WSPR profile
+        self.bands = None            # the BandPlanner, on a live rxd
 
     def gain_db_for(self, index):
         g = self.src.gains()
@@ -819,6 +820,7 @@ class Receiver:
                 "decoder": self.s.decoder,
                 "wspr": self.wspr.status() if self.wspr is not None else None,
                 "clock": clock_status(),
+                "band_plan": self.bands.status() if self.bands is not None else None,
                 "listeners": len(self.listeners)}
 
 
@@ -1470,6 +1472,962 @@ class WsprDecoder:
                 "last": self.last, "error": self.error, "report": report}
 
 
+# ---------------------------------------------------------------- band plan
+
+# With the band plan on Auto, rxd picks the JS8 or WSPR band itself: from the
+# day's band conditions (N0NBH's, from hamqsl.com, or NOAA SWPC's indices
+# when hamqsl can't be had), the sun at the station, and what rxd has heard
+# on each band at this hour. With no conditions (no internet) it scans the
+# bands it has not yet heard at this hour, a couple of WSPR slots or a few
+# minutes of JS8 each, and learns. Band changes go through `radio NAME`, which
+# restarts rxd, so the planner keeps everything on disk and picks up where it
+# was in the next rxd:
+#   ~/.config/rx/bands.json             its settings, as the UI sets them
+#   ~/.local/share/rxd/bands.json       what was heard, per profile and UTC hour
+#   ~/.local/share/rxd/bandplan.json    where it is: scanning or holding, and why
+#   ~/.local/share/rxd/conditions.json  the last band conditions fetched
+BANDS_CONF = os.path.expanduser(os.environ.get("RXD_BANDS_CONF", "~/.config/rx/bands.json"))
+BANDS_DIR = os.path.expanduser(os.environ.get("RXD_BANDS_DIR", "~/.local/share/rxd"))
+HAMQSL_URL = os.environ.get("RXD_HAMQSL", "https://www.hamqsl.com/solarxml.php")
+SWPC_FLUX_URL = os.environ.get("RXD_SWPC_FLUX",
+                               "https://services.swpc.noaa.gov/json/f107_cm_flux.json")
+SWPC_KP_URL = os.environ.get("RXD_SWPC_KP",
+                             "https://services.swpc.noaa.gov/products/noaa-planetary-k-index.json")
+HF_BANDS = ("160m", "80m", "60m", "40m", "30m", "20m", "17m", "15m", "12m", "10m")
+BAND_ORDER = ("2190m", "630m") + HF_BANDS + ("6m", "2m")
+PLAN_MODES = ("wspr", "js8")
+# N0NBH's calculated conditions come in four groups of HF bands.
+HAMQSL_GROUP = {"160m": "80m-40m", "80m": "80m-40m", "60m": "80m-40m", "40m": "80m-40m",
+                "30m": "30m-20m", "20m": "30m-20m", "17m": "17m-15m", "15m": "17m-15m",
+                "12m": "12m-10m", "10m": "12m-10m"}
+COND_VALUE = {"good": 1.0, "fair": 0.6, "poor": 0.2}
+# What a mid-latitude station usually hears, by the sun: low bands at night,
+# high bands by day, the middle ones around the gray line. 0 to 1.
+BAND_PRIOR = {
+    "day": {"2190m": .05, "630m": .1, "160m": .05, "80m": .25, "60m": .45, "40m": .6,
+            "30m": .8, "20m": 1.0, "17m": .9, "15m": .8, "12m": .6, "10m": .5,
+            "6m": .15, "2m": .05},
+    "gray": {"2190m": .3, "630m": .4, "160m": .5, "80m": .75, "60m": .75, "40m": .9,
+             "30m": .85, "20m": .85, "17m": .6, "15m": .45, "12m": .3, "10m": .25,
+             "6m": .1, "2m": .05},
+    "night": {"2190m": .5, "630m": .7, "160m": .7, "80m": .9, "60m": .8, "40m": 1.0,
+              "30m": .8, "20m": .45, "17m": .25, "15m": .15, "12m": .1, "10m": .08,
+              "6m": .05, "2m": .05},
+}
+PART_WORDS = {"day": "day", "night": "night", "gray": "gray line"}
+# What counts as a lot heard: WSPR spots per two-minute slot, JS8 decodes a minute.
+HEARD_SCALE = {"wspr": 10.0, "js8": 2.0}
+# How much listening makes one good look at a band: two WSPR slots, six minutes of JS8.
+HEARD_PER = {"wspr": 2.0, "js8": 6.0}
+PLAN_DEFAULTS = {"plan": "auto", "mode": "wspr", "bands": None, "dwell_min": 6,
+                 "every_min": 30, "cross_side": False}
+CREDITS = {"hamqsl": "Band conditions courtesy of N0NBH, www.hamqsl.com",
+           "swpc": "Solar indices from NOAA SWPC; band conditions estimated by rxd"}
+
+
+def band_label(band):
+    """"20m" -> "20 m"."""
+    return band[:-1] + " m" if band and band.endswith("m") and not band.endswith("cm") else \
+        (band or "?")
+
+
+def read_json(path, default=None):
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def write_json(path, doc):
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, indent=1)
+    os.replace(tmp, path)
+
+
+def http_get(url, timeout=10.0, limit=262144):
+    import urllib.request  # here, not at the top: only the band plan fetches
+    req = urllib.request.Request(url, headers={"User-Agent": RXD_VERSION + " (band plan)"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(limit)
+
+
+# ------------------------------------------------------- band conditions
+
+def _num(text):
+    m = re.search(r"-?\d+(?:\.\d+)?", text or "")
+    return float(m.group(0)) if m else None
+
+
+def parse_hamqsl(xml):
+    """N0NBH's solarxml.php -> {"source", "updated", "sfi", "a", "k", "bands", "vhf", ...}.
+
+    "bands" is {"80m-40m": {"day": "Fair", "night": "Good"}, ...}, as they
+    calculate it; "vhf" is their E-skip and aurora words by location."""
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(xml)
+    sd = root.find("solardata") if root.tag == "solar" else root
+    if sd is None:
+        raise ValueError("no solardata in the hamqsl XML")
+
+    def text(tag):
+        el = sd.find(tag)
+        return el.text.strip() if el is not None and el.text else ""
+    bands = {}
+    for b in sd.iter("band"):
+        name, when = b.get("name"), (b.get("time") or "").lower()
+        if name and when in ("day", "night") and b.text:
+            bands.setdefault(name, {})[when] = b.text.strip()
+    vhf = {}
+    for ph in sd.iter("phenomenon"):
+        if ph.text:
+            vhf["%s %s" % (ph.get("name"), ph.get("location"))] = ph.text.strip()
+    sfi = _num(text("solarflux"))
+    if sfi is None or not bands:
+        raise ValueError("the hamqsl XML has no solar flux or band conditions")
+    k = _num(text("kindex"))
+    a = _num(text("aindex"))
+    return {"source": "hamqsl", "updated": text("updated"), "sfi": int(sfi),
+            "a": int(a) if a is not None else None, "k": int(k) if k is not None else None,
+            "bands": bands, "vhf": vhf, "geomag": text("geomagfield") or None,
+            "noise": text("signalnoise") or None}
+
+
+def model_conditions(sfi, k):
+    """Day and night words for hamqsl's four HF groups from SFI and K alone: a
+    rough stand-in for N0NBH's calculation, used when only NOAA answers."""
+    hi = min(max((sfi - 65) / 100.0, 0.0), 1.0)      # SFI 65 -> 0, 165 -> 1
+    storm = min(max(((k or 0) - 3) / 4.0, 0.0), 1.0)  # K 3 -> 0, K 7 -> 1
+
+    def word(v):
+        v *= 1 - 0.7 * storm
+        return "Good" if v >= 0.7 else "Fair" if v >= 0.4 else "Poor"
+    day = {"80m-40m": .55, "30m-20m": .6 + .4 * hi, "17m-15m": .25 + .7 * hi,
+           "12m-10m": .1 + .8 * hi}
+    night = {"80m-40m": .85, "30m-20m": .4 + .4 * hi, "17m-15m": .1 + .5 * hi,
+             "12m-10m": .05 + .3 * hi}
+    return {g: {"day": word(day[g]), "night": word(night[g])} for g in day}
+
+
+def parse_swpc(flux_json, kp_json):
+    """NOAA SWPC's 10.7 cm flux and planetary K JSON -> the same shape as parse_hamqsl."""
+    flux = json.loads(flux_json)
+    rows = [r for r in flux if isinstance(r, dict) and r.get("flux") is not None]
+    if not rows:
+        raise ValueError("no solar flux in SWPC's JSON")
+    latest = max(rows, key=lambda r: r.get("time_tag") or "")
+    sfi = float(latest["flux"])
+    kp = json.loads(kp_json)
+    k = a = None
+    if kp and isinstance(kp[0], list):  # the older shape: a header row, then rows
+        head = kp[0]
+        last = kp[-1]
+        k = float(last[head.index("Kp")]) if "Kp" in head else None
+        a = float(last[head.index("a_running")]) if "a_running" in head else None
+    elif kp:
+        last = max((r for r in kp if isinstance(r, dict)), key=lambda r: r.get("time_tag") or "")
+        k, a = last.get("Kp"), last.get("a_running")
+    k = int(round(float(k))) if k is not None else None
+    return {"source": "swpc", "updated": latest.get("time_tag"), "sfi": int(round(sfi)),
+            "a": int(a) if a is not None else None, "k": k,
+            "bands": model_conditions(sfi, k), "vhf": {}, "geomag": None, "noise": None}
+
+
+class Conditions:
+    """Band conditions, fetched at most every 45 minutes and kept on disk, so
+    the rxd that starts after each band switch doesn't fetch them again."""
+
+    MAX_AGE = 45 * 60    # fetch again after this
+    RETRY = 15 * 60      # after a failure, wait this long
+    STALE = 3 * 3600     # older than this, they're no guide
+
+    def __init__(self, path, fetch=None, clock=time.time):
+        self.path = path
+        self.fetch = fetch or http_get
+        self.clock = clock
+        self.doc = read_json(path, {}) or {}
+
+    def due(self, now=None):
+        now = self.clock() if now is None else now
+        d = self.doc
+        return now - (d.get("fetched") or 0) >= self.MAX_AGE and \
+            now - (d.get("tried") or 0) >= self.RETRY
+
+    def refresh(self, now=None):
+        """Fetch them (blocking, up to about 20 s); True if they came."""
+        now = self.clock() if now is None else now
+        errors = []
+        cond = None
+        try:
+            cond = parse_hamqsl(self.fetch(HAMQSL_URL))
+        except Exception as e:  # noqa: BLE001 - any failure falls back to NOAA
+            errors.append("hamqsl: %s" % (getattr(e, "reason", None) or e))
+        if cond is None:
+            try:
+                cond = parse_swpc(self.fetch(SWPC_FLUX_URL), self.fetch(SWPC_KP_URL))
+            except Exception as e:  # noqa: BLE001
+                errors.append("NOAA: %s" % (getattr(e, "reason", None) or e))
+        d = dict(self.doc, tried=now)
+        if cond is not None:
+            d.update(fetched=now, cond=cond, error=None)
+        else:
+            d["error"] = "; ".join(str(x) for x in errors)[:200]
+            log("band conditions: %s" % d["error"])
+        self.doc = d
+        try:
+            write_json(self.path, d)
+        except OSError as e:
+            log("can't keep band conditions in %s: %s" % (self.path, e))
+        return cond is not None
+
+    def current(self, now=None):
+        """The conditions if they're fresh enough to steer by, else None."""
+        now = self.clock() if now is None else now
+        if self.doc.get("cond") and now - (self.doc.get("fetched") or 0) < self.STALE:
+            return self.doc["cond"]
+        return None
+
+    def error(self):
+        return self.doc.get("error")
+
+
+# ------------------------------------------------------------- the sun
+
+def sun_elevation(lat, lon, t):
+    """The sun's elevation in degrees at (lat, lon) at Unix time t; good to a
+    fraction of a degree, which is plenty for day, night and gray line."""
+    import math
+    d = t / 86400.0 + 2440587.5 - 2451545.0  # days since J2000
+    g = math.radians((357.529 + 0.98560028 * d) % 360)
+    q = (280.459 + 0.98564736 * d) % 360
+    lam = math.radians((q + 1.915 * math.sin(g) + 0.020 * math.sin(2 * g)) % 360)
+    eps = math.radians(23.439 - 0.00000036 * d)
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    gmst = (18.697374558 + 24.06570982441908 * d) % 24
+    ha = math.radians(gmst * 15 + lon) - ra
+    la = math.radians(lat)
+    return math.degrees(math.asin(math.sin(la) * math.sin(dec) +
+                                  math.cos(la) * math.cos(dec) * math.cos(ha)))
+
+
+def day_part(t, latlon=None):
+    """"day", "gray" (the sun within 6 degrees of the horizon) or "night".
+    With no location, this machine's local clock stands in for the sun."""
+    if latlon:
+        e = sun_elevation(latlon[0], latlon[1], t)
+        return "day" if e > 6 else "night" if e < -6 else "gray"
+    h = time.localtime(t).tm_hour
+    return "day" if 8 <= h < 17 else "gray" if h in (6, 7, 17, 18) else "night"
+
+
+def sun_times(t, latlon):
+    """(sunrise, sunset) Unix times on t's local day, either None if it doesn't
+    happen (or no location)."""
+    if not latlon:
+        return None, None
+    lt = time.localtime(t)
+    start = time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday, 0, 0, 0, 0, 0, -1))
+    rise = sset = None
+    prev = sun_elevation(latlon[0], latlon[1], start)
+    for m in range(5, 24 * 60 + 1, 5):
+        e = sun_elevation(latlon[0], latlon[1], start + m * 60)
+        if prev < -0.833 <= e and rise is None:
+            rise = start + m * 60
+        if prev >= -0.833 > e and sset is None:
+            sset = start + m * 60
+        prev = e
+    return rise, sset
+
+
+# ----------------------------------------------------- scoring a band
+
+def cond_value(band, cond, part):
+    """0 to 1: how good the conditions say band is now, or None if they don't say."""
+    if not cond:
+        return None
+    if band in HAMQSL_GROUP:
+        g = (cond.get("bands") or {}).get(HAMQSL_GROUP[band]) or {}
+        vals = [COND_VALUE.get((g.get(w) or "").lower()) for w in
+                (("day", "night") if part == "gray" else (part,))]
+        vals = [v for v in vals if v is not None]
+        if not vals:
+            return None
+        v = sum(vals) / len(vals)
+        if band == "160m" and part == "day":
+            v *= 0.3  # the 80-40 group says little about 160 m by day
+        return v
+    vhf = " ".join((cond.get("vhf") or {}).values()).lower()
+    if band == "6m":
+        if "50mhz" in vhf or "6m es" in vhf:
+            return 1.0
+        sfi = cond.get("sfi") or 0
+        return 0.6 if part == "day" and sfi >= 180 else 0.1
+    if band == "2m":
+        return 1.0 if "144mhz" in vhf else 0.05
+    return None  # 2190 m and 630 m: the sun and what's heard are the guide
+
+
+def band_score(band, part, cond, heard):
+    """(score 0..1, what it rests on: "conditions", "heard" or "usual").
+
+    heard is (how much was heard 0..1, how many good looks that rests on).
+    The conditions and the usual pattern for the time of day make the base;
+    what rxd has actually heard here at this hour soon outweighs them, since
+    hearing the most is the point: 72 % after one good look, up to 90 %."""
+    prior = BAND_PRIOR[part].get(band, 0.1)
+    c = cond_value(band, cond, part)
+    base = prior if c is None else 0.4 * prior + 0.6 * c
+    h, n = heard or (0.0, 0.0)
+    w = 0.9 * n / (n + 0.25) if n > 0 else 0.0
+    return round((1 - w) * base + w * h, 4), ("conditions" if c is not None else "usual"), w
+
+
+class BandHistory:
+    """What rxd heard on each profile, by UTC hour, kept on disk.
+
+    A sample is one visit's worth in one hour: units (WSPR slots decoded, or
+    minutes of JS8), count (spots or decodes), calls (distinct stations) and
+    the median signal level. Old samples count for less: half every 14 days."""
+
+    KEEP_DAYS = 60
+    PER_HOUR = 40
+    HALF_LIFE = 14 * 86400.0
+
+    def __init__(self, path, clock=time.time):
+        self.path = path
+        self.clock = clock
+        doc = read_json(path, {}) or {}
+        self.bands = doc.get("bands") if isinstance(doc.get("bands"), dict) else {}
+
+    def save(self):
+        try:
+            write_json(self.path, {"version": 1, "bands": self.bands})
+        except OSError as e:
+            log("can't keep the band history in %s: %s" % (self.path, e))
+
+    def add(self, name, t, units, count, calls, visit, level=None):
+        """Add to the sample for this visit and hour (made if it's new)."""
+        hour = "%02d" % time.gmtime(t).tm_hour
+        rows = self.bands.setdefault(name, {}).setdefault(hour, [])
+        s = rows[-1] if rows and rows[-1].get("v") == visit else None
+        if s is None:
+            s = {"t": round(t), "v": visit, "units": 0, "count": 0, "calls": 0}
+            rows.append(s)
+        s["units"] += units
+        s["count"] += count
+        s["calls"] += calls
+        s["t"] = round(t)
+        if level is not None:
+            s["level"] = round(level, 1)
+        cut = self.clock() - self.KEEP_DAYS * 86400
+        rows[:] = [x for x in rows if x.get("t", 0) >= cut][-self.PER_HOUR:]
+        self.save()
+
+    def heard(self, name, t, scale, per=1.0):
+        """(0..1, good looks it rests on, rate) for name around t's UTC hour;
+        per is how many units make one good look."""
+        hour = time.gmtime(t).tm_hour
+        now = self.clock()
+        wsum = rsum = 0.0
+        for dh, wh in ((0, 1.0), (-1, 0.5), (1, 0.5)):
+            for s in (self.bands.get(name) or {}).get("%02d" % ((hour + dh) % 24), []):
+                if not s.get("units"):
+                    continue
+                w = wh * 0.5 ** (max(0.0, now - s.get("t", now)) / self.HALF_LIFE) * \
+                    min(s["units"] / per, 3.0)
+                rate = (s.get("count", 0) + s.get("calls", 0)) / 2.0 / s["units"]
+                wsum += w
+                rsum += w * rate
+        if wsum <= 0:
+            return 0.0, 0.0, None
+        import math
+        rate = rsum / wsum
+        return 1 - math.exp(-rate / scale), wsum, rate
+
+
+def js8_decoding(rx):
+    """Whether something is decoding JS8 for rxd: rxd's own decoder when it has
+    one (rx.js8_decoder with a status() saying "running"), else JS8Call."""
+    dec = getattr(rx, "js8_decoder", None)
+    if dec is not None and hasattr(dec, "status"):
+        try:
+            return bool(dec.status().get("running", True))
+        except Exception:  # noqa: BLE001
+            return False
+    try:
+        return subprocess.run(["pgrep", "-x", "js8call"], stdout=subprocess.DEVNULL,
+                              stderr=subprocess.DEVNULL, timeout=5).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+class BandPlanner:
+    """Auto: choose and hop bands; Manual: stay put. Runs in rxd, one tick
+    every few seconds, and keeps its state on disk across rxd's restarts."""
+
+    TICK = 5.0
+    SCAN_SLOTS = 2          # WSPR slots a band needs, scanning
+    SETTLE = 90.0           # a switch asked for this recently is still under way
+    STAY = 0.85             # stay unless another band scores this much better
+    RESCAN = 20 * 3600.0    # a band scanned at this hour this recently counts as heard
+    ROWS_EVERY = 60.0       # how often radio's profile list is re-read
+
+    def __init__(self, rx, js8=None, conf_path=None, data_dir=None, profiles=None,
+                 switch=None, conditions=None, clock=time.time, latlon=Ellipsis,
+                 synced=None, js8_alive=None):
+        self.rx = rx
+        self.js8 = js8
+        self.conf_path = conf_path or BANDS_CONF
+        d = data_dir or BANDS_DIR
+        self.state_path = os.path.join(d, "bandplan.json")
+        self.profiles = profiles or list_profiles
+        self.switch_fn = switch or spawn_switch
+        self.clock = clock
+        self.cond = conditions or Conditions(os.path.join(d, "conditions.json"), clock=clock)
+        self.history = BandHistory(os.path.join(d, "bands.json"), clock=clock)
+        if latlon is Ellipsis:
+            latlon = grid_latlon(station_id()[1])
+        self.latlon = latlon
+        self.synced = synced or (lambda: clock_status().get("synced") is not False)
+        self.js8_alive = js8_alive or (lambda: js8_decoding(rx))
+        self.lock = threading.Lock()
+        self.wake = threading.Event()
+        self.conf = self.load_conf()
+        self.state = read_json(self.state_path, None)
+        self.fresh = self.state is None
+        self.state = self.state if isinstance(self.state, dict) else {}
+        self.rows, self.rows_at, self.rows_error = None, -1e18, None
+        self.tried_at = -1e18
+        self.scores = {}
+        self.doc = None
+        now = clock()
+        w = rx.wspr
+        self.visit = {"name": rx.s.name, "t": now, "id": int(now), "slots": 0, "units": 0.0,
+                      "count": 0, "levels": [], "wspr_last": w.last if w else None,
+                      "wspr_seq": w.seq if w else 0, "js8_seq": None, "js8_at": now}
+        self.arrive(now)
+
+    # ----------------------------------------------------- settings, state
+
+    def load_conf(self):
+        c = dict(PLAN_DEFAULTS)
+        doc = read_json(self.conf_path, {})
+        if isinstance(doc, dict):
+            try:
+                c.update(self.check(doc))
+            except ValueError as e:
+                log("ignoring %s: %s" % (self.conf_path, e))
+        return c
+
+    @staticmethod
+    def check(doc):
+        """The valid settings in doc; ValueError for one that isn't."""
+        out = {}
+        for k, v in doc.items():
+            if k == "plan":
+                if v not in ("auto", "manual"):
+                    raise ValueError("plan must be auto or manual")
+            elif k == "mode":
+                if v not in PLAN_MODES:
+                    raise ValueError("mode must be wspr or js8")
+            elif k == "bands":
+                if v is not None and (not isinstance(v, list) or
+                                      any(b not in BAND_ORDER for b in v)):
+                    raise ValueError("bands must be null (the default) or a list of: " +
+                                     ", ".join(BAND_ORDER))
+                v = None if v is None else [b for b in BAND_ORDER if b in v]
+            elif k == "dwell_min":
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 2 <= v <= 60:
+                    raise ValueError("dwell_min must be 2 to 60 minutes")
+            elif k == "every_min":
+                if isinstance(v, bool) or not isinstance(v, (int, float)) or not 10 <= v <= 240:
+                    raise ValueError("every_min must be 10 to 240 minutes")
+            elif k == "cross_side":
+                if not isinstance(v, bool):
+                    raise ValueError("cross_side must be true or false")
+            else:
+                continue  # scan and anything unknown are not settings
+            out[k] = v
+        return out
+
+    def save_conf(self):
+        try:
+            write_json(self.conf_path, self.conf)
+        except OSError as e:
+            log("can't save the band plan's settings in %s: %s" % (self.conf_path, e))
+
+    def save_state(self):
+        try:
+            write_json(self.state_path, self.state)
+        except OSError as e:
+            log("can't keep the band plan's state in %s: %s" % (self.state_path, e))
+
+    def arrive(self, now):
+        """A new rxd on rx.s.name: carry on if the plan sent it here, or go
+        Manual if someone switched to it by hand (radio NAME, a picker)."""
+        name = self.rx.s.name
+        st = self.state
+        if not self.fresh and self.conf["plan"] == "auto" and \
+                name not in (st.get("on"), st.get("requested")):
+            self.conf["plan"] = "manual"
+            self.save_conf()
+            st["reason"] = "Manual: %s was chosen outside the band plan" % name
+            log("band plan: Manual, since %s was switched to by hand" % name)
+        st["on"], st["requested"], st["requested_at"] = name, None, None
+        self.save_state()
+
+    # ------------------------------------------------------------- inputs
+
+    def profile_rows(self, now, force=False):
+        if force or self.rows is None or now - self.rows_at >= self.ROWS_EVERY:
+            try:
+                self.rows = self.profiles()["profiles"]
+                self.rows_error = None
+            except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as e:
+                self.rows_error = str(e)
+            self.rows_at = now
+        return self.rows or []
+
+    def side_up(self):
+        """True if the Ham It Up is (as far as rxd knows) on UPCONVERT: the side
+        the running profile needs, which is how Win last set the switch."""
+        with self.rx.s.lock:
+            return self.rx.s.upconverter() > 0
+
+    def enabled(self, up):
+        b = self.conf.get("bands")
+        if b is None:  # the default: every band on the switch's current side
+            return list(HF_BANDS) if up else ["6m", "2m"]
+        return list(b)
+
+    def plan_rows(self, now, mode=None):
+        mode = mode or self.conf["mode"]
+        return [r for r in self.profile_rows(now)
+                if r.get("plan") and r.get("decoder") == mode and r.get("band")]
+
+    def candidates(self, now):
+        """(the profiles Auto may pick from, {band: why not} for the others)."""
+        up = self.side_up()
+        en = self.enabled(up)
+        out, why = [], {}
+        for r in self.plan_rows(now):
+            if r["band"] not in en:
+                why[r["band"]] = "not enabled"
+            elif bool(r.get("upconvert")) != up and not self.conf["cross_side"]:
+                why[r["band"]] = "needs the Ham It Up on %s" % (
+                    "UPCONVERT" if r.get("upconvert") else "BYPASS")
+            else:
+                out.append(r)
+        return out, why
+
+    def current_row(self, now):
+        name = self.rx.s.name
+        return next((r for r in self.profile_rows(now) if r.get("name") == name), None)
+
+    # ------------------------------------------------------------ learning
+
+    def sample(self, now):
+        """Count what was heard on this band since the last tick."""
+        v = self.visit
+        row = self.current_row(now)
+        if not row or not row.get("band") or not row.get("plan"):
+            return
+        snap = self.rx.s.snapshot()
+        if abs(snap["dial"] - float(row.get("freq") or 0)) > 5000:
+            return  # retuned by hand within the profile: not this band's dial
+        chain = self.rx.chain
+        if chain is not None and snap.get("gain_db") is not None:
+            v["levels"].append(chain.level_db)
+            del v["levels"][:-240]
+        if not self.synced():
+            return  # with the clock off nothing decodes; that says nothing of the band
+        w = self.rx.wspr
+        if row.get("decoder") == "wspr" and w is not None:
+            last = w.last
+            if last and last != v["wspr_last"]:
+                v["wspr_last"] = last
+                got = w.since(v["wspr_seq"])
+                v["wspr_seq"] = got["seq"]
+                calls = {x.get("call") for x in got["lines"] if x.get("call")}
+                try:
+                    import calendar
+                    t = calendar.timegm(time.strptime(last["slot"], "%Y-%m-%dT%H:%M:00Z"))
+                except (ValueError, KeyError, TypeError):
+                    t = now
+                v["slots"] += 1
+                v["units"] += 1
+                v["count"] += int(last.get("spots") or 0)
+                self.history.add(row["name"], t, 1, int(last.get("spots") or 0), len(calls),
+                                 v["id"], self.level())
+        elif row.get("decoder") == "js8" and self.js8 is not None:
+            if v["js8_seq"] is None:
+                v["js8_seq"] = self.js8.since(0)["seq"]
+                v["js8_at"] = now
+                return
+            if now - v["js8_at"] < 60:
+                return
+            minutes = (now - v["js8_at"]) / 60.0
+            got = self.js8.since(v["js8_seq"])
+            v["js8_seq"], v["js8_at"] = got["seq"], now
+            if not self.js8_alive():
+                return
+            dial = snap["dial"]
+            lines = [x for x in got["lines"]
+                     if abs(float(x.get("freq") or 0) - dial) < 3000]
+            calls = {x.get("from") for x in lines if x.get("from")}
+            v["units"] += minutes
+            v["count"] += len(lines)
+            self.history.add(row["name"], now, round(minutes, 2), len(lines), len(calls),
+                             v["id"], self.level())
+
+    def level(self):
+        lv = sorted(self.visit["levels"])
+        return lv[len(lv) // 2] if lv else None
+
+    def heard(self, name, mode, now):
+        return self.history.heard(name, now, HEARD_SCALE.get(mode, 3.0),
+                                  HEARD_PER.get(mode, 1.0))
+
+    def visit_done(self, now):
+        v = self.visit
+        dwell = max(float(self.conf["dwell_min"]), 2.0) * 60
+        if now - v["t"] < dwell:
+            return False
+        if self.conf["mode"] == "wspr" and v["slots"] < self.SCAN_SLOTS:
+            # no slots at all for long past the dwell: wsprd or the audio is
+            # broken here; move on rather than wait forever
+            return now - v["t"] > dwell + 6 * 60
+        return True
+
+    def quiet(self, now):
+        """Not in the middle of decoding a WSPR slot, whose spots a switch would lose."""
+        w = self.rx.wspr
+        if w is None:
+            return True
+        if w.decoding is not None or not w.jobs.empty():
+            return False
+        return w.slot is None or now - w.slot < 60 or self.visit["slots"] == 0
+
+    # ------------------------------------------------------------ deciding
+
+    def part(self, now):
+        return day_part(now, self.latlon)
+
+    def score_all(self, rows, now, cond):
+        part = self.part(now)
+        out = {}
+        for r in rows:
+            h, n, rate = self.heard(r["name"], r["decoder"], now)
+            s, basis, w = band_score(r["band"], part, cond, (h, n))
+            out[r["name"]] = {"score": s, "basis": basis, "heard_w": w, "visits": round(n, 2),
+                              "rate": round(rate, 2) if rate is not None else None}
+        return out
+
+    def because(self, row, sc, cond, now, stay=False, rival=None):
+        """Why row is the one, in words. rival: the better-scoring band stayed off."""
+        b = band_label(row["band"])
+        if rival is not None:
+            return "%s: staying; about as good as %s %s" % (
+                b, band_label(rival["band"]),
+                ("by conditions (SFI %s, K %s, %s)" % (cond.get("sfi"), cond.get("k"),
+                                                       PART_WORDS[self.part(now)]))
+                if cond else "by what rxd has heard at this hour")
+        part = PART_WORDS[self.part(now)]
+        unit = "spots a slot" if row["decoder"] == "wspr" else "decodes a minute"
+        heard = sc.get("heard_w", 0) > 0 and sc.get("rate") is not None
+        if cond:
+            idx = "SFI %s, K %s, %s" % (cond.get("sfi"), cond.get("k"), part)
+            what = "conditions and what rxd has heard here" if heard else "conditions"
+            return "%s: %s by %s (%s)" % (b, "still best" if stay else "best", what, idx)
+        if heard:
+            return "%s: %s heard at this hour (%.1f %s); no band conditions" % (
+                b, "still best" if stay else "best", sc["rate"], unit)
+        return "%s: usually best by %s; no band conditions and nothing heard yet" % (b, part)
+
+    def switch(self, row, reason, now):
+        st = self.state
+        st["reason"] = reason
+        if row["name"] == self.rx.s.name:
+            self.save_state()
+            return
+        if st.get("requested") == row["name"] and now - (st.get("requested_at") or 0) < self.SETTLE:
+            return  # asked already; radio is on its way
+        if now - self.tried_at < 60:
+            return
+        self.tried_at = now
+        st["requested"], st["requested_at"] = row["name"], now
+        self.save_state()
+        log("band plan: switching to %s: %s" % (row["name"], reason))
+        try:
+            self.switch_fn(row["name"])
+        except OSError as e:
+            st["reason"] = "Can't switch to %s: %s" % (row["name"], e)
+            self.save_state()
+
+    def start_scan(self, rows, now, why):
+        cur = self.rx.s.name
+        part = self.part(now)
+        order = sorted(rows, key=lambda r: (r["name"] != cur, -BAND_PRIOR[part].get(r["band"], 0)))
+        st = self.state
+        st.update(phase="scan", scan=[r["name"] for r in order], scan_i=0, scan_why=why,
+                  next_eval=None)
+        self.scan_step(order[0], now)
+
+    def scan_step(self, row, now):
+        st = self.state
+        n, i = len(st["scan"]), st["scan_i"]
+        self.switch(row, "Scanning: %s, %d of %d (%s)" % (band_label(row["band"]), i + 1, n,
+                                                          st.get("scan_why") or "learning"),
+                    now)
+
+    def evaluate(self, now, cands, fresh=False):
+        """Choose among cands. Staying put wins a near tie (a switch costs a slot),
+        except straight after a scan, whose point was to compare them."""
+        st = self.state
+        cond = self.cond.current(now)
+        sc = self.score_all(cands, now, cond)
+        self.scores = sc
+        if cond is None and self.synced():
+            scanned = st.setdefault("scanned", {})
+            hour = time.gmtime(now).tm_hour
+            unknown = [r for r in cands if sc[r["name"]]["visits"] < 0.5 and
+                       now - scanned.get("%s@%02d" % (r["name"], hour), 0) > self.RESCAN]
+            if unknown:
+                self.start_scan(unknown, now, "no band conditions; learning this hour")
+                return
+        best = max(cands, key=lambda r: sc[r["name"]]["score"])
+        cur = next((r for r in cands if r["name"] == self.rx.s.name), None)
+        st.update(phase="hold", scan=None, scan_i=None,
+                  next_eval=now + float(self.conf["every_min"]) * 60)
+        stay = sc[best["name"]]["score"] * (1.0 if fresh else self.STAY)
+        if cur is not None and sc[cur["name"]]["score"] >= stay:
+            rival = None if sc[cur["name"]]["score"] >= sc[best["name"]]["score"] else best
+            self.switch(cur, self.because(cur, sc[cur["name"]], cond, now, stay=True,
+                                          rival=rival), now)
+        else:
+            self.switch(best, self.because(best, sc[best["name"]], cond, now), now)
+
+    def decide(self, now):
+        st = self.state
+        cur = self.rx.s.name
+        if self.conf["plan"] != "auto":
+            st["phase"] = "manual"
+            if not (st.get("reason") or "").startswith("Manual"):
+                st["reason"] = "Manual: staying on %s" % cur
+            return
+        if st.get("phase") == "manual":
+            st["phase"] = None
+            st["reason"] = None
+        cands, _ = self.candidates(now)
+        if not cands:
+            st.update(phase="idle", reason="Auto: no %s bands enabled on the Ham It Up's %s side" % (
+                "WSPR" if self.conf["mode"] == "wspr" else "JS8",
+                "UPCONVERT" if self.side_up() else "BYPASS") if not self.rows_error else
+                "Auto: can't list profiles (%s)" % self.rows_error)
+            return
+        names = [r["name"] for r in cands]
+        if st.get("phase") == "scan" and (st.get("scan_why") or "").startswith("no band") and \
+                self.cond.current(now) and self.quiet(now):
+            st["phase"] = None  # scanning for want of conditions, and now there are some
+        if st.get("phase") == "scan" and st.get("scan"):
+            scan = [n for n in st["scan"] if n in names]
+            if not scan:
+                st["phase"] = None
+            else:
+                if scan != st["scan"]:
+                    i = st.get("scan_i") or 0
+                    keep = st["scan"][i] if i < len(st["scan"]) else None
+                    st["scan"] = scan
+                    st["scan_i"] = scan.index(keep) if keep in scan else min(i, len(scan) - 1)
+                i = st["scan_i"]
+                target = next(r for r in cands if r["name"] == st["scan"][i])
+                if cur != target["name"]:
+                    self.scan_step(target, now)
+                    return
+                if not self.visit_done(now) or not self.quiet(now):
+                    v = self.visit
+                    extra = " · slot %d of %d" % (min(v["slots"] + 1, self.SCAN_SLOTS),
+                                                   self.SCAN_SLOTS) \
+                        if self.conf["mode"] == "wspr" else ""
+                    st["reason"] = "Scanning: %s, %d of %d (%s)%s" % (
+                        band_label(target["band"]), i + 1, len(st["scan"]),
+                        st.get("scan_why") or "learning", extra)
+                    return
+                scanned = st.setdefault("scanned", {})
+                scanned["%s@%02d" % (cur, time.gmtime(now).tm_hour)] = now
+                for k in [k for k, t in scanned.items() if now - t > self.RESCAN]:
+                    del scanned[k]
+                if i + 1 < len(st["scan"]):
+                    st["scan_i"] = i + 1
+                    nxt = next(r for r in cands if r["name"] == st["scan"][i + 1])
+                    self.scan_step(nxt, now)
+                    return
+                st["phase"], st["after_scan"] = None, True  # the scan is done: choose
+        due = st.get("phase") != "hold" or cur not in names or \
+            now >= (st.get("next_eval") or 0)
+        if due and self.quiet(now):
+            self.evaluate(now, cands, fresh=bool(st.pop("after_scan", False)))
+
+    # ---------------------------------------------------------- the loop
+
+    def tick(self, now=None):
+        now = self.clock() if now is None else now
+        if self.cond.due(now):
+            self.cond.refresh(now)  # outside the lock: it can take seconds
+        with self.lock:
+            self.sample(now)
+            self.decide(now)
+            self.save_state()
+            self.doc = self.build_status(now)
+
+    def run(self):
+        while not self.rx.stop.is_set():
+            try:
+                self.tick()
+            except Exception as e:  # noqa: BLE001 - the plan must never take rxd down
+                log("band plan: %s: %s" % (type(e).__name__, e))
+            self.wake.wait(self.TICK)
+            self.wake.clear()
+
+    def start(self):
+        threading.Thread(target=self.run, name="bands", daemon=True).start()
+
+    # --------------------------------------------------------------- API
+
+    def configure(self, doc):
+        """POST /api/bands: settings, and {"scan": true} to scan now."""
+        if not isinstance(doc, dict):
+            raise ValueError("body must be a JSON object")
+        unknown = set(doc) - set(PLAN_DEFAULTS) - {"scan"}
+        if unknown:
+            raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
+        new = self.check(doc)
+        if "scan" in doc and not isinstance(doc["scan"], bool):
+            raise ValueError("scan must be true or false")
+        now = self.clock()
+        with self.lock:
+            old = dict(self.conf)
+            self.conf.update(new)
+            if doc.get("scan"):
+                self.conf["plan"] = "auto"
+            self.save_conf()
+            st = self.state
+            changed = any(old.get(k) != self.conf.get(k) for k in
+                          ("plan", "mode", "bands", "cross_side"))
+            if doc.get("scan"):
+                cands, _ = self.candidates(now)
+                if cands:
+                    self.start_scan(cands, now, "asked for")
+            elif changed and self.conf["plan"] == "auto":
+                st.update(phase=None, scan=None, scan_i=None, next_eval=None)
+            elif self.conf["plan"] == "auto" and old.get("every_min") != self.conf["every_min"] \
+                    and st.get("phase") == "hold":
+                st["next_eval"] = now + float(self.conf["every_min"]) * 60
+            if self.conf["plan"] == "manual":
+                st["reason"] = "Manual: staying on %s" % self.rx.s.name
+            self.save_state()
+            self.doc = self.build_status(now)
+        self.wake.set()
+        return self.describe()
+
+    def manual_pick(self, name):
+        """A profile picked by hand (POST /api/profile): the plan goes Manual."""
+        with self.lock:
+            if self.conf["plan"] == "auto":
+                self.conf["plan"] = "manual"
+                self.save_conf()
+            self.state["reason"] = "Manual: %s picked by hand" % name
+            self.state["on"] = name  # so the next rxd doesn't take it for a surprise
+            self.save_state()
+            self.doc = self.build_status(self.clock())
+
+    def build_status(self, now):
+        st = self.state
+        cond = self.cond.current(now)
+        up = self.side_up()
+        row = self.current_row(now)
+        scan = None
+        if st.get("phase") == "scan" and st.get("scan"):
+            i = st.get("scan_i") or 0
+            nm = st["scan"][min(i, len(st["scan"]) - 1)]
+            r = next((x for x in self.profile_rows(now) if x.get("name") == nm), None)
+            scan = {"i": i + 1, "n": len(st["scan"]), "profile": nm,
+                    "band": r.get("band") if r else None}
+        rise, sset = sun_times(now, self.latlon)
+        part = self.part(now)
+        return {"plan": self.conf["plan"], "mode": self.conf["mode"],
+                "phase": st.get("phase") or ("manual" if self.conf["plan"] != "auto" else "idle"),
+                "profile": self.rx.s.name, "band": row.get("band") if row else None,
+                "reason": st.get("reason") or ("Auto: choosing a band" if
+                                               self.conf["plan"] == "auto" else
+                                               "Manual: staying on %s" % self.rx.s.name),
+                "scan": scan, "next_at": st.get("next_eval") if st.get("phase") == "hold" else None,
+                "switching_to": st.get("requested"),
+                "bands": self.enabled(up), "default_bands": self.conf.get("bands") is None,
+                "dwell_min": self.conf["dwell_min"], "every_min": self.conf["every_min"],
+                "cross_side": self.conf["cross_side"], "side": "UPCONVERT" if up else "BYPASS",
+                "sun": {"part": part, "words": PART_WORDS[part], "sunrise": rise, "sunset": sset,
+                        "located": bool(self.latlon)},
+                "conditions": None if not cond else {
+                    "source": cond.get("source"), "sfi": cond.get("sfi"), "a": cond.get("a"),
+                    "k": cond.get("k"), "updated": cond.get("updated"),
+                    "fetched": self.cond.doc.get("fetched"), "bands": cond.get("bands"),
+                    "credit": CREDITS.get(cond.get("source"), "")},
+                "conditions_error": None if cond else self.cond.error()}
+
+    def status(self):
+        doc = self.doc
+        if doc is None:
+            with self.lock:
+                doc = self.doc = self.build_status(self.clock())
+        return doc
+
+    def describe(self):
+        """GET /api/bands: settings, status, and every band profile with how it scores."""
+        now = self.clock()
+        with self.lock:
+            cond = self.cond.current(now)
+            up = self.side_up()
+            en = self.enabled(up)
+            rows = []
+            for mode in PLAN_MODES:
+                prs = self.plan_rows(now, mode)
+                sc = self.score_all(prs, now, cond)
+                for r in sorted(prs, key=lambda r: BAND_ORDER.index(r["band"])
+                                if r["band"] in BAND_ORDER else 99):
+                    why = None
+                    if r["band"] not in en:
+                        why = "not enabled"
+                    elif bool(r.get("upconvert")) != up and not self.conf["cross_side"]:
+                        why = "needs the Ham It Up on %s" % (
+                            "UPCONVERT" if r.get("upconvert") else "BYPASS")
+                    s = sc[r["name"]]
+                    rows.append({"name": r["name"], "mode": mode, "band": r["band"],
+                                 "freq": r.get("freq"), "upconvert": bool(r.get("upconvert")),
+                                 "enabled": r["band"] in en, "eligible": why is None,
+                                 "why_not": why, "score": s["score"], "basis": s["basis"],
+                                 "heard": {"rate": s["rate"], "visits": s["visits"]}})
+            return {"config": dict(self.conf), "status": self.build_status(now),
+                    "all_bands": list(BAND_ORDER), "profiles": rows}
+
+
+def make_bands(rx, js8):
+    """The band plan for a live rxd, or None (RXD_BANDS=off, or not the dongle)."""
+    env = os.environ.get("RXD_BANDS", "")
+    if env == "off" or (env != "on" and not isinstance(rx.src, RtlSource)):
+        return None
+    try:
+        bp = BandPlanner(rx, js8)
+    except Exception as e:  # noqa: BLE001 - never stop rxd for the plan
+        log("band plan off: %s" % e)
+        return None
+    bp.start()
+    return bp
+
+
 # The browser UI: $RXD_WEB, where setup.sh installs it, or beside this file in
 # a checkout. Read on every request so a reinstall needs no restart.
 WEB_PATHS = (os.environ.get("RXD_WEB", ""), "/usr/local/share/rxd/index.html",
@@ -1529,6 +2487,8 @@ class Api(BaseHTTPRequestHandler):
             return self.send(200, wspr.since(after))
         if path == "/api/audio":
             return self.audio()
+        if path == "/api/bands":
+            return self.bands_get()
         if path in ("/", "/index.html"):
             page = web_page()
             if page is None:
@@ -1581,6 +2541,8 @@ class Api(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path == "/api/profile":
             return self.switch()
+        if self.path == "/api/bands":
+            return self.bands_post()
         if self.path != "/api/tune":
             return self.send(404, {"error": "not found"})
         try:
@@ -1616,7 +2578,29 @@ class Api(BaseHTTPRequestHandler):
         except OSError as e:
             return self.send(503, {"error": "can't run radio: %s" % e})
         log("switching to %s for an HTTP client" % name)
+        if self.server.rx.bands is not None:
+            self.server.rx.bands.manual_pick(name)
         self.send(202, {"switching": name})
+
+    # the band plan (BandPlanner)
+    def bands_get(self):
+        bp = self.server.rx.bands
+        if bp is None:
+            return self.send(503, {"error": "no band plan: this rxd isn't on the radio "
+                                            "(or RXD_BANDS=off)"})
+        return self.send(200, bp.describe())
+
+    def bands_post(self):
+        bp = self.server.rx.bands
+        if bp is None:
+            return self.send(503, {"error": "no band plan: this rxd isn't on the radio "
+                                            "(or RXD_BANDS=off)"})
+        try:
+            n = int(self.headers.get("Content-Length", 0))
+            doc = json.loads(self.rfile.read(n) or b"{}")
+            return self.send(200, bp.configure(doc))
+        except (ValueError, TypeError) as e:
+            return self.send(400, {"error": str(e)})
 
 
 # ---------------------------------------------------------------------- main
@@ -1692,6 +2676,7 @@ def main(argv=None):
         hs.rx = rx
         hs.js8 = Js8Feed()
         servers.append(hs)
+        rx.bands = make_bands(rx, hs.js8)
     for srv in servers:
         threading.Thread(target=srv.serve_forever, daemon=True).start()
 
