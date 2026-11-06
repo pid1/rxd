@@ -304,6 +304,7 @@ class Control(unittest.TestCase):
 
     def test_status_lists_gains(self):
         self.assertEqual(self.api("GET", "/api/status")[1]["gains"], [0.0, 3.7, 16.6, 37.2])
+        self.assertEqual(self.api("GET", "/api/status")[1]["upconvert_below_hz"], 30e6)
 
     def test_spectrum_endpoint(self):
         end = time.time() + 5

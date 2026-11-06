@@ -128,6 +128,7 @@ class Settings:
             return dict(mode=self.mode, bandwidth=self.bandwidth, dial=self.dial,
                         cal=self.cal, upconverter=self.upconverter(),
                         offset_mode=self.offset_mode,
+                        upconvert_below=self.upconvert_below,
                         agc_attack=self.agc_attack, agc_decay=self.agc_decay,
                         volume=self.volume, gain_db=self.gain_db,
                         version=self.version)
@@ -716,6 +717,7 @@ class Receiver:
                 "mode": snap["mode"], "bandwidth": snap["bandwidth"],
                 "gain_db": snap["gain_db"], "volume": snap["volume"],
                 "offset_mode": snap["offset_mode"], "upconverter_hz": snap["upconverter"],
+                "upconvert_below_hz": snap["upconvert_below"],
                 "level_dbfs": round(self.chain.level_db, 1) if self.chain else None,
                 "tuner_hz": self.src.center, "offset_hz": self.offset,
                 "sample_rate": self.chain.rate if self.chain else None,
