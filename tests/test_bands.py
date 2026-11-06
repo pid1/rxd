@@ -167,6 +167,31 @@ class Profiles(unittest.TestCase):
             self.assertEqual(self.r.upconverting(self.r.PROFILES[name]), row["upconvert"])
         self.assertTrue(self.rows["wspr-2190m"]["upconvert"])  # 136 kHz + 125 MHz
 
+    def test_desktop_from_ssh(self):
+        """From SSH or a service, i3-msg and JS8Call still get the desktop."""
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "i3")
+            with open(fake, "w") as fh:
+                fh.write("#!/bin/sh\n[ \"$DISPLAY\" = :0 ] && echo /run/user/1000/i3/ipc-socket.42\n")
+            os.chmod(fake, 0o755)
+            saved = {k: os.environ.get(k) for k in ("DISPLAY", "I3SOCK", "PATH")}
+            try:
+                os.environ.pop("DISPLAY", None)
+                os.environ.pop("I3SOCK", None)
+                os.environ["PATH"] = d + os.pathsep + saved["PATH"]
+                self.r._desktop.clear()
+                env = self.r.desktop()
+                self.assertEqual((env["DISPLAY"], env["I3SOCK"]),
+                                 (":0", "/run/user/1000/i3/ipc-socket.42"))
+                self.assertNotIn("DISPLAY", os.environ)  # radio's own nagbars stay off
+            finally:
+                for k, v in saved.items():
+                    if v is None:
+                        os.environ.pop(k, None)
+                    else:
+                        os.environ[k] = v
+                self.r._desktop.clear()
+
     def test_bands_of_other_profiles(self):
         self.assertEqual(self.rows["vhf"]["band"], "2m")
         self.assertEqual(self.rows["uhf"]["band"], "70cm")
