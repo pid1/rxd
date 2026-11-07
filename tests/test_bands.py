@@ -248,6 +248,26 @@ class Conditions(unittest.TestCase):
             self.assertIsNone(c.current(t[0] + 3 * 3600))
 
 
+    def test_a_solar_flux_of_0_is_no_reading(self):
+        # hamqsl said SFI 0 for an hour on 2026-11-06, and Auto went to 160 m
+        bad = HAMQSL_SAMPLE.replace("<solarflux>124</solarflux>", "<solarflux>0</solarflux>")
+        with self.assertRaisesRegex(ValueError, "solar flux of 0 isn't a real reading"):
+            rxd.parse_hamqsl(bad.encode())
+        with self.assertRaises(ValueError):
+            rxd.parse_swpc(json.dumps([{"time_tag": "2026-11-06T12:00:00", "flux": 999}]), SWPC_KP)
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "conditions.json")
+            fetch, calls = self.fetcher({rxd.HAMQSL_URL: bad, rxd.SWPC_FLUX_URL: SWPC_FLUX,
+                                         rxd.SWPC_KP_URL: SWPC_KP})
+            c = rxd.Conditions(path, fetch=fetch, clock=lambda: DAY)
+            self.assertTrue(c.refresh())
+            self.assertEqual((c.current()["source"], c.current()["sfi"]), ("swpc", 122))
+            # a bad reading an older rxd kept on disk doesn't steer either
+            with open(path, "w") as fh:
+                json.dump({"fetched": DAY, "tried": DAY,
+                           "cond": dict(rxd.parse_hamqsl(HAMQSL_SAMPLE.encode()), sfi=0)}, fh)
+            self.assertIsNone(rxd.Conditions(path, fetch=fetch, clock=lambda: DAY).current())
+
     def test_http_get_on_its_own(self):
         # in a fresh interpreter: this test module has imported urllib.request itself
         import subprocess

@@ -62,7 +62,7 @@ from scipy import signal as sps  # noqa: E402
 
 # rxd's version: the one place it is set. GET /api/v1/status reports it, and
 # the release workflow refuses a tag that doesn't match it.
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 # The HTTP API's version: the N in /api/vN/. It goes up only when a client
 # written for the old one would misread the new one (docs/API.md).
 API_VERSION = 1
@@ -2386,6 +2386,20 @@ def _num(text):
     return float(m.group(0)) if m else None
 
 
+# The 10.7 cm solar flux has never been below about 63 (a deep solar minimum)
+# and rarely above 300: a reading outside this is a broken feed, not the sun.
+# hamqsl once said 0 for an hour (2026-11-06), and its band words with it,
+# which sent Auto to 60 m and 160 m.
+SFI_RANGE = (50, 400)
+
+
+def sane_sfi(sfi, source):
+    if sfi is None or not SFI_RANGE[0] <= sfi <= SFI_RANGE[1]:
+        raise ValueError("%s's solar flux %s isn't a real reading" % (
+            source, "is missing" if sfi is None else "of %g" % sfi))
+    return sfi
+
+
 def parse_hamqsl(xml):
     """N0NBH's solarxml.php -> {"source", "updated", "sfi", "a", "k", "bands", "vhf", ...}.
 
@@ -2412,6 +2426,7 @@ def parse_hamqsl(xml):
     sfi = _num(text("solarflux"))
     if sfi is None or not bands:
         raise ValueError("the hamqsl XML has no solar flux or band conditions")
+    sane_sfi(sfi, "hamqsl")
     k = _num(text("kindex"))
     a = _num(text("aindex"))
     return {"source": "hamqsl", "updated": text("updated"), "sfi": int(sfi),
@@ -2443,7 +2458,7 @@ def parse_swpc(flux_json, kp_json):
     if not rows:
         raise ValueError("no solar flux in SWPC's JSON")
     latest = max(rows, key=lambda r: r.get("time_tag") or "")
-    sfi = float(latest["flux"])
+    sfi = sane_sfi(float(latest["flux"]), "NOAA")
     kp = json.loads(kp_json)
     k = a = None
     if kp and isinstance(kp[0], list):  # the older shape: a header row, then rows
@@ -2510,8 +2525,13 @@ class Conditions:
     def current(self, now=None):
         """The conditions if they're fresh enough to steer by, else None."""
         now = self.clock() if now is None else now
-        if self.doc.get("cond") and now - (self.doc.get("fetched") or 0) < self.STALE:
-            return self.doc["cond"]
+        c = self.doc.get("cond")
+        if c and now - (self.doc.get("fetched") or 0) < self.STALE:
+            try:
+                sane_sfi(c.get("sfi"), c.get("source") or "the cache")
+            except ValueError:
+                return None   # kept by an rxd from before the check
+            return c
         return None
 
     def error(self):
