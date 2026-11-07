@@ -164,6 +164,7 @@ body[data-view=digital] .jlist{max-height:none;overflow:visible}
   body[data-view=listen] .top{grid-template-columns:1fr}
 }
 .btn.big{width:100%;min-height:72px;font-size:22px;margin-top:6px}
+#jAuto small{display:block;font-size:15px;font-weight:600;margin-top:2px}
 .btn.wide{width:100%;margin-top:8px;font-size:18px}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}
 .astate{margin:8px 0 0;font-weight:700;font-size:19px}
@@ -270,6 +271,7 @@ body[data-view=listen] #gWhy{display:none}
 <div id="swConf" class="overlay" hidden><div class="card dlg" role="dialog" aria-modal="true" aria-labelledby="swConfT" aria-describedby="swConfS">
   <p id="swConfT" class="askq">Flip the switch</p>
   <p id="swConfS" class="asks"></p>
+  <button type="button" class="btn wide" id="swConfStay" hidden></button>
   <div class="row2"><button type="button" class="btn" id="swConfNo">Cancel</button><button type="button" class="btn pri" id="swConfOk">✓ Done: switch</button></div>
 </div></div>
 <nav id="views" class="views" aria-label="View" hidden></nav>
@@ -1265,9 +1267,33 @@ function askFlip(p) {
   $("swConf").hidden = false;
   $("swConfOk").focus();
 }
-function closeFlip() { $("swConf").hidden = true; confFor = null; }
+function closeFlip() { $("swConf").hidden = true; $("swConfStay").hidden = true; confFor = null; }
 $("swConfNo").onclick = closeFlip;
-$("swConfOk").onclick = () => { const p = confFor; closeFlip(); if (p) doSwitch(p, pside(p)); };
+$("swConfOk").onclick = () => {
+  const p = confFor; closeFlip();
+  if (p && p.bands) postBands(Object.assign({}, p.bands, {switch: p.flip.needs}));
+  else if (p) doSwitch(p, pside(p));
+};
+$("swConfStay").onclick = () => {
+  const p = confFor; closeFlip();
+  if (p && p.bands) postBands(Object.assign({}, p.bands, {switch: p.flip.position}));
+};
+// Auto's best band is across the switch (POST /bands answered 409): flip it,
+// or keep it where it is and let Auto choose from this side's bands.
+function askAutoFlip(body, f) {
+  const w = sideWord(f.needs), here = sideWord(f.position);
+  confFor = {bands: body, flip: f};
+  setText($("swConfT"), "▲ Flip the " + upName() + " to " + w);
+  setText($("swConfS"), "The best " + decName(f.mode) + " band now is " + bandWord(f.band) + ", which needs it on " + w +
+    (f.position === "unknown" ? "; nobody has said which way it is now." : "; it's on " + here + " now.") +
+    " Flip the switch, then confirm. Cancel stays on " + (activeName() || "this profile") + ".");
+  setText($("swConfOk"), "✓ It's on " + w + ": Auto");
+  const stay = $("swConfStay");
+  stay.hidden = !(f.stay && f.position !== "unknown");
+  if (!stay.hidden) setText(stay, "Keep it on " + here + ": Auto on " + bandWord(f.stay));
+  $("swConf").hidden = false;
+  $("swConfOk").focus();
+}
 $("swConf").onclick = e => { if (e.target === $("swConf")) closeFlip(); };
 document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("swConf").hidden) closeFlip(); });
 // Asked once while the position is unknown (after a start-up), on every view;
@@ -1992,7 +2018,13 @@ function bestBand(mode) {
   for (const r of bandsDoc.profiles) if (r.mode === mode && r.eligible && (!best || r.score > best.score)) best = r;
   return best && best.name;
 }
-function bandPickKey() { const b = bp(); return [pickMode, b && b.plan, b && b.mode, bestBand("js8"), bestBand("wspr")].join(); }
+function bestAny(mode) {
+  if (!bandsDoc || !Array.isArray(bandsDoc.profiles)) return null;
+  let best = null;
+  for (const r of bandsDoc.profiles) if (r.mode === mode && r.enabled && (!best || r.score > best.score)) best = r;
+  return best && best.band;
+}
+function bandPickKey() { const b = bp(); return [pickMode, b && b.plan, b && b.mode, bestBand("js8"), bestBand("wspr"), bestAny("js8"), bestAny("wspr"), bandsBusy].join(); }
 function pickModeNow() { return pickMode || curDec() || (bp() && bp().mode) || "wspr"; }
 
 function bandBtn(p, best) {
@@ -2029,6 +2061,21 @@ function renderBandPicker(all, mk) {
     seg.appendChild(b);
   }
   box.appendChild(seg);
+  // Auto from anywhere (an FM station included): rxd picks the band
+  const b0 = bp(), autoOn = b0 && b0.plan === "auto" && b0.mode === mode && curDec() === mode;
+  if (b0 && !autoOn) {
+    const a = document.createElement("button");
+    a.type = "button"; a.className = "btn big pri"; a.id = "jAuto";
+    const top = bestAny(mode);
+    a.textContent = "★ Auto: the best " + decName(mode) + " band";
+    const sub = document.createElement("small");
+    sub.textContent = (top ? bandWord(top) + " now; " : "") + "rxd moves as conditions change";
+    a.appendChild(sub);
+    a.disabled = conn !== "ok" || bandsBusy || !!switching;
+    a.onclick = () => postBands({plan: "auto", mode: mode});
+    box.appendChild(a);
+    const h = document.createElement("div"); h.className = "pgroup"; h.textContent = "Or pick a band (Manual)"; box.appendChild(h);
+  }
   const best = bp() && bp().plan === "auto" && bp().mode === mode ? bestBand(mode) : null;
   const grid = document.createElement("div"); grid.className = "bgrid";
   const plan = dig.filter(p => pdec(p) === mode && p.plan && p.band)
@@ -2056,6 +2103,7 @@ async function postBands(body) {
   try { r = await api(API + "/bands", body); } catch (e) {}
   bandsBusy = false;
   if (!r) bpMsg("Could not reach rxd. Nothing was changed.");
+  else if (r.status === 409 && r.doc && r.doc.needs && !body.switch) askAutoFlip(body, r.doc);
   else if (!r.ok) bpMsg("rxd refused: " + ((r.doc && r.doc.error) || ("HTTP " + r.status)));
   else if (r.doc) { bandsDoc = r.doc; bandsAt = now(); if (st) st.band_plan = r.doc.status; }
   pickKey = ""; renderBandPlan(st); renderProfiles();

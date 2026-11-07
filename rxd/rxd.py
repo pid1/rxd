@@ -62,7 +62,7 @@ from scipy import signal as sps  # noqa: E402
 
 # rxd's version: the one place it is set. GET /api/v1/status reports it, and
 # the release workflow refuses a tag that doesn't match it.
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 # The HTTP API's version: the N in /api/vN/. It goes up only when a client
 # written for the old one would misread the new one (docs/API.md).
 API_VERSION = 1
@@ -2688,6 +2688,28 @@ def js8_decoding(rx):
         return False
 
 
+class NeedsFlip(Exception):
+    """POST /api/bands can't turn Auto on until a person flips (or confirms)
+    the upconverter's switch: 409 with what's needed."""
+
+    def __init__(self, doc, code=409):
+        self.code = code
+        if "error" not in doc:
+            doc = dict(doc, error=(
+                "The best %s band now is %s, which needs the %s on %s, and it's %s. Flip the "
+                'switch, then send "switch": "%s"%s.' % (
+                    "JS8" if doc.get("mode") == "js8" else "WSPR", band_label(doc["band"]), upconverter_name(),
+                    station_conf.side_word(doc["needs"]),
+                    "on " + station_conf.side_word(doc["position"])
+                    if doc["position"] != "unknown" else "not confirmed",
+                    doc["needs"],
+                    ', or send "switch": "%s" to stay on %s (%s)' % (
+                        doc["position"], station_conf.side_word(doc["position"]),
+                        band_label(doc["stay"])) if doc.get("stay") else "")))
+        self.doc = doc
+        super().__init__(doc["error"])
+
+
 class BandPlanner:
     """Auto: choose and hop bands; Manual: stay put. Runs in rxd, one tick
     every few seconds, and keeps its state on disk across rxd's restarts."""
@@ -3181,18 +3203,65 @@ class BandPlanner:
 
     # --------------------------------------------------------------- API
 
+    def flip_for(self, now, mode, pos):
+        """Turning Auto on for mode with the switch at pos (a position, or
+        "unknown"): None if the best band is on this side, else what the
+        person has to do first: {"needs", "band", "profile", "position",
+        "stay"}, stay being the best band on the side it's on now (or None)."""
+        en = self.enabled(self.side_up())
+        rows = [r for r in self.plan_rows(now, mode) if r["band"] in en]
+        if not rows:
+            return None
+        sc = self.score_all(rows, now, self.cond.current(now))
+        best = max(rows, key=lambda r: sc[r["name"]]["score"])
+        needs = station_conf.side(best.get("upconvert"))
+        if needs == pos:
+            return None
+        here = [r for r in rows if station_conf.side(r.get("upconvert")) == pos]
+        stay = max(here, key=lambda r: sc[r["name"]]["score"]) if here else None
+        return {"mode": mode, "needs": needs, "band": best["band"], "profile": best["name"],
+                "position": pos, "stay": stay["band"] if stay else None}
+
     def configure(self, doc):
-        """POST /api/bands: settings, and {"scan": true} to scan now."""
+        """POST /api/bands: settings, {"scan": true} to scan now, and "switch"
+        to confirm the upconverter's switch on the way to Auto."""
         if not isinstance(doc, dict):
             raise ValueError("body must be a JSON object")
-        unknown = set(doc) - set(PLAN_DEFAULTS) - {"scan"}
+        unknown = set(doc) - set(PLAN_DEFAULTS) - {"scan", "switch"}
         if unknown:
             raise ValueError("unknown field(s): " + ", ".join(sorted(unknown)))
         new = self.check(doc)
         if "scan" in doc and not isinstance(doc["scan"], bool):
             raise ValueError("scan must be true or false")
+        confirm = doc.get("switch")
+        if confirm is not None and confirm not in station_conf.POSITIONS:
+            raise ValueError('switch must be "upconvert" or "bypass"')
         now = self.clock()
         with self.lock:
+            # Turning Auto on (or changing what it listens for) from anywhere,
+            # an FM station included: Auto goes to the best band, and if that's
+            # across a switch only a person can flip, the person flips it and
+            # says so ("switch"), or keeps it where it is and says that.
+            plan = new.get("plan", self.conf["plan"])
+            mode = new.get("mode", self.conf["mode"])
+            going = plan == "auto" and (self.conf["plan"] != "auto" or mode != self.conf["mode"]
+                                        or confirm is not None)
+            pos = self.position()
+            if confirm is not None and pos is None:
+                raise ValueError("this station has no upconverter switch to confirm")
+            if going and pos is not None:
+                if confirm is None:
+                    flip = self.flip_for(now, mode, pos)
+                    if flip:
+                        raise NeedsFlip(flip)
+                else:
+                    try:
+                        station_conf.confirm_switch(confirm)
+                    except OSError as e:
+                        raise NeedsFlip({"error": "can't keep the switch's position: %s" % e},
+                                        503)
+                    log("the %s's switch confirmed on %s, for the band plan" % (
+                        upconverter_name(), station_conf.side_word(confirm)))
             old = dict(self.conf)
             self.conf.update(new)
             if doc.get("scan"):
@@ -3940,6 +4009,8 @@ class Api(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0))
             doc = json.loads(self.rfile.read(n) or b"{}")
             return self.send(200, bp.configure(doc))
+        except NeedsFlip as e:
+            return self.send(e.code, e.doc)
         except (ValueError, TypeError) as e:
             return self.send(400, {"error": str(e)})
 

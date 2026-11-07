@@ -291,6 +291,17 @@ Up on BYPASS".
 | `every_min` | number | 10 to 240: how often it looks for a better band |
 | `cross_side` | bool | accepted and kept, but no longer has an effect: Auto never crosses a switch a person flips |
 | `scan` | true | scan now |
+| `switch` | `upconvert` or `bypass` | confirms the upconverter's switch on the way to Auto (see below) |
+
+Turning Auto on (from Manual, or from any profile, an FM station included) or
+changing `mode` sends rxd to the best band at once. With a switch a person
+flips, if that band is across the switch (or the switch isn't confirmed),
+nothing changes and the answer is `409`: `{"error", "mode", "needs", "band",
+"profile", "position", "stay"}`, `needs` being the side the best band needs,
+`position` the switch's confirmed position (`unknown` if nobody has said) and
+`stay` the best band on the side it's on now (null if none). Send the same body
+again with `"switch": needs` once it's flipped, or `"switch": position` to keep
+it where it is and let Auto choose from that side's bands.
 
 ## GET /api/v1/stations?hours=H
 
