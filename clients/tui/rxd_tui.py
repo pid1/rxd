@@ -1540,8 +1540,11 @@ class Poller:
     def _bands(self, body):
         try:
             code, doc = self.link.post("/api/v1/bands", body, timeout=SLOW_TIMEOUT)
-            err = None if code == 200 else \
-                "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
+            if code == 409 and doc.get("needs") and "switch" not in body:
+                err = {"flip": doc}   # Auto's best band is across the switch: ask
+            else:
+                err = None if code == 200 else \
+                    "rxd refused: %s" % (doc.get("error") or "HTTP %d" % code)
         except OSError as e:
             err = "Not sent: can't reach rxd (%s)" % reason(e)
             doc = {}
@@ -2004,7 +2007,9 @@ class App:
                 self.switching = None
                 self.say(err, "err")
         for body, err in (self.p.take_bands_acks() if hasattr(self.p, "take_bands_acks") else ()):
-            if err:
+            if isinstance(err, dict):
+                self.ask = ("bands", body, err["flip"])
+            elif err:
                 self.say(err, "err")
         for pos, err in (self.p.take_position_acks() if hasattr(self.p, "take_position_acks") else ()):
             if err:
@@ -2143,6 +2148,18 @@ class App:
             elif ch in (ord("q"), ord("Q")):
                 return False
             return True
+        if self.ask[0] == "bands":
+            _, body, f = self.ask
+            self.ask = None
+            if ch in (ord("y"), ord("Y")):
+                self.p.bands(dict(body, switch=f["needs"]))
+                self.say("%s Band plan Auto: rxd picks the band" % self.g.rx, "ok")
+            elif ch in (ord("k"), ord("K")) and f.get("stay") and f.get("position") != "unknown":
+                self.p.bands(dict(body, switch=f["position"]))
+                self.say("%s Band plan Auto, on %s" % (self.g.rx, side_word(f["position"])), "ok")
+            else:
+                self.say("Not changed; the band plan stays Manual")
+            return True
         p = self.ask[1]
         self.ask = None
         if ch in (ord("y"), ord("Y")):
@@ -2175,6 +2192,25 @@ class App:
                 "b   BYPASS      %s and up" % below,
                 "",
                 "Esc asks later" if not known else "Esc: it hasn't changed",
+            ]
+        if self.ask[0] == "bands":
+            f = self.ask[2]
+            word, here = side_word(f["needs"]), side_word(f["position"])
+            stay = f.get("stay") and f.get("position") != "unknown"
+            return [
+                "%s Flip the %s to %s" % (self.g.drop, name, word),
+                "",
+                "The best %s band now is %s, which needs it on %s." % (
+                    "JS8" if f.get("mode") == "js8" else "WSPR",
+                    f["band"].replace("m", " m"), word),
+                "It's on %s now." % here if f.get("position") != "unknown" else
+                "Nobody has said which way it is now.",
+                "Flip the switch, then press y for Auto.",
+                "",
+                "y   It's on %s: Auto" % word,
+            ] + (["k   Keep it on %s: Auto on %s" % (here, f["stay"].replace("m", " m"))]
+                 if stay else []) + [
+                "Any other key cancels; the band plan stays Manual.",
             ]
         p = self.ask[1]
         sw = switch_state(st) or {}

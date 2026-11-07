@@ -723,6 +723,55 @@ class Planner(SwitchFile, unittest.TestCase):
         bp.tick()
         self.assertEqual(self.switched[-1], "wspr-20m")
 
+    def test_auto_from_fm_asks_for_the_switch(self):
+        # listening to FM on BYPASS, with the plan on Manual (FM was picked by hand)
+        self.confirm("bypass")
+        bp = self.planner("noaa", conf={"plan": "manual"})
+        with self.assertRaises(rxd.NeedsFlip) as cm:
+            bp.configure({"plan": "auto"})
+        f = cm.exception.doc
+        self.assertEqual((cm.exception.code, f["mode"], f["needs"], f["band"], f["position"]),
+                         (409, "wspr", "upconvert", "20m", "bypass"))
+        self.assertIn(f["stay"], ("6m", "2m"))
+        self.assertIn("The best WSPR band now is 20 m, which needs the Ham It Up on UPCONVERT",
+                      f["error"])
+        self.assertEqual(bp.conf["plan"], "manual")   # nothing changed
+        self.assertEqual(self.switched, [])
+        # the person flips it and says so: Auto, on the switch's new side, at once
+        doc = bp.configure({"plan": "auto", "switch": "upconvert"})
+        self.assertEqual(doc["config"]["plan"], "auto")
+        self.assertEqual(rxd.station_conf.read_switch(self.switch_file)["position"], "upconvert")
+        self.assertNotIn("switch", read(self.conf))
+        bp.tick()
+        self.assertEqual(self.switched, ["wspr-20m"])
+
+    def test_auto_from_fm_can_stay_on_this_side(self):
+        self.confirm("bypass")
+        bp = self.planner("noaa", conf={"plan": "manual"})
+        bp.configure({"plan": "auto", "mode": "wspr", "switch": "bypass"})
+        bp.tick()
+        self.assertEqual(len(self.switched), 1)
+        self.assertIn(self.switched[0], ("wspr-6m", "wspr-2m"))
+
+    def test_auto_asks_when_the_switch_is_unknown(self):
+        self.confirm(None)
+        bp = self.planner("noaa", conf={"plan": "manual", "mode": "js8"})
+        with self.assertRaises(rxd.NeedsFlip) as cm:
+            bp.configure({"plan": "auto"})
+        self.assertEqual((cm.exception.doc["position"], cm.exception.doc["needs"]),
+                         ("unknown", "upconvert"))
+        self.assertIn("and it's not confirmed", cm.exception.doc["error"])
+        with self.assertRaises(ValueError):
+            bp.configure({"plan": "auto", "switch": "sideways"})
+
+    def test_auto_on_the_right_side_doesnt_ask(self):
+        bp = self.planner("noaa", conf={"plan": "manual"})   # confirmed on UPCONVERT
+        bp.configure({"plan": "auto", "mode": "js8"})
+        bp.tick()
+        self.assertEqual(self.switched, ["js8-20m"])
+        # changing only the timing never asks
+        bp.configure({"every_min": 30})
+
     def test_picked_by_hand_goes_manual(self):
         bp = self.planner("wspr")
         bp.manual_pick("wspr-15m")
@@ -833,6 +882,16 @@ class Api(SwitchFile, unittest.TestCase):
                 self.assertEqual((code, doc["config"]["mode"], doc["config"]["every_min"]),
                                  (200, "js8", 45))
                 self.assertEqual(self.api(srv, "POST", "/api/bands", {"mode": "ft8"})[0], 400)
+                # Auto from across the switch: 409 until the person says
+                self.confirm("bypass")
+                self.api(srv, "POST", "/api/bands", {"plan": "manual"})
+                code, doc = self.api(srv, "POST", "/api/v1/bands", {"plan": "auto"})
+                self.assertEqual((code, doc["needs"], doc["position"]), (409, "upconvert", "bypass"))
+                self.assertEqual(rx.bands.conf["plan"], "manual")
+                code, doc = self.api(srv, "POST", "/api/v1/bands",
+                                     {"plan": "auto", "switch": "upconvert"})
+                self.assertEqual((code, doc["config"]["plan"]), (200, "auto"))
+                self.assertEqual(rxd.switch_position(), "upconvert")
                 # a band picked by hand puts the plan on Manual
                 code, _ = self.api(srv, "POST", "/api/profile", {"name": "wspr-17m"})
                 self.assertEqual((code, spawned), (202, ["wspr-17m"]))
@@ -909,6 +968,32 @@ class Tui(unittest.TestCase):
         acks = p.take_bands_acks()
         self.assertEqual(acks[0], ({"plan": "manual"}, None))
         self.assertIn("mode must be wspr or js8", acks[1][1])
+
+    def test_auto_across_the_switch_asks(self):
+        f = {"mode": "wspr", "needs": "upconvert", "band": "20m", "profile": "wspr-20m",
+             "position": "bypass", "stay": "6m", "error": "..."}
+
+        def flip_once(body):
+            acks = [(body, {"flip": f})]
+            self.app.p.take_bands_acks = lambda: []
+            return acks
+        for key, want in ((ord("y"), "upconvert"), (ord("k"), "bypass"), (ord("x"), None)):
+            self.posts.clear()
+            self.app.p.take_bands_acks = lambda: flip_once({"plan": "auto"})
+            text = self.tt.frame(self.app, 30, 100).text()
+            self.assertIn("The best WSPR band now is 20 m, which needs it on UPCONVERT", text)
+            self.assertIn("k   Keep it on BYPASS: Auto on 6 m", text)
+            self.app.key(key)
+            self.assertEqual(self.posts, [{"plan": "auto", "switch": want}] if want else [])
+        # the poller hands a 409 over as a question, not an error
+        class Link:
+            def post(self, path, body, timeout=None):
+                return (200, {}) if "switch" in body else (409, dict(f))
+        p = self.t.Poller(Link())
+        p._bands({"plan": "auto"})
+        p._bands({"plan": "auto", "switch": "upconvert"})
+        self.assertEqual(p.take_bands_acks(), [({"plan": "auto"}, {"flip": f}),
+                                               ({"plan": "auto", "switch": "upconvert"}, None)])
 
 
 
