@@ -318,6 +318,10 @@ class DecoderVolume(unittest.TestCase):
             s.update(volume=0.0)
             self.assertEqual(s.volume, 0.0)
             self.assertEqual(rxd.Settings(dict(json.loads(json.dumps(p)), volume=0.0)).volume, 0.0)
+            # muted at the start whatever the profile says; turned up by tune
+            self.assertEqual(rxd.Settings(dict(json.loads(json.dumps(p)), volume=0.8)).volume, 0.0)
+            s.update(volume=0.8)
+            self.assertEqual(s.volume, 0.8)
         rx = rxd.Receiver(rxd.Settings(json.loads(json.dumps(JS8))), GainSynth(-70), Capture())
         self.assertNotIn("volume_min", rx.status())
 
@@ -556,6 +560,7 @@ class Routing(unittest.TestCase):
 
     def run_rx(self, profile, js8dec=None):
         settings = rxd.Settings(json.loads(json.dumps(profile)))
+        settings.update(volume=0.5)  # the speaker starts muted
         src = GainSynth(noise_db=-80, tone_db=-40)
         sink = Capture()
         rx = rxd.Receiver(settings, src, sink)

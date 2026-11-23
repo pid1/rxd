@@ -22,7 +22,8 @@ Times are shown in this machine's time zone ($TZ), 24-hour.
 l plays the receiver's audio on this machine, through the first of pw-cat,
 paplay, aplay, ffplay or sox's play on PATH (or --player), so the TUI works
 as a remote listening station, on any profile.
-[ ] set its volume here; M mutes the uConsole's own speaker meanwhile.
+[ ] set its volume here. The uConsole's own speaker starts muted every time
+rxd starts; M unmutes it (until rxd next starts) and mutes it again.
 --listen starts with it on.
 
 ? shows each view's keys. A typed frequency (f, in Manual) is MHz when it is
@@ -64,6 +65,7 @@ BANDWIDTHS = {"USB": (500, 1000, 1800, 2400, 2800), "LSB": (500, 1000, 1800, 240
               "WFM": (100000, 150000, 200000)}
 FREQ_MIN, FREQ_MAX = 100e3, 1.7e9      # rxd's tuning range
 VOLUME_MAX = 4.0                       # rxd accepts 0 to 4
+UNMUTE_TO = 0.5                        # M on a muted uConsole speaker
 GAIN_FALLBACK_MAX = 50.0               # 1 dB steps when rxd reports no gain table
 LEVEL_LO, LEVEL_HI = -110.0, -10.0     # signal bar span, dBFS
 
@@ -2084,15 +2086,11 @@ class App:
         self.p.tune(**fields)
 
     def close(self):
-        """On quit: stop the audio here, and give the uConsole speaker back if M muted it."""
+        """On quit: stop the audio here. A muted uConsole speaker stays muted:
+        muted is how rxd starts it."""
         if self.audio:
             self.audio.stop()
-        if self.mute_prev is not None and getattr(self.p, "link", None):
-            try:
-                self.p.link.post("/api/v1/tune", {"volume": self.mute_prev})
-            except OSError:
-                pass
-            self.mute_prev = None
+        self.mute_prev = None
 
     # ---- keys; returns False to quit
     def key(self, ch):
@@ -2327,7 +2325,8 @@ class App:
             v, self.mute_prev = self.mute_prev, None
             self.send(volume=v)
         elif st["volume"] <= 0:
-            self.say("The uConsole speaker is already at 0 %; + turns it up")
+            self.send(volume=UNMUTE_TO)  # rxd starts it muted; M turns it up
+            self.say("uConsole speaker unmuted, %s, until rxd next starts" % percent(UNMUTE_TO))
         else:
             self.mute_prev = st["volume"]
             self.send(volume=0.0)
@@ -2953,6 +2952,8 @@ class App:
             vol = st.get("volume")
             if self.mute_prev is not None:
                 spk = "Muted (M restores %s)" % percent(self.mute_prev)
+            elif vol == 0:
+                spk = "Muted (M unmutes)"
             else:
                 spk = percent(vol) if vol is not None else "---"
             fields = [("Gain", gain_words(st)),
@@ -2965,7 +2966,7 @@ class App:
                     break
                 scr.put(y, x, label, "label")
                 scr.put(y, x + len(label) + 1, val, "warn" if label == "Speaker" and
-                        self.mute_prev is not None else "value")
+                        val.startswith("Muted") else "value")
                 x += len(label) + len(val) + 5
             y += 1
             if st.get("mode") == "FM" and "squelch" in st:
@@ -3085,7 +3086,7 @@ class App:
             scr.put(y, x, sw, srole)
             x += len(sw) + 4
         gain = st.get("gain_db")
-        if self.mute_prev is not None:
+        if self.mute_prev is not None or st.get("volume") == 0:
             spk = "Muted"
         else:
             spk = percent(st["volume"]) if st.get("volume") is not None else "---"

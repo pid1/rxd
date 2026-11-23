@@ -62,7 +62,7 @@ What rxd is doing. Clients poll it, about twice a second.
 | `gain_auto` | bool | Automatic RF gain on |
 | `gain_loop` | object | Automatic gain's state: `state`, `reason`, `floor_db`, `margin_db`, `rms_dbfs`, `clip`, `steps`, `cpu` |
 | `gains` | list of numbers | The tuner's gain steps, dB |
-| `volume` | number | 0 to 4; the speaker only, never the decoders |
+| `volume` | number | 0 to 4; the speaker only, never the decoders or `/audio`. 0 (muted) whenever rxd starts, whatever the profile says |
 | `squelch` | number or null | Level squelch, dBFS; null is off |
 | `squelch_open` | bool | Audio passing now |
 | `audio` | object | Listening clean-up: `auto`, `nr`, `nr_setting` (null is by mode), `filter`, `norm`, `limit`, `squelch`, `active` (the stages running), `squelch_open`, `norm_gain_db`, `cpu` |
@@ -179,7 +179,7 @@ Changes tuning now. Any of these fields; the answer is the new status.
 | `bandwidth` | number, Hz | over 0 |
 | `gain_db` | number | dB, set on the dongle as its nearest gain step; turns automatic gain off |
 | `gain_auto` | bool | |
-| `volume` | number | 0 to 4 |
+| `volume` | number | 0 to 4; the speaker's, until rxd next starts (it always starts at 0) |
 | `squelch` | number or null | -150 to 0 dBFS; null turns it off |
 | `wspr_report` | bool | report WSPR spots to WSPRnet |
 | `hd_program` | int | 0 (HD1) to 7 (HD8): the HD Radio program; changing it restarts nrsc5 |

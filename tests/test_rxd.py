@@ -258,6 +258,7 @@ class Engine(unittest.TestCase):
         self.assertTrue(self.wait(lambda: self.rx.spectrum["seq"] > seq))
 
     def test_test_tone_is_heard(self):
+        self.settings.update(volume=0.5)  # the speaker starts muted
         self.rx.start()
         self.assertTrue(self.wait(lambda: len(self.sink.chunks) > 40))
         audio = np.concatenate(self.sink.chunks).astype(np.float32)
@@ -265,6 +266,34 @@ class Engine(unittest.TestCase):
         spec = np.abs(np.fft.rfft(audio[len(audio) // 2:]))
         peak = np.fft.rfftfreq(len(audio) - len(audio) // 2, 1 / 48000)[spec.argmax()]
         self.assertAlmostEqual(peak, 1500, delta=10)
+
+    def test_speaker_starts_muted_and_the_stream_still_plays(self):
+        # The profile says 0.2; the speaker starts at 0 all the same, and the
+        # stream to the browser is taken before the volume, so it carries the tone.
+        self.assertEqual(self.settings.volume, 0.0)
+        self.assertEqual(self.rx.status()["volume"], 0.0)
+        q = self.rx.listen(48000)
+        self.rx.start()
+        self.assertTrue(self.wait(lambda: len(self.sink.chunks) > 40))
+        speaker = np.concatenate(self.sink.chunks).astype(np.float32)
+        self.assertEqual(np.abs(speaker).max(), 0)
+        got = []
+        while True:
+            try:
+                got.append(q.get_nowait())
+            except Exception:
+                break
+        stream = np.frombuffer(b"".join(got), "<i2").astype(np.float32)
+        self.assertGreater(len(stream), 48000)
+        spec = np.abs(np.fft.rfft(stream[len(stream) // 2:]))
+        peak = np.fft.rfftfreq(len(stream) - len(stream) // 2, 1 / 48000)[spec.argmax()]
+        self.assertAlmostEqual(peak, 1500, delta=10)
+
+    def test_a_reload_keeps_the_speaker_where_it_is(self):
+        self.settings.update(volume=0.7)
+        self.settings.apply_profile(dict(JS8, volume=0.1))  # SIGHUP
+        self.assertEqual(self.settings.volume, 0.7)
+        self.assertEqual(rxd.Settings(dict(JS8, volume=0.7)).volume, 0.0)  # a start
 
 
 JS8_LINES = [

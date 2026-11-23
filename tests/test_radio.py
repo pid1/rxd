@@ -230,11 +230,20 @@ class RadioTest(unittest.TestCase):
         self.assertIn("146.5200 MHz", out)
 
     def test_saved_edits_merge_over_defaults(self):
-        self.write_saved("vhf", {"volume": 0.9})
+        self.write_saved("vhf", {"description": "2 m simplex"})
         self.radio("vhf")
         p = self.saved("vhf")
-        self.assertEqual(p["volume"], 0.9)
+        self.assertEqual(p["description"], "2 m simplex")
         self.assertEqual(p["frequency"], 146520000.0)
+
+    def test_no_profile_carries_the_speaker_volume(self):
+        # rxd starts its speaker muted; a volume saved by an older radio is dropped
+        for name, p in self.r.PROFILES.items():
+            self.assertNotIn("volume", p, name)
+        self.write_saved("vhf", {"volume": 0.9})
+        self.assertNotIn("volume", self.r.profile("vhf"))
+        self.radio("vhf")
+        self.assertNotIn("volume", self.saved("vhf"))
 
     def test_switch_saves_profile_being_left_from_status(self):
         # An old SDR++-era file still carrying vfo_offset.
@@ -250,7 +259,7 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(p["demod_settings"]["bandwidth"], 10000.0)
         self.assertEqual(p["rtl"]["gain_db"], 28.0)
         self.assertEqual(p["rtl"]["gain"], 20)  # index kept alongside
-        self.assertEqual(p["volume"], 0.7)
+        self.assertNotIn("volume", p)  # an unmute lasts until rxd next starts
         self.assertNotIn("vfo_offset", p)
 
         self.assertEqual(self.up(), "rxd@js8.service")
@@ -266,13 +275,14 @@ class RadioTest(unittest.TestCase):
         p = self.r.PROFILES["js8"]
         self.assertEqual((p["frequency"], p["decoder"], p["sink"]),
                          (7078000.0, "js8", self.r.STATION.sink))
-        self.assertGreater(p["volume"], 0)
+        self.assertNotIn("volume", p)  # rxd starts the speaker muted
         self.radio("js8")
         self.rxd.status = {"freq": 7080000.0, "mode": "USB", "bandwidth": 2800.0,
-                           "gain_db": 3.7, "volume": 0.0}
+                           "gain_db": 3.7, "volume": 0.6}
         self.radio("vhf")
         p = self.saved("js8")
-        self.assertEqual((p["frequency"], p["volume"]), (7080000.0, 0.0))  # muted is muted
+        self.assertEqual(p["frequency"], 7080000.0)
+        self.assertNotIn("volume", p)  # turned up, but not saved: muted next time
 
     def test_rerun_active_profile_does_not_restart(self):
         self.radio("vhf")
@@ -490,7 +500,8 @@ class RadioTest(unittest.TestCase):
 
     def test_wspr_profile_and_its_reporting_switch(self):
         p = self.r.profile("wspr")
-        self.assertEqual((p["decoder"], p["wspr_report"], p["volume"]), ("wspr", True, 0.0))
+        self.assertEqual((p["decoder"], p["wspr_report"]), ("wspr", True))
+        self.assertNotIn("volume", p)
         self.assertTrue(self.r.upconverting(p))
         off = {"wspr": {"report": {"enabled": False, "call": "KA1PID", "grid": "EN52lk"}}}
         self.assertFalse(self.r.capture(p, off)["wspr_report"])

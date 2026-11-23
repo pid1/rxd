@@ -513,6 +513,7 @@ canvas[hidden]{display:none}
       <input type="range" id="pvol" min="0" max="150" step="1"></div>
     <div class="row"><button type="button" class="btn" id="mute" aria-pressed="false" disabled>Mute uConsole speaker</button></div>
   </div>
+  <p class="note">The uConsole speaker starts muted every time rxd starts or changes station.</p>
   <p class="note">Audio may stop when the phone locks or the browser goes to the background.</p>
 </section>
 <fieldset id="qual" class="sec" data-v="listen" data-live disabled>
@@ -1434,8 +1435,8 @@ for (const [v, name] of VIEWS) {
 // Where each view's sections go: the left column, the right one (1100 px and
 // wider), and the order in one column (narrower).
 const LAYOUT = {
-  digital: [["bPlan", "jPick", "jStat", "wStat", "listenCard"], ["mapCard", "js8", "wspr"],
-    ["wStat", "js8", "wspr", "jPick", "bPlan", "jStat", "mapCard", "listenCard"]],
+  digital: [["bPlan", "jPick", "jStat", "wStat"], ["mapCard", "js8", "wspr"],
+    ["wStat", "js8", "wspr", "jPick", "bPlan", "jStat", "mapCard"]],
   listen: [["hd", "listenCard", "qual"], ["lPick"], ["hd", "listenCard", "lPick", "qual"]],
   manual: [["ctl", "ctl2", "audioCard", "listenCard"], ["scope", "stats", "js8", "wspr", "aPick"],
     ["ctl", "scope", "ctl2", "audioCard", "listenCard", "stats", "js8", "wspr", "aPick"]]
@@ -1463,13 +1464,13 @@ function renderView() {
     if (el.parentElement.closest("[data-v]")) { el.hidden = el.dataset.v.split(" ").indexOf(v) < 0; continue; }
     el.hidden = !v || el.dataset.v.split(" ").indexOf(v) < 0 || (el.hasAttribute("data-live") && mis);
   }
-  // each decode list needs its decoder; Listen stays reachable on JS8 and
-  // WSPR, so the phone can hear the band too
-  const dec = curDec();
+  // each decode list needs its decoder
   if (!st || pdec(st) !== "js8") $("js8").hidden = true;
   if (!st || pdec(st) !== "wspr") $("wspr").hidden = $("wStat").hidden = true;
   $("jCount").hidden = $("wCount").hidden = v === "digital";
-  if (v === "digital" && (A.on || (dec && !mis))) $("listenCard").hidden = false;
+  // Audio on this device is for Listen and Manual only: the Digital view has
+  // no card to show or stop a stream, so one still playing stops here
+  if (v === "digital" && A.on) stopListen();
   $("aPick").hidden = $("aPick").hidden || !profiles;
   $("lPick").hidden = $("lPick").hidden || !profAvail;
   $("jPick").hidden = $("jPick").hidden || !profAvail;
@@ -1721,8 +1722,6 @@ function finishSwitch() {
     setText($("flipT"), "▲ Flip the " + sw.upName + " to " + hiuWord(curUp()) + ". " + sw.desc + " needs it; without it you hear nothing.");
     $("flip").hidden = false;
   }
-  // a mute carries over to the next station
-  if (muted() && st.volume > 0) { store("spkprev", String(st.volume)); tune({volume: 0}, 0); }
   jKey = null; wKey = null;
   renderConn(); renderView();
   loadProfiles();
@@ -1854,22 +1853,22 @@ $("hdOn").onclick = () => {
 };
 
 // ---------------------------------------------------------------- uConsole speaker mute
-function muted() { return load("spkprev") !== null; }
-function syncMute() {
-  if (muted() && st && st.volume > 0 && !held("volume")) forget("spkprev");
-  renderMute();
-}
+// rxd starts its speaker muted (volume 0) on every start and switch. Unmute
+// turns it up to the level it had when last muted here (50 % before that),
+// until rxd next starts; the level is remembered, the unmute is not.
+function muted() { return !!st && !(st.volume > 0); }
+function unmuteTo() { const v = +load("spkprev"); return v > 0 && v <= 4 ? v : 0.5; }
+function syncMute() { renderMute(); }
 function renderMute() {
   const b = $("mute"), m = muted();
-  b.disabled = conn !== "ok" || !!switching || !st || (!m && st.volume === 0);
+  b.disabled = conn !== "ok" || !!switching || !st;
   b.setAttribute("aria-pressed", String(m));
-  if (m) setText(b, "Unmute uConsole speaker (back to " + Math.round(+load("spkprev") * 100) + " %)");
-  else if (st && st.volume === 0) setText(b, "uConsole speaker is at 0 %");
-  else setText(b, "Mute uConsole speaker");
+  if (m) setText(b, "Unmute uConsole speaker (muted; to " + Math.round(unmuteTo() * 100) + " %)");
+  else setText(b, "Mute uConsole speaker" + (st ? " (at " + Math.round(st.volume * 100) + " %)" : ""));
 }
 $("mute").onclick = () => {
   if (!st) return;
-  if (muted()) { const v = +load("spkprev") || 0.5; forget("spkprev"); setVol(v); tune({volume: v}, 0); st.volume = v; }
+  if (muted()) { const v = unmuteTo(); setVol(v); tune({volume: v}, 0); st.volume = v; }
   else { store("spkprev", String(st.volume)); setVol(0); tune({volume: 0}, 0); st.volume = 0; }
   renderMute();
 };

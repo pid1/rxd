@@ -47,10 +47,12 @@ stations). Without one, radio uses the first RTL-SDR, no upconverter and the
 default sink.
 
 A profile is tuning only: the dial frequency, offset mode, demodulator and
-its settings, audio sink and volume, the RTL-SDR's settings, and what rxd
-decodes ("decoder": "js8" or "wspr"). A WSPR profile also says whether rxd
-reports its spots to WSPRnet ("wspr_report", on by default). Both decoders
-work on the audio before the volume, so the volume is only the speaker's.
+its settings, audio sink, the RTL-SDR's settings, and what rxd decodes
+("decoder": "js8" or "wspr"). A WSPR profile also says whether rxd reports
+its spots to WSPRnet ("wspr_report", on by default). No profile carries the
+speaker's volume: rxd starts with its speaker muted every time, and the
+audio is for the browser or rxd-tui listening over the network (that
+stream, and both decoders, take the audio before the volume).
 The defaults below are starting points; saved state lives in
 ~/.config/rxd/radio/ and wins.
 
@@ -104,7 +106,7 @@ def speaker(p):
     if STATION.sink and "sink" not in p:
         p = dict(p)
         keys = list(p)
-        at = keys.index("volume") if "volume" in keys else len(keys)
+        at = keys.index("rtl") if "rtl" in keys else len(keys)
         p = dict(list(p.items())[:at] + [("sink", STATION.sink)] + list(p.items())[at:])
     return p
 
@@ -119,31 +121,32 @@ AM = {"bandwidth": 10000.0}
 
 def js8(desc, dial):
     # rxd decodes each slot itself, from the audio before the volume; the
-    # speaker plays it quietly, and the browser and rxd-tui can listen too.
+    # browser and rxd-tui can listen too.
     return speaker({"description": desc, "frequency": float(dial), "offset": "auto",
                     "demod": "USB", "demod_settings": USB_JS8,
-                    "volume": 0.2, "rtl": rtl(4), "decoder": "js8"})
+                    "rtl": rtl(4), "decoder": "js8"})
 
 
 def wspr(desc, dial):
     # rxd records each two-minute slot and decodes it with wsprd; the
-    # speaker stays silent (volume 0) but the browser and rxd-tui can listen.
+    # browser and rxd-tui can listen.
     return speaker({"description": desc, "frequency": dial, "offset": "auto",
                     "demod": "USB", "demod_settings": {"bandwidth": 2800.0},
-                    "volume": 0.0, "rtl": rtl(4),
+                    "rtl": rtl(4),
                     "decoder": "wspr", "wspr_report": True})
 
 
 def vhf(desc, hz, demod="FM", settings=NFM, gain=20):
     return speaker({"description": desc, "frequency": hz,
                     "offset": "auto", "demod": demod, "demod_settings": settings,
-                    "volume": 0.5, "rtl": rtl(gain)})
+                    "rtl": rtl(gain)})
 
 
 def station_profile(p):
     """One of the station file's own profiles, filled out like the built-in
     ones: offset auto, the station's dongle and sink."""
-    out = speaker(dict({"offset": "auto", "volume": 0.5}, **p))
+    out = speaker(dict({"offset": "auto"}, **p))
+    out.pop("volume", None)  # rxd starts its speaker muted; see capture()
     out["rtl"] = dict(rtl(20), **(p.get("rtl") or {}))
     return out
 
@@ -320,6 +323,7 @@ def profile(name):
     if os.path.isfile(path):
         with open(path, encoding="utf-8") as fh:
             p.update(json.load(fh))
+    p.pop("volume", None)  # rxd starts its speaker muted; see capture()
     if not p:
         die("no profile '%s' (have: %s)" % (name, ", ".join(known())))
     return p
@@ -508,8 +512,10 @@ def capture(p, st):
     if st.get("bandwidth") is not None:
         p["demod_settings"] = dict(p.get("demod_settings") or {},
                                    bandwidth=float(st["bandwidth"]))
-    if st.get("volume") is not None:
-        p["volume"] = float(st["volume"])
+    # The speaker's volume is not saved, and one saved by an older radio is
+    # dropped: rxd starts with its speaker muted on every start, switch and
+    # resume, so turning it up lasts only until rxd next starts.
+    p.pop("volume", None)
     if "squelch" in st:  # in SDR++'s keys, which rxd reads back
         ds = dict(p.get("demod_settings") or {}, squelchEnabled=st["squelch"] is not None)
         if st["squelch"] is not None:
