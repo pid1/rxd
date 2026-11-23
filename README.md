@@ -99,7 +99,7 @@ Install rxd (https://github.com/pid1/rxd) on this Raspberry Pi. Ask me before an
 
 rxd comes with two **reference clients**. Neither is the only way in.
 
-- **The web UI** (`clients/web/index.html`), served by rxd at `http://HOST:8073/`. One self-contained page with no external requests, in Day, Dark and Night (red) themes, sized for a phone up to a desktop.
+- **The web UI** (`clients/web/index.html`), served by rxd at `http://HOST:8073/`. One self-contained page with no external requests, in Light and Dark (Automatic follows the device), two columns on a desktop and a tab bar on a phone. Listen has built-in NOAA weather, GMRS/FRS and CB channels alongside your own stations.
 - **`rxd-tui`** (`clients/tui/rxd_tui.py`), for a terminal, with the same three views. It can play the audio on its own machine.
 
 Everything they do goes through the documented **[HTTP API](docs/API.md)**, version 1, under `/api/v1/`: status, tuning, the spectrum, profiles, JS8 decodes, WSPR spots, the station map, the band plan and the audio stream. Use either client, use any other, or build your own against the API. Both check the API version rxd reports, and say plainly when they reach an rxd they don't understand.
@@ -116,4 +116,4 @@ Everything they do goes through the documented **[HTTP API](docs/API.md)**, vers
 
 ## License
 
-BSD 3-Clause. Made by Jonathan Roemer. See [LICENSE](LICENSE). The JSC word table the installer fetches is JS8Call's (GPL-3) and is never in this repository.
+BSD 3-Clause. Made by Jonathan Roemer. See [LICENSE](LICENSE). The JSC word table the installer fetches is JS8Call's (GPL-3) and is never in this repository. The web UI embeds the Archivo, Atkinson Hyperlegible Next and Atkinson Hyperlegible Mono fonts, under the SIL Open Font License 1.1: see [LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).
