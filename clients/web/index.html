@@ -91,21 +91,25 @@ h2,.h2{margin:0;font:600 26px/1.15 var(--f-head);letter-spacing:-.022em}
 .v{font-weight:700;overflow-wrap:anywhere}
 
 /* ------------------------------------------------ now: what rxd is doing */
-#head{padding:28px 0 24px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:16px 36px}
-#hTitle{margin:4px 0 0;font:700 60px/1 var(--f-head);letter-spacing:-.035em;overflow-wrap:anywhere}
-.hfreq{font:500 34px/1.1 var(--f-mono);white-space:nowrap}
-.hfreq .u{font-size:18px;color:var(--slate)}
-.hright{margin-left:auto;display:flex;flex-direction:column;align-items:flex-start;gap:14px;min-width:0}
-.hdl{margin:0;display:flex;flex-wrap:wrap;gap:4px 26px}
+#head{padding:24px 0 22px;display:flex;flex-wrap:wrap;align-items:flex-end;gap:14px 28px}
+#hTitle{margin:4px 0 0;font:700 48px/1 var(--f-head);letter-spacing:-.035em;overflow-wrap:anywhere}
+.hfw{display:flex;flex-direction:column;gap:8px;min-width:0}
+.hfreq{font:500 26px/1.1 var(--f-mono);white-space:nowrap}
+.hfreq .u{font-size:16px;color:var(--slate)}
+.hright{margin-left:auto;min-width:0}
+.hdl{margin:0;display:flex;flex-wrap:wrap;gap:4px 22px}
+@media (min-width:1100px){.hdl{flex-wrap:nowrap}.hdl dd{white-space:nowrap}}
+/* laptop widths: a little smaller, so title, frequency and status still share one row */
+@media (min-width:1100px) and (max-width:1439px){#head{column-gap:22px}#hTitle{font-size:40px}.hfreq{font-size:23px}.hfreq .u{font-size:15px}.hdl{column-gap:18px}}
 .hdl>div{display:flex;flex-direction:column;gap:2px}
-.hdl dd{margin:0;font-weight:700;font-size:18px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.hdl dd{margin:0;font-weight:700;font-size:16px;display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 #hSta{font-family:var(--f-mono)}
 .lnk{font:600 15px var(--f-head);color:var(--verdigris-deep);background:none;border:0;padding:0 2px;min-height:44px;cursor:pointer;text-decoration:underline;text-underline-offset:3px}
 @media (hover:hover){.lnk:not(:disabled):hover{color:var(--ink);transition:color 180ms var(--ease)}}
-.hmeter{display:flex;align-items:center;gap:14px;min-width:320px;align-self:stretch}
+.hmeter{display:flex;align-items:center;gap:10px}
 .mbar{flex-grow:1;height:10px;background:var(--rule-soft);border:1px solid var(--rule)}
 .mbar i{display:block;height:100%;width:0;background:var(--verdigris)}
-.mnum{font:700 18px var(--f-mono);white-space:nowrap}
+.mnum{font:700 15px var(--f-mono);white-space:nowrap}
 .stale{opacity:.55}
 
 /* ------------------------------------------------ key points and banners: a 2px rule on the left */
@@ -333,8 +337,8 @@ canvas[hidden]{display:none}
   .cols{display:flex;flex-direction:column;align-items:stretch;gap:36px}
   .col{display:contents}
   .col>*{order:var(--o,99)}
-  #hTitle{font-size:48px}
-  .hright{margin-left:0}
+  #hTitle{font-size:44px}
+  .hright{margin-left:0;width:100%}
 }
 /* phone: the views move to a tab bar at the bottom, with Settings */
 @media (max-width:699px){
@@ -350,10 +354,8 @@ canvas[hidden]{display:none}
   #head{padding:18px 0 18px;gap:10px 24px}
   #hTitle{font-size:40px;margin-top:2px}
   .hfreq{font-size:22px}.hfreq .u{font-size:15px}
-  .hright{width:100%}
   .hdl{gap:6px 18px}
   .hdl dd{font-size:15px}
-  .hmeter{min-width:0;width:100%}
   .cols{gap:28px}
   h2,.h2{font-size:22px}
   .kp,.banner{padding-left:14px}
@@ -390,12 +392,14 @@ canvas[hidden]{display:none}
     <div id="hKind" class="lc">Receiver</div>
     <h1 id="hTitle">rxd</h1>
   </div>
-  <div class="hfreq"><span id="hFreq">—</span> <span id="hUnit" class="u"></span></div>
-  <div class="hright">
+  <div class="hfw">
+    <div class="hfreq"><span id="hFreq">—</span> <span id="hUnit" class="u"></span></div>
     <div id="hMeter" class="hmeter" hidden>
       <div class="mbar" role="meter" aria-label="Signal level" aria-valuemin="-100" aria-valuemax="0" id="mbar2"><i id="mfill2"></i></div>
       <span id="mnum2" class="mnum">— dBFS</span>
     </div>
+  </div>
+  <div class="hright">
     <dl id="hDl" class="hdl">
       <div><dt>Station</dt><dd id="hSta">—</dd></div>
       <div id="hUpW" hidden><dt class="upName">Upconverter</dt><dd><span id="hUp">—</span><button type="button" class="lnk" id="hiuC" hidden>Change</button></dd></div>
@@ -628,7 +632,7 @@ canvas[hidden]{display:none}
   <ol id="wList" class="jlist"></ol>
 </section>
 <section class="sec" id="lPick" data-v="listen">
-  <div class="sech"><h2>Stations</h2><span id="lSub" class="sub"></span></div>
+  <div class="sech"><h2>Stations</h2></div>
   <div id="lPickL" class="rl"></div>
 </section>
 <section class="sec" id="aPick" data-v="manual">
@@ -1529,7 +1533,6 @@ function renderProfiles() {
   if (view === "listen") {
     const ls = all.filter(p => pkind(p) === "listen");
     if (!profiles || !ls.length) mk("lPickL", ls, null); else renderStations(ls);
-    setText($("lSub"), sw ? upName() + " " + (sw.position === "unknown" ? "? not confirmed" : (sw.ok ? "✓ " : "▲ ") + sideWord(sw.position)) : "");
   }
 }
 // The group a profile is listed under: radio's "group" (rxds after 0.5.2),
