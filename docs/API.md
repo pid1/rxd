@@ -202,8 +202,16 @@ The captured band, about 5 times a second: `bins` (512 numbers, dB),
 `radio`'s profiles: `{"active": NAME, "profiles": [...]}`, each with `name`,
 `description`, `freq`, `mode`, `upconvert` (bool: through the upconverter),
 `js8` (bool), `decoder`, `band` (`"40m"` or null), `plan` (bool: the band plan
-may pick it) and `saved` (bool: has saved state). `503` when `radio` can't be
-run.
+may pick it), `group` and `saved` (bool: has saved state). `503` when `radio`
+can't be run.
+
+`group` (added after rxd 0.5.2) is where a client lists the profile:
+`Favorites` (the station file's own), `Ham calling` (`vhf`, `uhf`), `Weather`
+(NOAA WX1 to WX7), `GMRS and FRS`, `CB`, `JS8` and `WSPR` (by decoder); a
+profile saved under a new name with `radio save` is `Broadcast FM` (WFM),
+`AM`, `JS8` or `WSPR` by what it is, else `Favorites`. A client meeting a
+group it doesn't know lists it anyway, after the ones it does. An older rxd
+sends no `group`; the browser UI then groups by mode as it used to.
 
 ## POST /api/v1/profile
 

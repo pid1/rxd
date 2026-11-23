@@ -135,8 +135,14 @@ were checked 2026-11-06 against JS8Call-improved 3.0.3's default list
   190,000 on the older 5.2872.
 
 Also built in: `ghostnet` (JS8 GhostNet, 7.107 MHz), `vhf` (146.52 MHz FM),
-`uhf` (446.0 MHz FM) and `noaa` (162.55 MHz FM). Local ones go in the station
-file.
+`uhf` (446.0 MHz FM), and three runs of channels: NOAA weather WX1 to WX7
+(`noaa`, which `wx1` also names, then `wx2` to `wx7`; 162.400 to 162.550
+MHz, NFM 12.5 kHz), GMRS and FRS 1 to 22 (`gmrs1` to `gmrs22`, NFM 12.5 kHz)
+and CB 1 to 40 (`cb1` to `cb40`, 26.965 to 27.405 MHz on the usual irregular
+plan, AM 10 kHz; below 30 MHz, so through the upconverter). The plain
+`radio` list folds each run of channels into one line unless one of them is
+active or saved; `radio --all` lists every one, and Tab completion offers
+them all. Local ones go in the station file.
 
 ### Band plan
 

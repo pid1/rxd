@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """radio: switchable, resumable receiver profiles for rxd.
 
-  radio                list profiles; * marks the active one
+  radio                list profiles; * marks the active one. The weather,
+                       GMRS/FRS and CB channels take a line per group.
+  radio --all          the same, every channel on its own line
   radio NAME           switch to NAME. rxd, the receiver, restarts on NAME; on
                        a JS8 or WSPR profile it decodes that mode itself.
                        The profile being left is saved first, so coming back
@@ -26,6 +28,10 @@ Every amateur band has a JS8 and a WSPR profile on its standard dial:
 js8-160m ... js8-2m and wspr-2190m ... wspr-2m. On 40 m they keep their old
 names, js8 and wspr (js8-40m and wspr-40m mean the same). With an
 upconverter that has a switch (a Ham It Up), 6 m and 2 m need it on BYPASS.
+
+Channels: NOAA weather wx1 ... wx7 (wx1 is noaa), GMRS/FRS gmrs1 ... gmrs22
+(NFM) and CB cb1 ... cb40 (AM; cb9 emergency, cb19 highway). CB is below
+30 MHz, so through an upconverter it needs UPCONVERT.
 
 Such a switch only a person can flip, so radio asks: switching to a profile
 on the other side from the one last confirmed (or with none confirmed since
@@ -202,16 +208,78 @@ def band_profiles():
 
 BAND_PLAN = band_profiles()
 
-# Built in: the band plan and the calling frequencies every station shares.
-# Local repeaters and broadcast stations come from the station file.
+# NOAA Weather Radio's seven US channels, WX1 to WX7 (NFM, 12.5 kHz). WX1 keeps
+# the name it always had, noaa; wx1 is an alias.
+WX_CHANNELS = (162550000, 162400000, 162475000, 162425000, 162450000, 162500000,
+               162525000)
+# GMRS and FRS share channels 1-22 (FCC Part 95): 1-7 at 462.5625-462.7125 MHz,
+# 8-14 (FRS only) at 467.5625-467.7125, 15-22 at 462.5500-462.7250. NFM.
+GMRS_CHANNELS = tuple(462562500 + 25000 * i for i in range(7)) + \
+    tuple(467562500 + 25000 * i for i in range(7)) + \
+    tuple(462550000 + 25000 * i for i in range(8))
+# CB's 40 channels (AM, 10 kHz), on the irregular plan: the gaps at 3/4, 7/8,
+# 11/12, 15/16 and 19/20 were radio-control channels, and 23 sits above 24 and 25.
+CB_CHANNELS = (26965000, 26975000, 26985000, 27005000, 27015000, 27025000, 27035000,
+               27055000, 27065000, 27075000, 27085000, 27105000, 27115000, 27125000,
+               27135000, 27155000, 27165000, 27175000, 27185000, 27205000, 27215000,
+               27225000, 27255000, 27235000, 27245000) + \
+    tuple(27265000 + 10000 * i for i in range(15))
+CB_NOTES = {9: "emergency", 19: "highway"}
+
+
+def channel_profiles():
+    """Weather, GMRS/FRS and CB channels: {name: profile}."""
+    out = {}
+    for i, hz in enumerate(WX_CHANNELS[1:], 2):
+        out["wx%d" % i] = vhf("NOAA weather WX%d" % i, float(hz))
+    for i, hz in enumerate(GMRS_CHANNELS, 1):
+        out["gmrs%d" % i] = vhf(("FRS %d" if 8 <= i <= 14 else "GMRS/FRS %d") % i, float(hz))
+    for i, hz in enumerate(CB_CHANNELS, 1):
+        note = CB_NOTES.get(i)
+        out["cb%d" % i] = vhf("CB %d%s" % (i, " (%s)" % note if note else ""),
+                              float(hz), demod="AM", settings=AM)
+    return out
+
+
+CHANNELS = channel_profiles()
+
+# Built in: the band plan, the calling frequencies every station shares and the
+# weather, GMRS/FRS and CB channels. Local repeaters and broadcast stations
+# come from the station file.
 PROFILES = {
     "ghostnet": js8("JS8 GhostNet, 40 m", 7107000),
     **BAND_PLAN,
     "vhf":      vhf("2 m calling", 146520000.0),
     "uhf":      vhf("70 cm calling", 446000000.0),
-    "noaa":     vhf("NOAA weather", 162550000.0),  # one of the seven US channels
+    "noaa":     vhf("NOAA weather WX1", float(WX_CHANNELS[0])),
+    **CHANNELS,
     **{n: station_profile(p) for n, p in STATION.profiles.items()},
 }
+ALIASES["wx1"] = "noaa"
+
+# Where each built-in profile is listed (`radio --json`'s "group", the
+# browser's Listen view).
+GROUP_OF = {"vhf": "Ham calling", "uhf": "Ham calling", "noaa": "Weather",
+            **{n: "Weather" for n in CHANNELS if n.startswith("wx")},
+            **{n: "GMRS and FRS" for n in CHANNELS if n.startswith("gmrs")},
+            **{n: "CB" for n in CHANNELS if n.startswith("cb")}}
+# The groups the plain `radio` list folds into one line each (a member that is
+# active or saved still gets its own): runs of channels, not stations.
+FOLDED = ("Weather", "GMRS and FRS", "CB")
+
+
+def group(name, p):
+    """The group a profile is listed under: "Favorites" for the station file's
+    own, the built-in groups above, "JS8" or "WSPR" by decoder, and for one
+    saved under a new name, by its mode ("Broadcast FM", "AM") or "Favorites"."""
+    if name in STATION.profiles:
+        return "Favorites"
+    if name in GROUP_OF:
+        return GROUP_OF[name]
+    dec = p.get("decoder")
+    if dec:
+        return {"js8": "JS8", "wspr": "WSPR"}.get(dec, dec.upper())
+    return {"WFM": "Broadcast FM", "AM": "AM"}.get(p.get("demod"), "Favorites")
 
 
 def say(msg, kind=None):
@@ -309,14 +377,42 @@ def decoder(p):
     return p.get("decoder")
 
 
-def summary(name, p):
+def summary(name, p, mhz=None, desc=None):
     if STATION.upconverter_name:
         path = "%s %s" % (STATION.upconverter_name,
                           "upconvert" if upconverting(p) else "bypass")
     else:
         path = "direct"
-    return "%-10s %11.4f MHz %-4s %-19s %s" % (
-        name, p["frequency"] / 1e6, p["demod"], path, p.get("description", ""))
+    return "%-10s %15s %-4s %-19s %s" % (
+        name, mhz or "%.4f MHz" % (p["frequency"] / 1e6), p["demod"], path,
+        p.get("description", "") if desc is None else desc)
+
+
+FOLD_LABELS = {"Weather": ("wx1-7", "radio wx1 (or noaa) ... radio wx7"),
+               "GMRS and FRS": ("gmrs1-22", "radio gmrs1 ... radio gmrs22"),
+               "CB": ("cb1-40", "radio cb1 ... radio cb40 (cb9 emergency, cb19 highway)")}
+
+
+def listing(every=False):
+    """The plain `radio` list, * on the active profile. The long runs of
+    channels (FOLDED) take one line each unless every is set; a channel that
+    is active or has saved state still gets its own line."""
+    cur, done = active(), set()
+    for n in known():
+        p = profile(n)
+        saved = os.path.isfile(os.path.join(STATE, n + ".json"))
+        g = GROUP_OF.get(n)
+        if not every and g in FOLDED and n != cur and not saved:
+            if g not in done:
+                done.add(g)
+                label, words = FOLD_LABELS[g]
+                members = [m for m in PROFILES if GROUP_OF.get(m) == g]
+                lo = min(PROFILES[m]["frequency"] for m in members) / 1e6
+                hi = max(PROFILES[m]["frequency"] for m in members) / 1e6
+                print("  " + summary(label, p, "%d channels" % len(members),
+                                     "%s, %g-%g MHz: %s" % (g, lo, hi, words)))
+            continue
+        print("%s %s%s" % ("*" if n == cur else " ", summary(n, p), "  (saved)" if saved else ""))
 
 
 def unit_name(name):
@@ -544,6 +640,7 @@ def main():
     ap = argparse.ArgumentParser(prog="radio", add_help=True)
     ap.add_argument("--no-focus", action="store_true")
     ap.add_argument("--names", action="store_true", help=argparse.SUPPRESS)
+    ap.add_argument("--all", action="store_true", help="list every channel")
     ap.add_argument("--json", action="store_true", help=argparse.SUPPRESS)
     ap.add_argument("cmd", nargs="?")
     ap.add_argument("arg", nargs="?")
@@ -576,15 +673,13 @@ def main():
                          "decoder": decoder(p),
                          "band": band_of(float(p["frequency"])),
                          "plan": n in BAND_PLAN,
+                         "group": group(n, p),
                          "saved": os.path.isfile(os.path.join(STATE, n + ".json"))})
         print(json.dumps({"active": active(), "profiles": rows}))
     elif a.cmd is None:
-        cur = active()
-        for n in known():
-            saved = os.path.isfile(os.path.join(STATE, n + ".json"))
-            print("%s %s%s" % ("*" if n == cur else " ", summary(n, profile(n)),
-                               "  (saved)" if saved else ""))
-        print("\nradio NAME switches · radio off · radio help · Tab completes names")
+        listing(a.all)
+        print("\nradio NAME switches · radio off · radio help · Tab completes names" +
+              ("" if a.all else " · radio --all lists every channel"))
         more = sorted(extensions())
         if more:
             print("more: " + " · ".join("radio " + c for c in more))

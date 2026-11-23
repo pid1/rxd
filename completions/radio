@@ -1,14 +1,15 @@
 # bash completion for radio, installed by rxd's install.py.
-# Profile names come from 'radio --names', which also lists the radio-CMD
-# extensions on PATH; an extension completes its own arguments when it
-# answers 'radio-CMD --complete WORDS...' with one candidate per line.
+# Profile names come from 'radio --names', every channel included (cb<Tab>
+# offers the 40 CB ones, gmrs<Tab> the 22 GMRS/FRS ones), which also lists
+# the radio-CMD extensions on PATH; an extension completes its own arguments
+# when it answers 'radio-CMD --complete WORDS...' with one candidate per line.
 _radio() {
     local cur=${COMP_WORDS[COMP_CWORD]} prev=${COMP_WORDS[COMP_CWORD-1]}
     local i=1 names
     [[ ${COMP_WORDS[1]} == --no-focus ]] && i=2
     names=$(radio --names 2>/dev/null)
     if (( COMP_CWORD == i )); then
-        COMPREPLY=($(compgen -W "$names off resume save reset show help --no-focus" -- "$cur"))
+        COMPREPLY=($(compgen -W "$names off resume save reset show help --all --no-focus" -- "$cur"))
         return
     fi
     local cmd=${COMP_WORDS[i]}

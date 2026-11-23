@@ -154,7 +154,11 @@ of a built-in one replaces it. Saved state (`radio save`) still lives in
 
 Without a station file `radio` has the band plan (`js8-160m` to `js8-2m`,
 `wspr-2190m` to `wspr-2m`; 40 m's are `js8` and `wspr`), `ghostnet` (JS8
-GhostNet, 7.107 MHz), `vhf` (146.52 MHz FM), `uhf` (446.0 MHz FM) and `noaa`
-(162.55 MHz FM). An R820T or R828D dongle tunes no lower than about 24 MHz
+GhostNet, 7.107 MHz), `vhf` (146.52 MHz FM), `uhf` (446.0 MHz FM), NOAA
+weather `noaa` (WX1, 162.55 MHz; `wx1` is the same) and `wx2` to `wx7`, GMRS
+and FRS `gmrs1` to `gmrs22` (FM) and CB `cb1` to `cb40` (AM; `cb9` is the
+emergency channel, `cb19` the highway one). In lists (`radio --json`, the
+browser's Listen view) the station file's own profiles are the group
+"Favorites". An R820T or R828D dongle tunes no lower than about 24 MHz
 and rxd doesn't use direct sampling, so HF and the AM broadcast band need an
 upconverter in the station file to be heard at all.
