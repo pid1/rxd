@@ -79,5 +79,32 @@ class Switch(unittest.TestCase):
         self.assertEqual(got[3:], ["BYPASS", "upconvert"])
 
 
+class Audio(unittest.TestCase):
+    """Audio on this device is for Listen and Manual; the uConsole speaker
+    starts muted and Unmute is always there to turn it up."""
+
+    def test_audio_card_is_listen_and_manual_only(self):
+        html = page()
+        card = re.search(r'<section class="card" id="listenCard"[^>]*>', html)[0]
+        self.assertIn('data-v="listen manual"', card)
+        # nothing brings it back on the Digital view, and a stream left
+        # playing there is stopped, as no card shows it
+        self.assertNotIn('$("listenCard").hidden = false', html)
+        self.assertNotIn("body[data-view=digital] #listenCard", html)
+        self.assertIn('if (v === "digital" && A.on) stopListen();', html)
+
+    def test_mute_button_unmutes_a_muted_speaker(self):
+        html = page()
+        render = re.search(r"\nfunction renderMute\(\) \{.*?\n\}", html, re.S)[0]
+        # never disabled just because the speaker is at 0: that's Unmute
+        self.assertNotIn("volume === 0", render)
+        self.assertIn('"Unmute uConsole speaker (muted; to "', render)
+        self.assertIn("function muted() { return !!st && !(st.volume > 0); }", html)
+        # rxd restarts muted on a switch; the page doesn't carry a mute itself
+        finish = re.search(r"\nfunction finishSwitch\(\) \{.*?\n\}", html, re.S)[0]
+        self.assertNotIn("volume", finish)
+        self.assertIn("The uConsole speaker starts muted", html)
+
+
 if __name__ == "__main__":
     unittest.main()

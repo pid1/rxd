@@ -137,7 +137,6 @@ one, and appears in `radio`'s list after the built-in ones. Only `frequency`
 - `description`: the name.
 - `demod`: `USB`; one of `USB`, `LSB`, `AM`, `FM`, `WFM`.
 - `offset`: `auto`.
-- `volume`: 0.5.
 - `rtl`: gain index 20, the station's `sdr.serial`. A profile's own `rtl`
   keys win, so `"rtl": {"gain": 10}` changes only the gain.
 - `sink`: the station's.

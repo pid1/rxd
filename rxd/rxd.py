@@ -26,6 +26,11 @@ WSPRnet as the station's call at its grid (/etc/rxd/station.json, see
 docs/station.md); GET /api/v1/wspr lists them. Both decode
 the audio before squelch and volume, so the volume is only the speaker's.
 
+The speaker starts muted (volume 0) every time rxd starts, whatever the
+profile says; /api/v1/tune {"volume": V} turns it up until rxd next starts.
+The browser and rxd-tui stream (GET /api/v1/audio) is taken before the
+volume, so it plays either way.
+
 A profile's "frequency" is the dial: for USB, where a signal 1500 Hz up in
 the audio is 1500 Hz above it.
 
@@ -196,7 +201,11 @@ class Settings:
             self.bandwidth = min(bw, 2800.0) if mode in ("USB", "LSB") else bw
             self.agc_attack = float(ds.get("agcAttack", 50.0))
             self.agc_decay = float(ds.get("agcDecay", 5.0))
-            self.volume = float(p.get("volume", 0.5))
+            # The speaker starts muted, whatever the profile says: the audio
+            # is for the device listening over the network, and the speaker
+            # only plays once someone turns it up (POST /tune {"volume"}).
+            # A reload (SIGHUP) keeps the level it has now.
+            self.volume = getattr(self, "volume", 0.0)
             # SDR++'s squelchEnabled/squelchLevel, carried in demod_settings.
             self.squelch = float(ds["squelchLevel"]) if ds.get("squelchEnabled") and \
                 ds.get("squelchLevel") is not None else None

@@ -89,9 +89,14 @@ radio help
 ```
 
 - **A profile is tuning only:** the dial frequency, demodulator and its
-  settings, audio sink and volume, the RTL-SDR's settings, and what rxd
-  decodes (`"decoder": "js8"` or `"wspr"`). The decoders take the audio
-  before the volume, so the volume is only the speaker's.
+  settings, audio sink, the RTL-SDR's settings, and what rxd decodes
+  (`"decoder": "js8"` or `"wspr"`). The decoders and the browser/TUI stream
+  take the audio before the volume, so the volume is only the speaker's.
+- **The speaker starts muted:** rxd starts with volume 0 on every start,
+  switch and resume, whatever the profile says. `POST /api/v1/tune
+  {"volume": V}` (the web UI's Unmute or the Manual slider, `M` or `+` in
+  rxd-tui) turns it up until rxd next starts. A profile's `volume` is
+  ignored, and `radio` neither saves one nor keeps an old one.
 - **Each one resumes:** switching saves the profile being left, into
   `~/.config/rxd/radio/NAME.json`. The defaults are in `radio` and the station
   file, and are only starting points.
