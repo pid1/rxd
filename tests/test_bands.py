@@ -147,7 +147,8 @@ class Profiles(unittest.TestCase):
         self.assertEqual(self.r.PROFILES["wspr"]["frequency"], 7038600.0)
         self.assertEqual(self.r.PROFILES["wspr"]["description"], "WSPR, 40 m")
         self.assertFalse(self.rows["ghostnet"]["plan"])  # a net, not the band plan's 40 m
-        self.assertEqual(self.r.ALIASES, {"js8-40m": "js8", "wspr-40m": "wspr"})
+        # and noaa, now NOAA weather's WX1 of seven, answers to wx1 too
+        self.assertEqual(self.r.ALIASES, {"js8-40m": "js8", "wspr-40m": "wspr", "wx1": "noaa"})
         self.assertNotIn("js8-40m", self.rows)
 
     def test_band_profiles_are_the_dial_and_a_decoder(self):

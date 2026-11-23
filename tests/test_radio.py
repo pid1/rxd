@@ -230,11 +230,20 @@ class RadioTest(unittest.TestCase):
         self.assertIn("146.5200 MHz", out)
 
     def test_saved_edits_merge_over_defaults(self):
-        self.write_saved("vhf", {"volume": 0.9})
+        self.write_saved("vhf", {"description": "2 m simplex"})
         self.radio("vhf")
         p = self.saved("vhf")
-        self.assertEqual(p["volume"], 0.9)
+        self.assertEqual(p["description"], "2 m simplex")
         self.assertEqual(p["frequency"], 146520000.0)
+
+    def test_no_profile_carries_the_speaker_volume(self):
+        # rxd starts its speaker muted; a volume saved by an older radio is dropped
+        for name, p in self.r.PROFILES.items():
+            self.assertNotIn("volume", p, name)
+        self.write_saved("vhf", {"volume": 0.9})
+        self.assertNotIn("volume", self.r.profile("vhf"))
+        self.radio("vhf")
+        self.assertNotIn("volume", self.saved("vhf"))
 
     def test_switch_saves_profile_being_left_from_status(self):
         # An old SDR++-era file still carrying vfo_offset.
@@ -250,7 +259,7 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(p["demod_settings"]["bandwidth"], 10000.0)
         self.assertEqual(p["rtl"]["gain_db"], 28.0)
         self.assertEqual(p["rtl"]["gain"], 20)  # index kept alongside
-        self.assertEqual(p["volume"], 0.7)
+        self.assertNotIn("volume", p)  # an unmute lasts until rxd next starts
         self.assertNotIn("vfo_offset", p)
 
         self.assertEqual(self.up(), "rxd@js8.service")
@@ -266,13 +275,14 @@ class RadioTest(unittest.TestCase):
         p = self.r.PROFILES["js8"]
         self.assertEqual((p["frequency"], p["decoder"], p["sink"]),
                          (7078000.0, "js8", self.r.STATION.sink))
-        self.assertGreater(p["volume"], 0)
+        self.assertNotIn("volume", p)  # rxd starts the speaker muted
         self.radio("js8")
         self.rxd.status = {"freq": 7080000.0, "mode": "USB", "bandwidth": 2800.0,
-                           "gain_db": 3.7, "volume": 0.0}
+                           "gain_db": 3.7, "volume": 0.6}
         self.radio("vhf")
         p = self.saved("js8")
-        self.assertEqual((p["frequency"], p["volume"]), (7080000.0, 0.0))  # muted is muted
+        self.assertEqual(p["frequency"], 7080000.0)
+        self.assertNotIn("volume", p)  # turned up, but not saved: muted next time
 
     def test_rerun_active_profile_does_not_restart(self):
         self.radio("vhf")
@@ -490,7 +500,8 @@ class RadioTest(unittest.TestCase):
 
     def test_wspr_profile_and_its_reporting_switch(self):
         p = self.r.profile("wspr")
-        self.assertEqual((p["decoder"], p["wspr_report"], p["volume"]), ("wspr", True, 0.0))
+        self.assertEqual((p["decoder"], p["wspr_report"]), ("wspr", True))
+        self.assertNotIn("volume", p)
         self.assertTrue(self.r.upconverting(p))
         off = {"wspr": {"report": {"enabled": False, "call": "KA1PID", "grid": "EN52lk"}}}
         self.assertFalse(self.r.capture(p, off)["wspr_report"])
@@ -516,7 +527,7 @@ class RadioTest(unittest.TestCase):
         self.assertEqual(rows["js8"], {"name": "js8", "description": "JS8, 40 m",
                                        "freq": 7078000.0, "mode": "USB", "upconvert": True,
                                        "js8": True, "decoder": "js8", "band": "40m",
-                                       "plan": True, "saved": True})
+                                       "plan": True, "group": "JS8", "saved": True})
         self.assertEqual((rows["ghostnet"]["band"], rows["ghostnet"]["plan"]), ("40m", False))
         self.assertEqual((rows["wspr"]["decoder"], rows["wspr"]["js8"], rows["wspr"]["freq"]),
                          ("wspr", False, 7038600.0))
@@ -524,6 +535,67 @@ class RadioTest(unittest.TestCase):
         self.assertEqual((rows["fm-105.3"]["upconvert"], rows["fm-105.3"]["js8"],
                           rows["fm-105.3"]["mode"]), (False, False, "WFM"))
         self.assertTrue(rows["am-820"]["upconvert"])
+        # every row has a group: the station file's are Favorites
+        groups = {n: r["group"] for n, r in rows.items()}
+        self.assertEqual((groups["fm-105.3"], groups["am-820"], groups["vhf"], groups["noaa"],
+                          groups["wx7"], groups["gmrs20"], groups["cb19"], groups["wspr-20m"]),
+                         ("Favorites", "Favorites", "Ham calling", "Weather",
+                          "Weather", "GMRS and FRS", "CB", "WSPR"))
+        self.assertEqual(sum(g == "CB" for g in groups.values()), 40)
+        self.assertEqual(sum(g == "GMRS and FRS" for g in groups.values()), 22)
+        self.assertEqual(sum(g == "Weather" for g in groups.values()), 7)
+
+    def test_channels(self):
+        P = self.r.PROFILES
+        # NOAA weather: WX1 is noaa (and wx1 an alias), NFM 12.5 kHz
+        wx = [P["noaa"]] + [P["wx%d" % i] for i in range(2, 8)]
+        self.assertEqual([p["frequency"] for p in wx],
+                         [162550000.0, 162400000.0, 162475000.0, 162425000.0, 162450000.0,
+                          162500000.0, 162525000.0])
+        self.assertEqual(P["noaa"]["description"], "NOAA weather WX1")
+        self.assertEqual(self.r.ALIASES["wx1"], "noaa")
+        self.assertTrue(all(p["demod"] == "FM" and p["demod_settings"]["bandwidth"] == 12500.0 for p in wx))
+        # GMRS/FRS 1-22
+        g = [P["gmrs%d" % i]["frequency"] for i in range(1, 23)]
+        self.assertEqual((g[0], g[6], g[7], g[13], g[14], g[19], g[21]),
+                         (462562500.0, 462712500.0, 467562500.0, 467712500.0, 462550000.0,
+                          462675000.0, 462725000.0))
+        self.assertEqual(P["gmrs8"]["description"], "FRS 8")
+        self.assertNotIn("gmrs23", P)
+        # CB 1-40 on the irregular plan, AM 10 kHz, through the upconverter
+        cb = {i: P["cb%d" % i]["frequency"] / 1e3 for i in range(1, 41)}
+        self.assertEqual((cb[1], cb[3], cb[4], cb[7], cb[8], cb[11], cb[12], cb[15], cb[16],
+                          cb[19], cb[20], cb[22], cb[23], cb[24], cb[25], cb[26], cb[40]),
+                         (26965, 26985, 27005, 27035, 27055, 27085, 27105, 27135, 27155,
+                          27185, 27205, 27225, 27255, 27235, 27245, 27265, 27405))
+        self.assertEqual(len(set(cb.values())), 40)
+        self.assertEqual((P["cb9"]["description"], P["cb19"]["description"]),
+                         ("CB 9 (emergency)", "CB 19 (highway)"))
+        self.assertTrue(all(P["cb%d" % i]["demod"] == "AM" and
+                            P["cb%d" % i]["demod_settings"]["bandwidth"] == 10000.0 for i in cb))
+        self.assertTrue(self.r.upconverting(P["cb19"]))
+        self.assertFalse(self.r.upconverting(P["gmrs1"]))
+
+    def test_wx1_is_noaa(self):
+        self.radio("wx1")
+        self.assertEqual(self.up(), "rxd@noaa.service")
+
+    def test_list_folds_the_channels(self):
+        out, _ = self.radio()
+        self.assertRegex(out, r"(?m)^  cb1-40 +40 channels AM ")
+        self.assertRegex(out, r"(?m)^  gmrs1-22 +22 channels FM ")
+        self.assertRegex(out, r"(?m)^  wx1-7 +7 channels FM ")
+        self.assertNotRegex(out, r"(?m)^  cb19 ")
+        self.assertIn("radio --all", out)
+        # the active channel keeps its own line
+        self.radio("cb19")
+        out, _ = self.radio()
+        self.assertRegex(out, r"(?m)^\* cb19 +27\.1850 MHz AM ")
+        self.assertRegex(out, r"(?m)^  cb1-40 ")
+        out, _ = self.radio("--all")
+        self.assertRegex(out, r"(?m)^  cb40 +27\.4050 MHz AM ")
+        self.assertRegex(out, r"(?m)^  gmrs22 +462\.7250 MHz FM ")
+        self.assertNotIn("channels", out.split("\n\n")[0])
 
 
 if __name__ == "__main__":

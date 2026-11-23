@@ -1,7 +1,8 @@
-"""Tests for the browser UI's upconverter switch (clients/web/index.html): the
-question asked while its position is unknown, the confirmation before a
-profile on the other side, and the readout, in words with a symbol. Where
-node is installed, the readout's words run as the page runs them.
+"""Tests for the browser UI (clients/web/index.html): the upconverter switch
+(the question asked while its position is unknown, the confirmation before a
+profile on the other side, and the readout, in words with a symbol; where
+node is installed, the readout's words run as the page runs them), and the
+themes, Settings and the page's self-containment.
 
     python3 -m unittest discover tests
 """
@@ -29,7 +30,7 @@ class Switch(unittest.TestCase):
         ask = re.search(r'<section id="swAsk"[^>]*>(.*?)</section>', html, re.S)
         self.assertIsNotNone(ask)
         self.assertNotIn("data-v", ask.group(0).split(">", 1)[0])
-        self.assertLess(html.index('id="swAsk"'), html.index('id="views"'))
+        self.assertLess(html.index('id="swAsk"'), html.index(' data-v="'))
         self.assertIn('Is the <span class="upName">upconverter</span> on UPCONVERT or BYPASS?', ask[1])
         for bid, word in (("swAskUp", "⇅ UPCONVERT"), ("swAskBy", "→ BYPASS")):
             self.assertRegex(ask[1], r'id="%s">%s<small>' % (bid, word))
@@ -44,12 +45,69 @@ class Switch(unittest.TestCase):
         # the old "allow the other side" setting is gone from the UI
         self.assertNotIn("bpSideOn", html)
 
-    def test_night_has_no_white(self):
+
+class Themes(unittest.TestCase):
+    """Light and Dark (and Automatic), on the Cygnus tokens; no Night (Win's
+    call, 2026-11-23)."""
+    TOKENS = ("stone", "paper", "ink", "slate", "verdigris", "verdigris-deep", "amber",
+              "rule", "rule-soft", "band", "on-ink")
+
+    def blocks(self, html):
+        light = re.search(r":root\{([^}]*)\}", html)[1]
+        auto = re.search(r"@media \(prefers-color-scheme:dark\)\{:root\[data-theme=auto\]\{([^}]*)\}\}", html)[1]
+        dark = re.search(r":root\[data-theme=dark\]\{([^}]*)\}", html)[1]
+        return light, auto, dark
+
+    def test_both_themes_define_every_token(self):
+        def tokens(block):
+            return dict(re.findall(r"--([a-z-]+):([^;]+)", block))
+        light, auto, dark = (tokens(b) for b in self.blocks(page()))
+        for t in self.TOKENS:
+            self.assertIn(t, light)
+            self.assertIn(t, dark)
+        # Automatic's dark is Dark exactly
+        self.assertEqual(auto, dark)
+        self.assertEqual((light["stone"], dark["stone"]), ("#e9e7e2", "#14181d"))
+        self.assertEqual((light["verdigris"], dark["verdigris"]), ("#1f6f5c", "#4fb39a"))
+
+    def test_no_night_and_a_stored_night_becomes_dark(self):
         html = page()
-        night = "".join(re.findall(r":root\[data-theme=night\][^{]*\{([^}]*)\}", html))
-        self.assertNotRegex(night.lower(), r"#fff\b|#ffffff|white")
-        for rule in re.findall(r"\.(?:card\.)?(?:ask|dlg|overlay)\{([^}]*)\}", html):
-            self.assertNotRegex(rule.lower(), r"#fff\b|#ffffff|white")
+        self.assertNotIn("data-theme=night", html)
+        self.assertNotIn('"night", "Night"', html)
+        self.assertNotIn("NIGHT", html)
+        self.assertIn('const THEMES = [["auto", "Automatic"], ["light", "Light"], ["dark", "Dark"]];', html)
+        self.assertRegex(html, r'if \(t === "night"\) \{ t = "dark"; localStorage\.setItem\("rxd\.theme", t\); \}')
+
+    def test_appearance_is_in_settings(self):
+        html = page()
+        self.assertNotIn('id="appear0"', html)
+        dlg = re.search(r'<div id="setDlg"[^>]*>(.*?)</div></div>', html, re.S)
+        self.assertIsNotNone(dlg)
+        self.assertIn('role="dialog" aria-modal="true"', dlg[1])
+        self.assertIn('id="appear"', dlg[1])
+        self.assertIn('if (e.key === "Escape") { closeSettings();', html)
+
+    def test_no_external_requests(self):
+        html = page()
+        # nothing loads from elsewhere; the one outside link is N0NBH's credit, followed only when tapped
+        self.assertEqual(re.findall(r"""(?:src|href)\s*=\s*["']?(?:https?:)?//""", html),
+                         ['href = "https://'])
+        self.assertIn('a.href = "https://www.hamqsl.com/solar.html"', html)
+        self.assertEqual(re.findall(r"""\.src\s*=\s*["'](?:https?:)?//""", html), [])
+        self.assertEqual(re.findall(r"url\(\s*['\"]?(?:https?:)?//", html), [])
+        self.assertNotIn("@import", html)
+        # the three fonts are in the page
+        for fam in ("Archivo", "Atkinson Hyperlegible Next", "Atkinson Hyperlegible Mono"):
+            self.assertRegex(html, r'@font-face\{font-family:"%s";src:url\(data:font/woff2;base64,' % fam)
+
+    def test_no_red(self):
+        css = page().split("</style>", 1)[0].lower()
+        # errors are ink or amber with ✕ and words; the old palette's reds are gone
+        self.assertNotRegex(css, r"#b3261e|#ff6b5e|#ff3b2f|#c2185b")
+
+
+class Readout(unittest.TestCase):
+    """The switch's readout, run as the page runs it (where node is installed)."""
 
     def run_js(self, expr):
         node = shutil.which("node")
@@ -77,6 +135,36 @@ class Switch(unittest.TestCase):
         self.assertRegex(got[1], r"^✓ BYPASS \(confirmed (\S+ \d+ )?14:02\)$")
         self.assertRegex(got[2], r"^▲ UPCONVERT \(confirmed (\S+ \d+ )?14:02\)$")
         self.assertEqual(got[3:], ["BYPASS", "upconvert"])
+
+
+class Audio(unittest.TestCase):
+    """Audio on this device is for Listen and Manual; the uConsole speaker
+    starts muted and Unmute is always there to turn it up."""
+
+    def test_audio_card_is_listen_and_manual_only(self):
+        html = page()
+        card = re.search(r'<section [^>]*id="listenCard"[^>]*>', html)[0]
+        self.assertIn('data-v="listen manual"', card)
+        # nor does the wide layout place it in a Digital column
+        digital = re.search(r"\n  digital: \[.*?\]\],", html, re.S)[0]
+        self.assertNotIn("listenCard", digital)
+        # nothing brings it back on the Digital view, and a stream left
+        # playing there is stopped, as no card shows it
+        self.assertNotIn('$("listenCard").hidden = false', html)
+        self.assertNotIn("body[data-view=digital] #listenCard", html)
+        self.assertIn('if (v === "digital" && A.on) stopListen();', html)
+
+    def test_mute_button_unmutes_a_muted_speaker(self):
+        html = page()
+        render = re.search(r"\nfunction renderMute\(\) \{.*?\n\}", html, re.S)[0]
+        # never disabled just because the speaker is at 0: that's Unmute
+        self.assertNotIn("volume === 0", render)
+        self.assertIn('"Unmute uConsole speaker (muted; to "', render)
+        self.assertIn("function muted() { return !!st && !(st.volume > 0); }", html)
+        # rxd restarts muted on a switch; the page doesn't carry a mute itself
+        finish = re.search(r"\nfunction finishSwitch\(\) \{.*?\n\}", html, re.S)[0]
+        self.assertNotIn("volume", finish)
+        self.assertIn("The uConsole speaker starts muted", html)
 
 
 if __name__ == "__main__":

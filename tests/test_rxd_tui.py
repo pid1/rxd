@@ -1780,6 +1780,14 @@ class Drawing(unittest.TestCase):
         self.assertIn("has not come back after 25 seconds", app.message)
         self.assertEqual(app.p.reloads, 1)
 
+    def test_m_unmutes_the_speaker_rxd_started_muted(self):
+        app = app_on("noaa")
+        app.p.status["volume"] = 0.0          # how rxd starts it
+        self.assertIn("Speaker Muted (M unmutes)", frame(app).text())
+        app.key(ord("M"))
+        self.assertEqual(app.p.sent, [{"volume": 0.5}])
+        self.assertIn("until rxd next starts", app.message)
+
     def test_mute_survives_a_switch(self):
         now = [100.0]
         app = app_on("fm-105.3", clock=lambda: now[0])
@@ -2230,7 +2238,7 @@ class RealProgram(unittest.TestCase):
         tui.keys(b"M")
         self.assertTrue(tui.wait_for("Speaker Muted (M restores 20 %)"), tui.vt.text())
         self.quit_cleanly(tui)
-        self.assertEqual(fake.posts[-2:], [{"volume": 0.0}, {"volume": 0.2}])  # given back on quit
+        self.assertEqual(fake.posts[-1], {"volume": 0.0})  # muted stays muted on quit
 
     def test_switch_through_a_real_drop(self):
         fake = self.fake("ghostnet", drop=2.0)

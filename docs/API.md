@@ -62,7 +62,7 @@ What rxd is doing. Clients poll it, about twice a second.
 | `gain_auto` | bool | Automatic RF gain on |
 | `gain_loop` | object | Automatic gain's state: `state`, `reason`, `floor_db`, `margin_db`, `rms_dbfs`, `clip`, `steps`, `cpu` |
 | `gains` | list of numbers | The tuner's gain steps, dB |
-| `volume` | number | 0 to 4; the speaker only, never the decoders |
+| `volume` | number | 0 to 4; the speaker only, never the decoders or `/audio`. 0 (muted) whenever rxd starts, whatever the profile says |
 | `squelch` | number or null | Level squelch, dBFS; null is off |
 | `squelch_open` | bool | Audio passing now |
 | `audio` | object | Listening clean-up: `auto`, `nr`, `nr_setting` (null is by mode), `filter`, `norm`, `limit`, `squelch`, `active` (the stages running), `squelch_open`, `norm_gain_db`, `cpu` |
@@ -179,7 +179,7 @@ Changes tuning now. Any of these fields; the answer is the new status.
 | `bandwidth` | number, Hz | over 0 |
 | `gain_db` | number | dB, set on the dongle as its nearest gain step; turns automatic gain off |
 | `gain_auto` | bool | |
-| `volume` | number | 0 to 4 |
+| `volume` | number | 0 to 4; the speaker's, until rxd next starts (it always starts at 0) |
 | `squelch` | number or null | -150 to 0 dBFS; null turns it off |
 | `wspr_report` | bool | report WSPR spots to WSPRnet |
 | `hd_program` | int | 0 (HD1) to 7 (HD8): the HD Radio program; changing it restarts nrsc5 |
@@ -202,8 +202,16 @@ The captured band, about 5 times a second: `bins` (512 numbers, dB),
 `radio`'s profiles: `{"active": NAME, "profiles": [...]}`, each with `name`,
 `description`, `freq`, `mode`, `upconvert` (bool: through the upconverter),
 `js8` (bool), `decoder`, `band` (`"40m"` or null), `plan` (bool: the band plan
-may pick it) and `saved` (bool: has saved state). `503` when `radio` can't be
-run.
+may pick it), `group` and `saved` (bool: has saved state). `503` when `radio`
+can't be run.
+
+`group` (added in rxd 0.6.0) is where a client lists the profile:
+`Favorites` (the station file's own), `Ham calling` (`vhf`, `uhf`), `Weather`
+(NOAA WX1 to WX7), `GMRS and FRS`, `CB`, `JS8` and `WSPR` (by decoder); a
+profile saved under a new name with `radio save` is `Broadcast FM` (WFM),
+`AM`, `JS8` or `WSPR` by what it is, else `Favorites`. A client meeting a
+group it doesn't know lists it anyway, after the ones it does. An older rxd
+sends no `group`; the browser UI then groups by mode as it used to.
 
 ## POST /api/v1/profile
 

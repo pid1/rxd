@@ -26,4 +26,8 @@ Sadr: off. The owner keeps this repo out of Sadr's runs.
   and local profiles go in the station file (docs/station.md); a machine's
   own commands go in `radio-CMD` extensions.
 - **The web UI** stays one self-contained file with no external requests.
-  Status is never shown by colour alone; Day, Dark and Night (red) all work.
+  Status is never shown by colour alone; Light and Dark (and Automatic, which
+  follows the OS) both work. It is on the Cygnus design system's tokens and
+  fonts, embedded. There is no Night (red) theme: Win's call, 2026-11-23, with
+  the Cygnus redesign, since the UI is used over the network on a desktop
+  browser or a phone, not at the receiver in the dark.

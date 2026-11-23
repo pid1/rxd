@@ -18,7 +18,7 @@
 
 ## What is rxd?
 
-rxd is a small receiver daemon for an RTL-SDR, written in Python. It tunes one channel, plays it to a speaker, and decodes JS8 and WSPR from it. It reports WSPR spots to WSPRnet, picks the band itself, and maps the stations it hears on offline tiles.
+rxd is a small receiver daemon for an RTL-SDR, written in Python. It tunes one channel, streams it to your phone or desktop browser, and decodes JS8 and WSPR from it. It reports WSPR spots to WSPRnet, picks the band itself, and maps the stations it hears on offline tiles.
 
 It is receive only. Nothing in it transmits. It runs on a Raspberry Pi CM4 (it was written on a ClockworkPi uConsole), needs only Python 3.11 with numpy and scipy, and is controlled over a documented HTTP API.
 
@@ -28,18 +28,18 @@ It is receive only. Nothing in it transmits. It runs on a Raspberry Pi CM4 (it w
 2. Every two minutes rxd records a slot and runs `wsprd` on it. The spots go to WSPRnet under your call and grid.
 3. You set Auto to listen for JS8 instead. rxd decodes it itself. Heartbeats and CQs carry a grid, so those stations land on the map, beside the WSPR spots.
 4. Every half hour, by default, it looks again. When another band scores clearly better, rxd switches to it.
-5. You open the web UI on your phone and press **Listen on this device**.
+5. You open the web UI on your phone, pick a station in the Listen view and press **Listen on this device**.
 
 ## What it does
 
-- **Receives one channel** from one RTL-SDR: USB, LSB, AM, FM or WFM (in mono), to a PipeWire or PulseAudio sink.
+- **Receives one channel** from one RTL-SDR: USB, LSB, AM, FM or WFM (in mono), to a PipeWire or PulseAudio sink. That speaker starts muted every time rxd starts or switches; the audio is for the device listening over the network.
 - **Plays HD Radio** on FM broadcast stations when [nrsc5](https://github.com/theori-io/nrsc5) is installed: analog first, then HD1 once the digital signal is clean, lined up so the switch is seamless, and back to analog when it fades. HD2 and HD3 too, with the station's name and what's playing.
 - **Decodes JS8 itself**, with its own decoder, in all four speeds: normal, fast, turbo and slow (turbo is off by default). No JS8Call code is used.
 - **Decodes WSPR** with `wsprd` and reports the spots to WSPRnet as your call at your grid. Spots that can't be sent wait for the next slot.
 - **Picks the band itself** on Auto: from the band conditions, the sun at your grid and what it has heard at this hour. Without internet it scans the bands and keeps the counts.
 - **Maps the stations it hears** on offline tiles, with great-circle paths. A station sits at the centre of the grid it sent, or where the offline callsign database places it.
 - **Sets its own RF gain** from the raw IQ, and cleans up the audio for listening: squelch, hum filter, noise reduction, even loudness and a limiter. The decoders always get the audio untouched.
-- **Plays to your phone.** The web UI streams the audio to the browser, and `rxd-tui` plays it on the machine it runs on.
+- **Plays to your phone.** The web UI streams the audio to the browser (in its Listen and Manual views), and `rxd-tui` plays it on the machine it runs on. Muting the receiver's own speaker never silences the stream.
 - **Switches with one command.** `radio NAME` brings a profile up ready to listen, and each one resumes where you left it.
 - **Takes its grid from a GPS** through gpsd, once the fix is steady, and keeps only the 6-character grid.
 - **Says when the clock is off.** JS8 and WSPR fail silently past about 2 s of error, so rxd shows what chrony says.
@@ -99,7 +99,7 @@ Install rxd (https://github.com/pid1/rxd) on this Raspberry Pi. Ask me before an
 
 rxd comes with two **reference clients**. Neither is the only way in.
 
-- **The web UI** (`clients/web/index.html`), served by rxd at `http://HOST:8073/`. One self-contained page with no external requests, in Day, Dark and Night (red) themes, sized for a phone up to a desktop.
+- **The web UI** (`clients/web/index.html`), served by rxd at `http://HOST:8073/`. One self-contained page with no external requests, in Light and Dark (Automatic follows the device), two columns on a desktop and a tab bar on a phone. Listen has built-in NOAA weather, GMRS/FRS and CB channels alongside your own stations.
 - **`rxd-tui`** (`clients/tui/rxd_tui.py`), for a terminal, with the same three views. It can play the audio on its own machine.
 
 Everything they do goes through the documented **[HTTP API](docs/API.md)**, version 1, under `/api/v1/`: status, tuning, the spectrum, profiles, JS8 decodes, WSPR spots, the station map, the band plan and the audio stream. Use either client, use any other, or build your own against the API. Both check the API version rxd reports, and say plainly when they reach an rxd they don't understand.
@@ -116,4 +116,4 @@ Everything they do goes through the documented **[HTTP API](docs/API.md)**, vers
 
 ## License
 
-BSD 3-Clause. Made by Jonathan Roemer. See [LICENSE](LICENSE). The JSC word table the installer fetches is JS8Call's (GPL-3) and is never in this repository.
+BSD 3-Clause. Made by Jonathan Roemer. See [LICENSE](LICENSE). The JSC word table the installer fetches is JS8Call's (GPL-3) and is never in this repository. The web UI embeds the Archivo, Atkinson Hyperlegible Next and Atkinson Hyperlegible Mono fonts, under the SIL Open Font License 1.1: see [LICENSES/OFL-1.1.txt](LICENSES/OFL-1.1.txt).
