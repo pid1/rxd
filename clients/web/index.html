@@ -1535,7 +1535,7 @@ function renderProfiles() {
     if (!profiles || !ls.length) mk("lPickL", ls, null); else renderStations(ls);
   }
 }
-// The group a profile is listed under: radio's "group" (rxds after 0.5.2),
+// The group a profile is listed under: radio's "group" (rxd 0.6.0 and later),
 // else by its mode, as older rxds were.
 const GROUP_ORDER = ["Favorites", "Weather", "Ham calling", "GMRS and FRS", "CB", "Broadcast FM", "VHF · UHF", "AM", "JS8", "WSPR"];
 const CHANNEL_GROUPS = ["Weather", "GMRS and FRS", "CB"];

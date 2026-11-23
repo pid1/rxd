@@ -205,7 +205,7 @@ The captured band, about 5 times a second: `bins` (512 numbers, dB),
 may pick it), `group` and `saved` (bool: has saved state). `503` when `radio`
 can't be run.
 
-`group` (added after rxd 0.5.2) is where a client lists the profile:
+`group` (added in rxd 0.6.0) is where a client lists the profile:
 `Favorites` (the station file's own), `Ham calling` (`vhf`, `uhf`), `Weather`
 (NOAA WX1 to WX7), `GMRS and FRS`, `CB`, `JS8` and `WSPR` (by decoder); a
 profile saved under a new name with `radio save` is `Broadcast FM` (WFM),

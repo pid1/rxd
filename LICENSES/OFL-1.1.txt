@@ -75,7 +75,7 @@ Name(s) unless explicit written permission is granted by the corresponding
 Copyright Holder. This restriction only applies to the primary font name as
 presented to the users.
 
-4) The name(s) of the Copyright Holder(s) and the Author(s) of the Font
+4) The name(s) of the Copyright Holder(s) or the Author(s) of the Font
 Software shall not be used to promote, endorse or advertise any
 Modified Version, except to acknowledge the contribution(s) of the
 Copyright Holder(s) and the Author(s) or with their explicit written
